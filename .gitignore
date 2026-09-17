@@ -141,3 +141,18 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
+
+# Java / Spring Boot
+target/
+*.class
+.idea/
+*.iml
+
+# Python
+__pycache__/
+*.pyc
+venv/
+
+# Env files
+.env
+.env.local
