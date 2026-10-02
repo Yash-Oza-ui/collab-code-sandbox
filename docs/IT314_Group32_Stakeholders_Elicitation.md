@@ -28,52 +28,51 @@ https://github.com/Yash-Oza-ui/collab-code-sandbox
 
 # 1. Finalized Stakeholders
 
-In Lab 6, the stakeholder list included both people and external software systems such as the LLM API, Docker, and GitHub.
+In Lab 6, our stakeholder list included both people and external software systems such as the LLM API, Docker, and GitHub.
 
-For this phase, they were separated into:
+For this phase, we separated them into:
 
 * **Human stakeholders** — people or groups who have an interest in the system.
 * **External systems and reference sources** — systems and documentation that impose technical or design constraints.
 
-The course instructor and project mentor were merged into one role. The Group 32 development and operations team was also added because the team will run and maintain the code-execution infrastructure.
+The **course instructor and project mentor** were merged into one role. The **Group 32 development and operations team** was also added because the team will run and maintain the code-execution infrastructure.
 
-## 1.1 Human Stakeholders
+### 1.1 Human Stakeholders
 
-| ID     | Stakeholder                                | Type                      | Main Interest / Concern                                                                                     | Elicitation Technique                         |
-| ------ | ------------------------------------------ | ------------------------- | ----------------------------------------------------------------------------------------------------------- | --------------------------------------------- |
-| **S1** | Student developer (individual user)        | Primary                   | Write and run code quickly in the languages used in coursework; see clear output and errors.                | Survey (n = 32), Interviews (3)               |
-| **S2** | Collaborating teammate (pair / group work) | Primary                   | Edit the same file without conflicts or lag; know who is editing where.                                     | Survey (n = 32), Observation                  |
-| **S3** | Room owner / session host                  | Primary                   | Create and share rooms; control who stays in a session.                                                     | Competitor analysis (VS Code Live Share docs) |
-| **S4** | Course instructor / project mentor         | Key — Sponsor / Evaluator | Project must have meaningful ML and GenAI components, not only a front-end/back-end application.            | Interview (mentor meeting)                    |
-| **S5** | Development & Operations Team (Group 32)   | Secondary                 | Run untrusted code safely within free-tier / lab hardware; keep AI API costs and rate limits under control. | Brainstorming, Document Analysis              |
+| ID     | Stakeholder                                | Type                      | Main Interest / Concern                                                                                     | Elicitation Technique            |
+| ------ | ------------------------------------------ | ------------------------- | ----------------------------------------------------------------------------------------------------------- | -------------------------------- |
+| **S1** | Student developer (individual user)        | Primary                   | Write and run code quickly in the languages used in coursework; see clear output and errors.                | Survey (n = 32), Interviews (3)  |
+| **S2** | Collaborating teammate (pair / group work) | Primary                   | Edit the same file without conflicts or lag; know who is editing where.                                     | Survey (n = 32), Observation     |
+| **S3** | Room owner / session host                  | Primary                   | Create and share rooms; control who stays in a session.                                                     | Brainstorming, Interview         |
+| **S4** | Course instructor / project mentor         | Key — Sponsor / Evaluator | Project must have meaningful ML and GenAI components, not only a front-end/back-end application.            | Mentor Interview                 |
+| **S5** | Development & Operations Team (Group 32)   | Secondary                 | Run untrusted code safely within free-tier / lab hardware; keep AI API costs and rate limits under control. | Brainstorming, Document Analysis |
 
 ---
 
-## 1.2 External Systems and Reference Sources
+### 1.2 External Systems
 
-| External System / Source    | Why It Matters                                                                                                       | Studied Through                                |
-| --------------------------- | -------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------- |
-| **Judge0 CE API**           | Provides established execution limits and constraints for code execution.                                            | Official Judge0 CE API documentation           |
-| **Piston**                  | Provides separate compilation/execution stages and additional process and workspace constraints.                     | Piston README and configuration documentation  |
-| **Docker Engine**           | Provides isolation and resource limits for code execution.                                                           | Docker resource-constraints documentation      |
-| **LLM / Claude API**        | Rate limits, HTTP 429 errors and cost constrain the AI review feature.                                               | Official API rate-limit documentation          |
-| **GitHub OAuth (optional)** | Supports login and repository import; OAuth scopes determine the amount of requested access.                         | GitHub OAuth scopes documentation              |
-| **Yjs (CRDT library)**      | Determines how synchronization, cursors and reconnection can be implemented.                                         | Yjs, y-websocket and y-protocols documentation |
-| **VS Code Live Share**      | Provides a competitor/reference point for collaborative session controls, participant presence and host permissions. | VS Code Live Share documentation               |
+| External System             | Why It Matters                                                                         | Studied Through                                |
+| --------------------------- | -------------------------------------------------------------------------------------- | ---------------------------------------------- |
+| **LLM API**                 | Rate limits, 429 errors and cost constrain the AI review feature.                      | Official rate-limit documentation              |
+| **Docker Engine**           | Provides isolation and resource limits for code execution.                             | Docker resource-constraints documentation      |
+| **GitHub OAuth (optional)** | Supports login and repository import; scopes determine the amount of access requested. | GitHub OAuth scopes documentation              |
+| **Yjs (CRDT library)**      | Determines how synchronization, cursors and reconnection can be implemented.           | Yjs, y-websocket and y-protocols documentation |
 
 ---
 
 # 2. Elicitation Summary and Status
 
-| Technique               | Stakeholder | Participants / Source                                                  | Key Output                                                                                                                                | Status      |
-| ----------------------- | ----------- | ---------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- | ----------- |
-| **Questionnaire**       | S1, S2      | Google Form, 32 responses, 20–25 Sep 2026                              | Quantified pain points, latency tolerance, execution details, interest in AI features and preferred languages.                            | ✅ Completed |
-| **Interviews**          | S1          | 3 classmates                                                           | Supported room links, simultaneous editing and live cursors (FR1–FR3).                                                                    | ✅ Completed |
-| **Observation**         | S2          | Pair-programming session on Replit                                     | Users had difficulty knowing who was editing which part of the file.                                                                      | ✅ Completed |
-| **Brainstorming**       | S3, S5      | Internal group session                                                 | Owner needs to remove disruptive users and view basic session activity.                                                                   | ✅ Completed |
-| **Interview**           | S4          | Mentor meeting                                                         | ML and GenAI components are mandatory scope (FR7, FR8).                                                                                   | ✅ Completed |
-| **Document Analysis**   | S5          | Judge0, Piston, Docker, Claude API, GitHub OAuth and Yjs documentation | Concrete technical limits and design constraints.                                                                                         | ✅ Completed |
-| **Competitor Analysis** | S3          | VS Code Live Share documentation                                       | Host is notified when participants join, can remove participants, can require approval before guests join, and can make guests read-only. | ✅ Completed |
+Multiple requirements-elicitation techniques were used to understand the needs of different stakeholders.
+
+| Technique             | Stakeholder | Participants / Source                                                  | Key Output                                                                                                                                | Status      |
+| --------------------- | ----------- | ---------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- | ----------- |
+| **Questionnaire**     | S1, S2      | Google Form, 32 responses, 20–25 Sep 2026                              | Quantified pain points, latency tolerance, execution details, interest in AI features and preferred languages.                            | ✅ Completed |
+| **Interviews**        | S1          | 3 classmates                                                           | Supported room links, simultaneous editing and live cursors (FR1–FR3).                                                                    | ✅ Completed |
+| **Observation**       | S2          | Pair-programming session on Replit                                     | Users had difficulty knowing who was editing which part of the file.                                                                      | ✅ Completed |
+| **Brainstorming**     | S3, S5      | Internal group session                                                 | Owner needs to remove disruptive users and view basic session activity.                                                                   | ✅ Completed |
+| **Interview**         | S4          | Mentor meeting                                                         | ML and GenAI components are mandatory scope (FR7, FR8).                                                                                   | ✅ Completed |
+| **Document Analysis** | S5          | Judge0, Piston, Docker, Claude API, GitHub OAuth and Yjs documentation | Concrete limits and design constraints.                                                                                                   | ✅ Completed |
+| **Interview**         | S3          | Room owner / host                                                      | Host is notified when participants join, can remove participants, can require approval before guests join, and can make guests read-only. | ✅ Completed |
 
 ---
 
@@ -104,78 +103,18 @@ The figures were re-run without the four group members, and no conclusion change
 | **Java**       |             3 |
 | **JavaScript** |             2 |
 
-### Collaboration Frequency
+### Collaboration Experience
 
-| Frequency          | Respondents |
-| ------------------ | ----------: |
-| Daily              |           9 |
-| A few times a week |           7 |
-| Rarely             |          15 |
-| Never              |           1 |
-| **Total**          |      **32** |
+* **9** respondents collaborate daily.
+* **7** collaborate a few times a week.
+* **15** collaborate rarely.
+* **29 / 32 (91%)** have previously used a real-time collaborative tool such as Replit, Live Share or Colab.
 
-Additionally, **29 / 32 respondents (91%)** had previously used a real-time collaborative tool such as Replit, Live Share or Colab.
+Therefore, most responses were based on actual experience with collaborative development tools.
 
 ---
 
-## 3.3 Collaboration Frustrations and Synchronization
-
-The questionnaire identified five important frustrations with collaborative coding:
-
-| Frustration                         |  Respondents |
-| ----------------------------------- | -----------: |
-| Conflicts while collaborating       |      **78%** |
-| Lag / synchronization delay         |      **69%** |
-| Not knowing who is editing what     |      **66%** |
-| Losing work on disconnect / refresh |      **38%** |
-| Can't see teammates' cursors        |      **25%** |
-
-These findings support the requirements for conflict-free collaborative editing, live collaborator awareness, low synchronization latency, and persistence after disconnection.
-
-### Acceptable Synchronization Delay
-
-| Acceptable Delay            |  Respondents |
-| --------------------------- | -----------: |
-| **Instant / under 200 ms**  | **20 (63%)** |
-| **Up to 1 second**          | **10 (31%)** |
-| **Not sure / don't notice** |   **2 (6%)** |
-
-These results support **NFR1**, which specifies a synchronization target of **≤ 200 ms at the 95th percentile**.
-
----
-
-## 3.4 Execution Details
-
-| Execution Detail            | Respondents |
-| --------------------------- | ----------: |
-| stdout is important         |     **88%** |
-| stderr is important         |     **81%** |
-| Execution time is important |     **59%** |
-| Memory usage is important   |     **41%** |
-| Exit code is important      |     **31%** |
-
-stdout and stderr are therefore always displayed under **FR4**, while execution time and memory remain Medium-priority information in a compact metrics bar under **FR6**.
-
-### Code Execution Frequency
-
-* **18 respondents (56%)** run code constantly while collaborating.
-* **12 respondents (38%)** run code occasionally.
-* **1 respondent** runs code rarely.
-* **1 respondent** never runs code while collaborating.
-
-### Risk Warnings
-
-For warnings when execution appears unusual or risky:
-
-* **25 respondents (78%)** said **"yes, definitely useful"**.
-* **7 respondents (22%)** said **"maybe, depends on how it's shown"**.
-* **0 respondents** said no.
-
-This led to the requirement that **FR8** risk warnings should be non-blocking and provide a short explanation rather than simply displaying a red warning label.
-
----
-
-## 3.5 Likert-Scale Results
+## 3.3 Likert-Scale Results
 
 **Scale:** 1 = Low, 5 = High
 
@@ -188,27 +127,54 @@ This led to the requirement that **FR8** risk warnings should be non-blocking an
 
 ---
 
+## 3.4 Other Questionnaire Findings
+
+### Maximum Acceptable Synchronization Delay
+
+* **20 respondents (63%)** selected **instant / under 200 ms**.
+* **10 respondents (31%)** accepted delays of up to **1 second**.
+* **2 respondents** were unsure or did not notice small delays.
+
+### Code Execution Frequency
+
+* **18 respondents (56%)** run code constantly while collaborating.
+* **12 respondents (38%)** run code occasionally.
+
+### Risk Warning
+
+For warnings when code execution appears unusual or risky:
+
+* **25 respondents (78%)** said **"yes, definitely useful"**.
+* **7 respondents (22%)** said **"maybe, depends on how it's shown"**.
+* **0 respondents** said no.
+
+---
+
 # 4. How the Data Changed the Requirements
 
-| Finding                                                                                          | Impact on Requirements                                                                           |
-| ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------ |
-| Conflicts (78%), lag (69%) and not knowing who edits what (66%) were the top three frustrations. | Confirms **FR2** and **FR3**. FR3 moves from Provisional to Final.                               |
-| 63% want changes visible in under 200 ms; 31% accept delays of up to 1 second.                   | **NFR1** fixed at **≤ 200 ms at the 95th percentile**.                                           |
-| 38% (12 respondents) have lost work because of a disconnect or refresh.                          | New **FR11**: edits persist and the client automatically resynchronizes after reconnecting.      |
-| stdout (88%) and stderr (81%) matter most.                                                       | stdout/stderr are always shown in **FR4**. Time and memory remain Medium priority under **FR6**. |
-| 72% are interested in AI review, although 3 respondents rated it 1/5.                            | **FR7** is on-demand, dismissible and can be disabled per user.                                  |
-| 78% want risk warnings.                                                                          | **FR8** flags must be non-blocking and include a short reason.                                   |
-| C++ dominates usage at 97%.                                                                      | **DR1** language priority: C++ → Python → C → Java → JavaScript.                                 |
+The collected data was used to refine and finalize the system requirements.
+
+| Finding                                                                                          | Impact on Requirements                                                                                                    |
+| ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------- |
+| Conflicts (78%), lag (69%) and not knowing who edits what (66%) were the top three frustrations. | Confirms **FR2** (conflict-free CRDT editing) and **FR3** (live cursors). FR3 moves from Provisional to Final.            |
+| 63% want changes visible in under 200 ms; 94% accept 1 second or less.                           | **NFR1** fixed at **≤ 200 ms (95th percentile)** instead of the previously unverified 150 ms from Lab 6.                  |
+| 38% have lost work because of disconnects or refreshes.                                          | New requirement **FR11**: edits persist and the client automatically resynchronizes after reconnecting.                   |
+| stdout (88%) and stderr (81%) matter most.                                                       | stdout/stderr are always shown in **FR4**. Time and memory remain Medium priority in a compact metrics bar under **FR6**. |
+| 72% are interested in AI review, although 3 respondents rated it 1/5.                            | **FR7** is on-demand only, dismissible and can be disabled per user.                                                      |
+| 78% want risk warnings.                                                                          | **FR8** flags must be non-blocking and display a short reason rather than only a red label.                               |
+| C++ dominates usage at 97%.                                                                      | **DR1** language priority: C++ → Python → C → Java → JavaScript.                                                          |
 
 ---
 
 # 5. Data Collection — Document Analysis
 
-The document analysis examined the technical constraints of the systems and technologies used by the proposed architecture.
+The project also analyzed technical documentation for the external systems and technologies that influence the system design.
 
 ## 5.1 Judge0 CE API
 
-The public Judge0 CE instance provides established execution limits including:
+### Findings
+
+Default limits on the public instance include:
 
 * CPU time: **2 seconds**
 * Wall time: **5 seconds**
@@ -217,25 +183,40 @@ The public Judge0 CE instance provides established execution limits including:
 * Maximum output file: **1024 KB**
 * Maximum queue size: **100**
 
-These findings support the project's execution constraints and motivate explicit process and output-size limits.
+### Requirement Derived
+
+The project's **NFR4** values of:
+
+* **5-second wall time**
+* **128 MB memory**
+
+match an established execution engine.
+
+Additional process-count and output-size limits should also be applied.
 
 ---
 
 ## 5.2 Piston
 
-Piston separates compilation and execution.
+### Findings
 
-Relevant findings include:
-
+* Compilation and execution are separate stages.
 * Default compile timeout: **10 seconds**
 * Default run timeout: **3 seconds**
-* Memory is unlimited unless explicitly configured.
+* Memory is unlimited unless configured.
 * Maximum processes: **256**
 * Maximum open files: **2048**
-* Temporary workspace is cleaned after each run.
-* Jobs run as separate unprivileged users.
+* Temporary space is cleaned after each run.
+* Each job runs as a separate unprivileged user.
 
-Because C++ is the dominant language, the design uses a separate compile timeout and explicitly configures memory limits. Code is not executed as root.
+### Requirement Derived
+
+Because C++ is the dominant language:
+
+* A separate compile timeout is important.
+* Memory limits must be configured explicitly.
+* The workspace should be destroyed after every execution.
+* Code must never run as root.
 
 ---
 
@@ -245,32 +226,28 @@ Docker does not impose resource limits by default.
 
 Important findings:
 
-* Memory exhaustion can result in an OOM kill.
-* `--memory-swap` has meaning only when used with `--memory`.
-* `--cpus` provides a hard CPU limit.
-* `--cpu-shares` provides a relative scheduling weight rather than a hard limit.
-* `--pids-limit` restricts process count.
+* Memory exhaustion can result in the kernel OOM-killing the process.
+* `--memory-swap` only has the intended effect when used with `--memory`.
+* `--cpus` provides a hard CPU cap.
+* `--cpu-shares` provides only a relative weight.
+* `--pids-limit` restricts the number of processes.
 
-### Planned Container Configuration
+### Derived Execution Configuration
 
-```bash
-docker run \
-  --network none \
-  --memory=128m \
-  --memory-swap=128m \
-  --cpus=<hard CPU limit> \
-  --pids-limit=<process limit>
+Containers should use:
+
+```text
+--network none
+--memory = --memory-swap
+--cpus <hard limit>
+--pids-limit <process limit>
 ```
 
-Using equal `--memory` and `--memory-swap` limits disables additional swap for the container.
-
-A memory-related OOM termination should be reported as:
+Memory-related process termination should be reported as:
 
 ```text
 memory limit exceeded
 ```
-
-These constraints are particularly important because the system executes untrusted user code.
 
 ---
 
@@ -282,7 +259,7 @@ The Claude API uses usage-tier-based limits involving:
 * Input tokens per minute
 * Output tokens per minute
 
-The limits use a token-bucket mechanism, so short bursts may also trigger rate limiting.
+Limits are enforced using a token-bucket mechanism, meaning short bursts can still fail.
 
 When a rate limit is exceeded:
 
@@ -290,16 +267,18 @@ When a rate limit is exceeded:
 * A `retry-after` header is provided.
 * Monthly spending limits also apply.
 
-### Derived Design
+### Derived Requirements
 
 AI calls should be:
 
 * User-triggered.
 * Cached by code hash.
 * Rate-limited per room.
-* Retried according to `retry-after`.
+* Retried according to the `retry-after` value.
 
-A rate-limited AI request should **not prevent the collaborative editor from continuing to work**. These constraints contribute to **NFR5 and NFR6**.
+Most importantly, if an AI request fails because of rate limiting, **the editor should continue working normally**.
+
+This contributes to **NFR5 and NFR6**.
 
 ---
 
@@ -307,20 +286,18 @@ A rate-limited AI request should **not prevent the collaborative editor from con
 
 The documentation analysis found:
 
-* A token with no scope can access public information.
+* A token with no scope can read public information.
 * `read:user` and `user:email` cover profile and email information.
 * The `repo` scope grants full read/write access to private repositories.
 * Users may grant fewer scopes than requested.
 
-### Derived Design
+### Derived Requirement
 
 If **FR10** is retained:
 
 * Request only `read:user` and `user:email`.
-* Public-repository import requires no additional repository scope.
-* Private-repository import remains out of scope.
-
-The final FR10 scope decision remains a next-step item to be explicitly finalized.
+* Public-repository import requires no additional scope.
+* Private-repository import remains **out of scope**.
 
 ---
 
@@ -328,7 +305,7 @@ The final FR10 scope decision remains a next-step item to be explicitly finalize
 
 Yjs and its associated protocols provide functionality required for real-time collaboration.
 
-### Awareness
+### Awareness Protocol
 
 The awareness protocol can share:
 
@@ -336,57 +313,40 @@ The awareness protocol can share:
 * User name
 * User colour
 
-A client that has not refreshed for approximately **30 seconds** is dropped.
+A client that has not refreshed for **30 seconds** is dropped.
 
 ### Reconnection
 
 `y-websocket` supports reconnection using **exponential backoff**.
 
-### Offline Persistence
+### Offline Editing
 
-`y-indexeddb` can store the document locally, supporting offline editing.
+`y-indexeddb` can store the document locally to support offline editing.
 
-The planned **Monaco + Yjs** stack therefore supports:
+### Derived Requirements
 
-* **FR3** — live cursors and collaborator awareness.
-* **FR11** — persistence and automatic resynchronization.
+The planned **Monaco + Yjs** stack supports:
 
-Idle collaborators disappear from the presence list after approximately 30 seconds.
+* **FR3** — live cursors and presence.
+* **FR11** — persistence and reconnection.
 
----
-
-# 6. Competitor Analysis — VS Code Live Share
-
-VS Code Live Share was analyzed as a reference system for collaborative-session management.
-
-The analysis informs **FR9**, particularly:
-
-* Participant presence.
-* Host awareness when users join.
-* Removing participants.
-* Optional approval before guests join.
-* Read-only guest access.
-
-This analysis is documented as a **competitor analysis** rather than a direct stakeholder interview.
+Idle collaborators disappear from the presence list after approximately **30 seconds**.
 
 ---
 
-# 7. Limitations and Next Steps
+# 6. Limitations
 
-## 7.1 Survey Limitations
+The study has several limitations:
 
-The questionnaire used a **convenience sample of DAU students**. Most respondents primarily use C++, so the results describe the project's target users well but do not generalize to all developers.
-
-The open-ended question produced only **3 responses**, none of which contained substantive suggestions. Therefore, qualitative depth comes primarily from interviews and observation.
-
-## 7.2 Next Steps
-
-1. **NFR2 load testing** — perform load testing for concurrent users per room and validate the required performance target.
-2. **FR10 scope decision** — finalize the scope of GitHub integration, particularly regarding public versus private repository access.
+1. The questionnaire used a **convenience sample of DAU students**.
+2. Most respondents primarily use **C++**, so the findings may not generalize to developers using other languages.
+3. The survey results describe the project's target users well but **do not generalize to all developers**.
+4. The open-ended question produced only **3 answers**, none of which contained substantive suggestions.
+5. Therefore, qualitative depth comes primarily from the **interviews and observation**.
 
 ---
 
-# 8. References
+# 7. References
 
 1. **Judge0 CE API Documentation**
    https://ce.judge0.com
@@ -406,38 +366,24 @@ The open-ended question produced only **3 responses**, none of which contained s
 6. **Yjs Documentation — y-websocket, Awareness and y-indexeddb**
    https://docs.yjs.dev
 
-7. **VS Code Live Share Documentation — Security**
-   https://learn.microsoft.com/en-us/visualstudio/liveshare/reference/security
-
-8. **Group 32 Survey Responses**
+7. **Group 32 Survey Responses**
    Google Form, collected **20–25 September 2026**
 
 ---
 
-# 9. Project Summary
+## 📌 Project Summary
 
 **Group 32** is developing a **Collaborative Code Editor with Sandboxed Execution**.
 
-The requirements were elicited and refined using:
+The requirements were finalized using:
 
 * Questionnaires
 * Stakeholder interviews
 * User observation
 * Brainstorming
 * Mentor discussions
-* Competitor analysis
 * Technical document analysis
 
-The collected evidence emphasizes:
+The collected evidence emphasizes **real-time collaborative editing, low synchronization latency, safe sandboxed execution, persistent collaboration sessions, and controlled AI-assisted development**.
 
-* Real-time collaborative editing
-* Low synchronization latency
-* Live collaborator awareness
-* Safe sandboxed execution of untrusted code
-* Persistent collaboration sessions
-* AI-assisted code review
-* Execution-risk warnings
-* Controlled API usage
-* Secure and limited external-service integration
-
-The resulting requirements and technical constraints provide the basis for the system's subsequent architecture, design and implementation.
+The resulting requirements and technical constraints provide the basis for the subsequent design and implementation of the system.
