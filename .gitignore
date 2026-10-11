@@ -152,7 +152,7 @@ target/
 __pycache__/
 *.pyc
 venv/
-
+.pytest_cache/
 # Env files
 .env
 .env.local
