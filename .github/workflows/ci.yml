@@ -1,0 +1,222 @@
+# CI for collab-code-sandbox (T-09, NFR11, NFR10)
+#
+# One job per service folder. A job whose folder is still a placeholder
+# (no package.json / requirements.txt / pom.xml / build.gradle yet) passes
+# with a "skipped" notice, so README-only PRs never go red.
+# A job switches itself on automatically as soon as its build file lands.
+#
+# The final "summary" job is the single required status check for `main`.
+# Its `name:` MUST match the check name required in
+# Settings -> Branches -> main branch protection, character for character.
+#
+# No secrets in this file. Sensitive values come from GitHub Actions secrets.
+
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------- client
+  client:
+    name: client
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: client
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Detect client build
+        id: detect
+        run: |
+          if [ -f package.json ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+            if [ -f package-lock.json ]; then echo "lock=true" >> "$GITHUB_OUTPUT"; else echo "lock=false" >> "$GITHUB_OUTPUT"; fi
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=client skipped::client/ has no package.json yet (placeholder). Skipping build and test."
+          fi
+
+      - name: Set up Node.js (with npm cache)
+        if: steps.detect.outputs.present == 'true' && steps.detect.outputs.lock == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+
+      - name: Set up Node.js (no lock file yet, no cache)
+        if: steps.detect.outputs.present == 'true' && steps.detect.outputs.lock != 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        if: steps.detect.outputs.present == 'true'
+        run: |
+          if [ -f package-lock.json ]; then npm ci; else npm install; fi
+
+      - name: Build
+        if: steps.detect.outputs.present == 'true'
+        run: npm run build --if-present
+
+      - name: Test
+        if: steps.detect.outputs.present == 'true'
+        env:
+          CI: "true" # makes Jest / Vitest run once instead of watch mode
+        run: npm test --if-present
+
+  # ---------------------------------------------------------- ai-ml-service
+  ai-ml-service:
+    name: ai-ml-service
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: ai-ml-service
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Detect ai-ml-service build
+        id: detect
+        run: |
+          if [ -f requirements.txt ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+            echo "deps=ai-ml-service/requirements.txt" >> "$GITHUB_OUTPUT"
+          elif [ -f pyproject.toml ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+            echo "deps=ai-ml-service/pyproject.toml" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=ai-ml-service skipped::ai-ml-service/ has no requirements.txt or pyproject.toml yet (placeholder). Skipping build and test."
+          fi
+
+      - name: Set up Python (with pip cache)
+        if: steps.detect.outputs.present == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: ${{ steps.detect.outputs.deps }}
+
+      - name: Install dependencies
+        if: steps.detect.outputs.present == 'true'
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; else pip install .; fi
+          if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
+          pip install pytest
+
+      - name: Byte-compile (catches syntax errors)
+        if: steps.detect.outputs.present == 'true'
+        run: python -m compileall -q .
+
+      - name: Test
+        if: steps.detect.outputs.present == 'true'
+        run: |
+          # pytest exits with 5 when no tests are collected yet; treat that as a pass.
+          set +e
+          python -m pytest -q
+          code=$?
+          set -e
+          if [ "$code" -eq 5 ]; then
+            echo "::notice title=ai-ml-service::No tests collected yet."
+            exit 0
+          fi
+          exit "$code"
+
+  # ------------------------------------------------ Spring Boot services
+  # Owned by Yash (feature/T-09-ci-springboot): confirm the build command and
+  # Java version against T-02 / T-03 once those scaffolds merge.
+  spring-boot:
+    name: ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [sync-service, execution-service]
+    defaults:
+      run:
+        working-directory: ${{ matrix.service }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Detect build tool
+        id: detect
+        run: |
+          if [ -f pom.xml ]; then
+            echo "tool=maven" >> "$GITHUB_OUTPUT"
+          elif [ -f build.gradle ] || [ -f build.gradle.kts ]; then
+            echo "tool=gradle" >> "$GITHUB_OUTPUT"
+          else
+            echo "tool=none" >> "$GITHUB_OUTPUT"
+            echo "::notice title=${{ matrix.service }} skipped::${{ matrix.service }}/ has no pom.xml or build.gradle yet (placeholder). Skipping build and test."
+          fi
+
+      - name: Set up Java (Maven cache)
+        if: steps.detect.outputs.tool == 'maven'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+          cache-dependency-path: ${{ matrix.service }}/pom.xml
+
+      - name: Set up Java (Gradle cache)
+        if: steps.detect.outputs.tool == 'gradle'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+          cache-dependency-path: |
+            ${{ matrix.service }}/*.gradle*
+            ${{ matrix.service }}/**/gradle-wrapper.properties
+
+      - name: Build and test (Maven)
+        if: steps.detect.outputs.tool == 'maven'
+        run: |
+          if [ -f mvnw ]; then chmod +x mvnw && ./mvnw -B verify; else mvn -B verify; fi
+
+      - name: Build and test (Gradle)
+        if: steps.detect.outputs.tool == 'gradle'
+        run: |
+          if [ -f gradlew ]; then chmod +x gradlew && ./gradlew build --no-daemon; else gradle build --no-daemon; fi
+
+  # ---------------------------------------------------------------- summary
+  # The single required status check. Green only if every job above passed
+  # (a job that skipped because its folder is a placeholder counts as passed).
+  summary:
+    # TODO(T-09): set this to the exact required check name from
+    # Settings -> Branches -> main -> "Require status checks to pass".
+    name: build-and-test
+    if: always()
+    needs: [client, ai-ml-service, spring-boot]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check results of all jobs
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "Job results: $RESULTS"
+          for r in $RESULTS; do
+            if [ "$r" != "success" ] && [ "$r" != "skipped" ]; then
+              echo "::error::At least one CI job did not pass ($r). Open the failed job above for details."
+              exit 1
+            fi
+          done
+          echo "All CI jobs passed."

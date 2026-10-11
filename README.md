@@ -128,6 +128,17 @@ For existing Sprint 1 issues, follow the branch names already stated in their **
 
 > ❌ Direct pushes to `main` are forbidden. All changes must go through a Pull Request under the repository's branch-protection rules.
 
+## ⚙️ How CI works
+
+Every pull request to `main` runs the **CI** workflow (`.github/workflows/ci.yml`):
+
+- One job per service folder: `client`, `sync-service`, `execution-service` and `ai-ml-service`. Each job builds and tests its folder.
+- A folder that is still a placeholder (no `package.json`, `requirements.txt`/`pyproject.toml`, or `pom.xml`/`build.gradle` yet) is skipped with a notice and does not fail the run. The job switches on by itself as soon as that build file is merged.
+- The final **`build-and-test`** job is the required status check on `main`. It is green only when every job above passed, so a failing test anywhere blocks the merge.
+- Dependencies (npm, pip, Maven/Gradle) are cached to keep runs fast.
+
+To see the result, open the **Checks** tab of your PR, or run `gh pr checks <pr-number>`. If a job is red, open it, fix the failure on your branch and push again; the checks re-run automatically.
+
 ## Contributing
 
 1. Open your assigned issue and read the objective, acceptance criteria, your part, dependencies, and PR instructions. Comment `My part: ...` before starting.
