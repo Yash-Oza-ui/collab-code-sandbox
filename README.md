@@ -109,6 +109,67 @@ cd collab-code-sandbox
 
 Service-specific setup instructions will be added as scaffolds merge. Follow the shared pre-commit setup before contributing; never commit API keys or real `.env` files.
 
+### 🔐 Setup for teammates: secret scanning (do this once, before your first commit)
+
+Every commit is scanned for secrets by [gitleaks](https://github.com/gitleaks/gitleaks) through a shared pre-commit hook (NFR10, US-32). The rules live in `.pre-commit-config.yaml`, so everyone uses the same version.
+
+**1. Install pre-commit** (skip if `pre-commit --version` already works)
+
+| OS | Command |
+|---|---|
+| Windows | `py -m pip install pre-commit` |
+| macOS / Linux | `pip install pre-commit` (add `--break-system-packages` if pip refuses to install into the system Python) |
+
+On Windows, if `pre-commit` is "not recognized" after installing, use `py -m pre_commit` in place of `pre-commit` in the commands below.
+
+**2. Activate the hook in your clone** (run inside the repo folder)
+
+```bash
+git switch main
+git pull --ff-only origin main
+pre-commit install
+pre-commit --version
+```
+
+The first commit after this takes a minute or two, because pre-commit downloads and builds gitleaks once. Later commits are fast.
+
+**3. Check that it works**
+
+```bash
+pre-commit run --all-files
+```
+
+Expected: `Detect hardcoded secrets.....Passed`.
+
+**What a blocked commit looks like**
+
+If a staged change contains something that looks like a key, the commit is rejected and gitleaks prints the finding with the secret redacted:
+
+```text
+Detect hardcoded secrets.................................................Failed
+- hook id: gitleaks
+- exit code: 1
+
+Finding:     api_key = "REDACTED"
+Secret:      REDACTED
+RuleID:      generic-api-key
+File:        leak-test.txt
+Line:        1
+
+WRN leaks found: 1
+```
+
+When this happens:
+
+1. Remove the secret from the file and load it from an environment variable instead. Put real values in a local `.env` file (already in `.gitignore`) and commit only a `.env.example` with placeholder values.
+2. `git add` the fixed file and commit again.
+3. If a real key ever reached GitHub, tell the team lead and **rotate the key**. Deleting it in a later commit is not enough, because it stays in history.
+
+**Rules**
+
+- Never use `git commit --no-verify` to get past the hook. A CI scan on pull requests is planned as a backstop (T-09).
+- Before every PR, run `pre-commit run --all-files`.
+
 ---
 
 ## 🌿 Git Branch Naming Conventions
