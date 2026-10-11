@@ -8,17 +8,20 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
 /**
- * T-03 controller acceptance tests – Jay Limbasiya (feature/T-03-execution-scaffold).
+ * T-03 acceptance tests – Bhavya Vekariya (feature/T-03-execution-scaffold-limits-health).
  *
  * Covers:
- *   1. Valid request returns 200 with stdout, stderr and all result fields (T-03 AC3)
- *   2. Missing 'code' field returns 4xx (T-03 AC4)
- *   3. Missing 'language' returns 4xx (T-03 AC4)
- *   4. Unsupported language returns 4xx (T-03 AC4, DR1)
+ *   1. Health endpoint returns 200        (T-03 AC5, T-06 section 1)
+ *   2. Valid request returns 200 with     (T-03 AC3)
+ *      stdout, stderr and all result fields
+ *   3. Missing 'code' field returns 4xx  (T-03 AC4)
+ *   4. Missing 'language' returns 4xx    (T-03 AC4)
+ *   5. Unsupported language returns 4xx  (T-03 AC4, DR1)
  *
  * No Docker calls are made. All tests run offline.
  */
@@ -28,6 +31,15 @@ class RunControllerTest {
 
     @Autowired
     private MockMvc mockMvc;
+
+    // ------------------------------------------------------------------ health
+
+    @Test
+    @DisplayName("Health endpoint returns HTTP 200 (T-06 section 1)")
+    void health_returns200() throws Exception {
+        mockMvc.perform(get("/actuator/health"))
+                .andExpect(status().isOk());
+    }
 
     // ------------------------------------------------------------------ valid request
 
