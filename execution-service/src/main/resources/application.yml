@@ -1,0 +1,12 @@
+server:
+  port: 8082   # T-06 section 1: execution-service listens on 8082
+
+spring:
+  application:
+    name: execution-service
+
+# CORS: allow requests from the browser client (T-06 section 2)
+# Override with CLIENT_ORIGIN env var in production.
+app:
+  cors:
+    allowed-origin: ${CLIENT_ORIGIN:http://localhost:3000}
