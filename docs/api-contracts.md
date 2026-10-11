@@ -7,7 +7,7 @@
 **Next:** Femina Rathod (PR2: section 7, error shapes and examples), then v1 (section 8, owner token)
 **Related:** `docs/ai-ml-contract.md` (T-07, execution-service to ai-ml-service)
 
-This document fixes the endpoint paths, ports and field names the four services and the client share, so every category builds against the same shapes. v0 covers what the scaffolds and T-11 need first. Field names are final from v0: **do not rename a field after v1 without telling every consumer, and log it under "Changes".**
+This document fixes the endpoint paths, ports and field names the four services and the client share, so every category builds against the same shapes. v0 covers what the scaffolds and T-11 need first. Field names are meant to hold from here on. Until v1 is published, a field may still be renamed if every consumer is told in #dev and the change is logged under "Changes". **After v1, never rename a field without telling every consumer and logging it under "Changes".**
 
 | Section | Status in v0 |
 |---|---|
@@ -37,6 +37,7 @@ Ports and health paths are adopted from the T-08 integration stack (`docker-comp
 - Inside the Docker Compose network, services reach each other by service name (for example `http://sync-service:8081`). From the browser and from local runs, use `localhost`.
 - The two Spring Boot services must include Spring Boot Actuator, so `/actuator/health` returns HTTP 200 and the T-08 smoke test can check them.
 - The browser talks to sync-service and execution-service **directly**. There is no gateway.
+- If the client uses Vite, its dev server defaults to port 5173. T-01 must set `server.port` and `preview.port` to 3000 in the Vite config, ideally with `strictPort: true` so it fails instead of silently picking another port. Otherwise CORS (`CLIENT_ORIGIN`) and the T-08 smoke test, which checks `/` on port 3000, break.
 
 ### Shared settings (environment variables)
 
@@ -47,6 +48,15 @@ No secrets are committed (NFR10). Real values live in each person's local, git-i
 | `CLIENT_ORIGIN` | sync-service, execution-service | `http://localhost:3000` | Browser origin allowed by CORS (execution-service) and by the WebSocket origin check (sync-service). |
 | `SYNC_SERVICE_INTERNAL_URL` | execution-service | `http://sync-service:8081` | Where execution-service sends results to broadcast (section 5). |
 | `INTERNAL_API_TOKEN` | sync-service, execution-service | none (set locally) | Shared secret on the internal endpoint (section 5). Never committed. |
+
+### Client settings (browser build)
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `VITE_SYNC_WS_URL` | `ws://localhost:8081/ws/rooms` | Base of the sync WebSocket URL. The client appends `/{room_id}?session_id=...` (section 3.1). |
+| `VITE_EXECUTION_API_URL` | `http://localhost:8082` | Base URL of execution-service. The client calls `POST {value}/v1/runs` (section 4.1). |
+
+These names assume Vite, where only `VITE_`-prefixed variables reach the browser. If T-01 uses another build tool, the meaning stays the same and this table is updated. Everything in a client build is visible to anyone who opens the site, so **never put `INTERNAL_API_TOKEN`, an API key or any other secret in a client variable.**
 
 ---
 
@@ -75,12 +85,13 @@ ws://localhost:8081/ws/rooms/{room_id}?session_id={session_id}
 
 - The room id is a **path segment**. The session id is a **query parameter**, because browsers cannot set custom headers on a WebSocket.
 - The owner token (v1, section 8) will **not** be sent in the URL, so it never lands in logs.
-- This shape matches the `y-websocket` client as far as I know: `new WebsocketProvider('ws://localhost:8081/ws/rooms', room_id, ydoc, { params: { session_id } })`. Het and Niranjan confirm this during review.
+- This shape works with the `y-websocket` client. It opens `serverUrl + '/' + roomName + '?' + params`, so `new WebsocketProvider('ws://localhost:8081/ws/rooms', room_id, ydoc, { params: { session_id } })` produces exactly this URL. Checked against the y-websocket 3.1.0 source and a test relay. Het and Niranjan confirm it in the real client during review.
 
 ### 3.2 Room id
 
 - The room id is an opaque string of 1 to 64 characters from `A-Z a-z 0-9 _ -`.
-- The shareable join link (US-01) contains exactly this value. The link format itself belongs to US-01.
+- The shareable join link (US-01) contains exactly this value, in the page route below.
+- **Page route:** the link opens the client at `/room/{room_id}`, for example `http://localhost:3000/room/room-demo-01`. T-01 reads the room id from this path and US-01 builds the link. Changing the route needs a T-06 update first.
 - In v0 the relay creates a room the first time someone connects to it. No REST call is needed to create a room. If T-05 or T-10 needs server-created rooms, that changes in v1.
 - A malformed room id closes the connection with code `4400` (section 3.6).
 
@@ -90,13 +101,14 @@ ws://localhost:8081/ws/rooms/{room_id}?session_id={session_id}
 - The client sends the same value as `session_id` in the WebSocket URL and in every run request.
 - The relay keeps the session id with each connection (T-02). Several tabs of one browser share one session id and may all be connected.
 - This is what FR9.6 (Sprint 2) uses to block a removed user. Known limit: a user who clears browser storage gets a new session id. FR9.6 already accepts this and adds "regenerate the link" for the owner.
+- `crypto.randomUUID()` exists only in secure contexts (HTTPS or localhost). If the page is opened over plain HTTP on a LAN address, the client falls back to a UUID v4 built from `crypto.getRandomValues`. Either way the value must be a valid UUID v4.
 - The session id is **not** the owner token. Ownership (FR9.5) is a separate token, see section 8.
 
 ### 3.4 Frames
 
 | Frame type | Direction | Content |
 |---|---|---|
-| **Binary** | both | Yjs sync and awareness messages in the `y-websocket` framing. Opaque to the relay. |
+| **Binary** | both | Yjs sync and awareness messages in the `y-websocket` framing. The relay only looks at the first byte (section 3.5, rule 1). |
 | **Text** | server to client | JSON control messages (section 3.5). |
 
 Display name and colour (FR14, FR3) travel inside the Yjs awareness state. The relay never reads them.
@@ -105,11 +117,12 @@ The client sends no text frames in v0. A run goes over HTTP (section 4).
 
 ### 3.5 Relay rules
 
-1. A binary frame from one connection is forwarded **unchanged** to every **other** connection in the same room. It is never echoed back to the sender.
+1. A binary frame from one connection is forwarded **unchanged** to every **other** connection in the same room. It is not echoed back to the sender, with one exception: an **awareness frame (first byte `1`) is also sent back to the sender.** The `y-websocket` client closes the connection and reconnects when it receives no message for 30 seconds, and a lone user would otherwise receive none. Tested with y-websocket 3.1.0: without the echo a lone client reconnected after about 30 seconds; with it, it stayed connected.
 2. The relay stores nothing: no document, no history.
 3. The largest accepted binary frame is **1 MiB**; a larger one closes the connection with code `1009`. Spring's default buffer for WebSocket messages is much smaller (about 8 KB as far as I know), so T-02 must raise it.
 4. Text frames from the server may be up to **4 MiB** (a run result carries stdout and stderr).
 5. WebSocket ping and pong frames are answered normally. Reconnect with exponential backoff is the client's job (FR11.1).
+6. After connecting, the client sends one binary frame containing the single byte `3` (query awareness). The relay forwards it like any other frame, and every peer answers with its full awareness state. Without it, a person who joins late sees existing cursors only after about 16 seconds; with it, after about 100 milliseconds (tested with y-websocket 3.1.0). This supports FR3 (Sprint 2).
 
 ### 3.6 Server to client text messages
 
@@ -387,6 +400,7 @@ Reserved for v1, after T-05 decides where owner state lives (FR9.5, T-10). Decid
 | 6 | Whether the 1 MB output cap (NFR4.4) applies per stream or combined. It affects the 4 MiB text frame limit in section 3.5. | Jay (B) | v1 |
 | 7 | Read-only guest enforcement on Run (FR9.4, Sprint 2) uses `session_id`, which the run request already carries. | Sprint 2 | Sprint 2 |
 | 8 | Fields of `anomaly-warning` and `ai-explanation` (section 3.6). | Category C | Sprint 3 |
+| 9 | Confirm the page route `/room/{room_id}` (section 3.2) and the client variable names (section 1) in the real client. | Het, Chandan, Niranjan | v1 review |
 
 ---
 
@@ -394,7 +408,8 @@ Reserved for v1, after T-05 decides where owner state lives (FR9.5, T-10). Decid
 
 Each person confirms their own section in a PR comment: "I can implement my part from this document alone."
 
-- [ ] **Het (A):** section 3 (connection, frames, session id), and the client side of sections 4 and 5.
+- [ ] **Het (A):** section 3 (connection, frames, session id, route), the client variables in section 1, and the client side of sections 4 and 5.
+- [ ] **Chandan (A, US-01):** the page route in section 3.2.
 - [ ] **Jay (B):** section 4 (run request and result) and the execution side of section 5.
 - [ ] **Prince (C):** sections 2 and 6, and that the result fields match `docs/ai-ml-contract.md`.
 - [ ] **Yash and Femina (D):** sections 1, 5, 7 and 8.
@@ -405,4 +420,5 @@ Each person confirms their own section in a PR comment: "I can implement my part
 
 | Version | Date | Change |
 |---|---|---|
+| v0 (revised) | Oct 2026 | After review by the T-01 owner: client port note and client variable names (section 1), page route `/room/{room_id}` (3.2), secure-context note for the session id (3.3), awareness-frame echo and query-awareness frame (3.5, found by testing y-websocket 3.1.0), and clearer wording of the field-name rule. |
 | v0 | Oct 2026 | First draft: ports and health (adopted from T-08), conventions, sync connection and session id, run request and result, FR4.5 delivery, ordering rule. Error shapes and owner token reserved. |
