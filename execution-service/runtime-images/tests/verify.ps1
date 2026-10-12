@@ -9,7 +9,8 @@
 
 [CmdletBinding()]
 param(
-    [string]$Image = "collab-sandbox-python:0.1.0"
+    [string]$Image = "collab-sandbox-python:0.1.0",
+    [switch]$All
 )
 
 $ErrorActionPreference = "Continue"
@@ -188,10 +189,18 @@ foreach ($r in $Results) {
 }
 Write-Host ""
 
-if ($Fail -eq 0) {
-    Write-Host "All checks passed." -ForegroundColor Green
-    exit 0
-} else {
-    Write-Host "$Fail check(s) failed." -ForegroundColor Red
+if ($Fail -ne 0) {
+    Write-Host "$Fail check(s) failed in Python suite." -ForegroundColor Red
     exit 1
 }
+
+Write-Host "All Python checks passed." -ForegroundColor Green
+
+if ($All) {
+    Write-Host ""
+    Write-Host "Running C++ verification suite (-All specified)..." -ForegroundColor Cyan
+    & "$PSScriptRoot/verify_cpp.ps1"
+    exit $LASTEXITCODE
+}
+
+exit 0

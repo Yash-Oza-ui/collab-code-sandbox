@@ -309,10 +309,18 @@ for r in "${RESULTS[@]}"; do
 done
 echo ""
 
-if [ "$FAIL" -eq 0 ]; then
-  echo -e "${GREEN}All checks passed.${RESET}"
-  exit 0
-else
-  echo -e "${RED}${FAIL} check(s) failed. Review the output above.${RESET}"
+if [ "$FAIL" -ne 0 ]; then
+  echo -e "${RED}${FAIL} check(s) failed in Python suite. Review the output above.${RESET}"
   exit 1
 fi
+
+echo -e "${GREEN}All Python checks passed.${RESET}"
+
+if [ "${1:-}" = "--all" ]; then
+  echo ""
+  echo "Running C++ verification suite (--all specified)..."
+  bash "$(dirname "$0")/verify_cpp.sh"
+  exit $?
+fi
+
+exit 0
