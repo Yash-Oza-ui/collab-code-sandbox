@@ -7,6 +7,9 @@ FROM eclipse-temurin:21-jdk-alpine AS build
 
 WORKDIR /build
 
+# Ensure curl is available for Maven wrapper fallback
+RUN apk add --no-cache curl
+
 # Copy Maven wrapper and POM first (layer-cached until pom.xml changes).
 COPY mvnw mvnw.cmd ./
 COPY .mvn .mvn

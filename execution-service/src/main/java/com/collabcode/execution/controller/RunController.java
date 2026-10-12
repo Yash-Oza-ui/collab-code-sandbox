@@ -34,7 +34,7 @@ public class RunController {
      * POST /v1/runs
      *
      * Bean Validation (@Valid) rejects missing or blank required fields with
-     * 400 before this method is reached (see GlobalExceptionHandler).
+     * 422 INVALID_REQUEST before this method is reached (see GlobalExceptionHandler).
      *
      * Language is checked here because it is a semantic rule ("must be one
      * of five values"), not just a format constraint.
@@ -43,8 +43,7 @@ public class RunController {
     public ResponseEntity<RunResponse> run(@Valid @RequestBody RunRequest req) {
 
         if (!SUPPORTED_LANGUAGES.contains(req.getLanguage())) {
-            // GlobalExceptionHandler does not cover this case; throw explicitly.
-            throw new UnsupportedLanguageException(req.getLanguage());
+            throw new UnsupportedLanguageException(req.getLanguage(), req.getRequest_id());
         }
 
         // PLACEHOLDER – no Docker call yet (T-03 constraint).
@@ -55,15 +54,18 @@ public class RunController {
 
     // ----- inner exception class (keeps it co-located with the rule) -----
 
-    /** Thrown when the requested language is not in SUPPORTED_LANGUAGES. */
+    /** Thrown when the requested language is not in SUPPORTED_LANGUAGES (T-06 section 7.1). */
     public static class UnsupportedLanguageException extends RuntimeException {
         private final String language;
+        private final String requestId;
 
-        public UnsupportedLanguageException(String language) {
-            super("Unsupported language: " + language);
+        public UnsupportedLanguageException(String language, String requestId) {
+            super("Language '" + language + "' is not supported. Use one of: cpp, python, c, java, javascript.");
             this.language = language;
+            this.requestId = requestId;
         }
 
         public String getLanguage() { return language; }
+        public String getRequestId() { return requestId; }
     }
 }
