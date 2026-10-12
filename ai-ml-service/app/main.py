@@ -16,6 +16,22 @@ app = FastAPI(
     description="Microservice for code review, failure explanation, and execution anomaly scoring.",
     version="0.1.0",
 )
+import logging
+
+# Configure basic logging to explicitly exclude request bodies
+logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+logger = logging.getLogger("ai_ml_service")
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    """Log request metadata only, strictly omitting request bodies/raw code (NFR8.2)."""
+    response = await call_next(request)
+    logger.info(
+        f"Request: {request.method} {request.url.path} "
+        f"| Status: {response.status_code} "
+        f"| Room: {getattr(request.state, 'room_id', 'unknown')}"
+    )
+    return response
 
 
 @app.exception_handler(HTTPException)
