@@ -1,0 +1,19 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "request_id": { "type": ["string", "null"] },
+    "error": {
+      "type": "object",
+      "properties": {
+        "code": { "type": "string" },
+        "message": { "type": "string" },
+        "retry_after_seconds": { "type": ["integer", "null"] }
+      },
+      "required": ["code", "message", "retry_after_seconds"],
+      "additionalProperties": false
+    }
+  },
+  "required": ["request_id", "error"],
+  "additionalProperties": false
+}
