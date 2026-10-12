@@ -63,7 +63,7 @@ flowchart TD
 | `.pre-commit-config.yaml` | Shared pre-commit hook configuration |
 | `.gitignore` | Files excluded from version control |
 
-The service folders are scaffold locations; their presence does not mean the services are implemented. Platform responsibilities (auth, room ownership, data, and infrastructure) are assigned a service home through T-05.
+The service folders are scaffold locations; their presence does not mean the services are implemented.   Platform features (room and owner state, removed-user block list, GitHub login and import, history retention) live in `sync-service/`; AI consent and cost cap stay in `ai-ml-service/`. See [docs/decisions/platform-home.md](docs/decisions/platform-home.md).
 
 ---
 
@@ -74,7 +74,7 @@ The service folders are scaffold locations; their presence does not mean the ser
 | Frontend | React, Monaco Editor, Yjs; client framework/build setup recorded in T-01 |
 | Real-time Sync | Java / Spring Boot, WebSockets |
 | Execution & Sandbox Service | Java / Spring Boot, self-managed Docker containers |
-| Platform / Data | Java / Spring Boot; database and queue choices documented as finalized |
+| Platform / Data | Java / Spring Boot; inside `sync-service` (see `docs/decisions/platform-home.md`); database and queue not chosen yet |
 | AI/ML Service | Python, LLM API, scikit-learn |
 
 Endpoint paths, ports, and payloads are agreed in T-06 (service contracts) and T-07 (execution-to-AI/ML contract). Judge0 and Piston are references only, not the runtime.
@@ -188,6 +188,17 @@ All team members must follow these branch naming rules. Use a short, descriptive
 For existing Sprint 1 issues, follow the branch names already stated in their **PR Instructions** to avoid confusion. The conventions above apply to new work and follow-ups.
 
 > ❌ Direct pushes to `main` are forbidden. All changes must go through a Pull Request under the repository's branch-protection rules.
+
+## ⚙️ How CI works
+
+Every pull request to `main` runs the **CI** workflow (`.github/workflows/ci.yml`):
+
+- One job per service folder: `client`, `sync-service`, `execution-service` and `ai-ml-service`. Each job builds and tests its folder.
+- A folder that is still a placeholder (no `package.json`, `requirements.txt`/`pyproject.toml`, or `pom.xml`/`build.gradle` yet) is skipped with a notice and does not fail the run. The job switches on by itself as soon as that build file is merged.
+- The final **`build-and-test`** job is the required status check on `main`. It is green only when every job above passed, so a failing test anywhere blocks the merge.
+- Dependencies (npm, pip, Maven/Gradle) are cached to keep runs fast.
+
+To see the result, open the **Checks** tab of your PR, or run `gh pr checks <pr-number>`. If a job is red, open it, fix the failure on your branch and push again; the checks re-run automatically.
 
 ## Contributing
 

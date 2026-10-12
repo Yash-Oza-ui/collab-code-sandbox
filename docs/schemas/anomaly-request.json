@@ -1,0 +1,20 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "request_id": { "type": "string" },
+    "room_id": { "type": "string" },
+    "request_type": { "type": "string", "enum": ["anomaly"] },
+    "language": { "type": "string", "enum": ["cpp", "python", "c", "java", "javascript"] },
+    "consent": { "type": "boolean" },
+    "execution_time_ms": { "type": "number" },
+    "peak_memory_mb": { "type": "number" },
+    "stdout_bytes": { "type": "integer" },
+    "stderr_bytes": { "type": "integer" },
+    "exit_code": { "type": "integer" },
+    "timed_out": { "type": "boolean" },
+    "oom_killed": { "type": "boolean" }
+  },
+  "required": ["request_id", "room_id", "request_type", "language", "consent", "execution_time_ms", "peak_memory_mb", "stdout_bytes", "stderr_bytes", "exit_code", "timed_out", "oom_killed"],
+  "additionalProperties": false
+}

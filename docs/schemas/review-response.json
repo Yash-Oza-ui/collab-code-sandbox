@@ -1,0 +1,24 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "request_id": { "type": "string" },
+    "summary": { "type": "string" },
+    "comments": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "line": { "type": ["integer", "null"] },
+          "severity": { "type": "string", "enum": ["info", "warning", "error"] },
+          "message": { "type": "string" },
+          "suggestion": { "type": ["string", "null"] }
+        },
+        "required": ["line", "severity", "message", "suggestion"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["request_id", "summary", "comments"],
+  "additionalProperties": false
+}

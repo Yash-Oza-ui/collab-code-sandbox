@@ -1,0 +1,27 @@
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: system-ui, 'Segoe UI', Roboto, sans-serif;
+}
+
+.room-page {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.room-header {
+  padding: 8px 12px;
+  border-bottom: 1px solid #ccc;
+  font-family: ui-monospace, Consolas, monospace;
+}
+
+.room-editor {
+  flex: 1;
+  min-height: 0;
+}
