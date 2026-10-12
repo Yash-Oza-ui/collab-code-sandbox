@@ -186,8 +186,12 @@ Common fields (§3) plus the metrics defined in `ai-ml-service/docs/anomaly-spec
 | `stdout_bytes`      | integer  | Yes      | Byte length of standard output generated (T-13 §1).                 |
 | `stderr_bytes`      | integer  | Yes      | Byte length of standard error output generated (T-13 §1).            |
 | `exit_code`         | integer  | Yes      | Process exit code (T-06 §4.2, T-13 §1).                             |
-| `timed_out`         | boolean  | Yes      | `true` if killed by wall-time limit (T-06 §4.2, T-13 §1).           |
-| `oom_killed`        | boolean  | Yes      | `true` if killed by memory limit (T-06 §4.2, T-13 §1).              |
+| `timed_out`         | boolean  | Yes      | `true` if killed by configured wall-time limit (default 5s, DR3).   |
+| `oom_killed`        | boolean  | Yes      | `true` if killed by configured memory limit (default 128MB, DR3).   |
+
+> **Unit Conventions & Configured Limits (DR3):**
+> - Standard binary units apply: **1 KB = 1024 bytes (KiB)** and **1 MB = 1,048,576 bytes (MiB)** for `stdout_bytes` and `stderr_bytes`.
+> - Resource constraints (current defaults: 5s wall time NFR4.1, 128 MB memory NFR4.2, 1 MB output cap NFR4.4) are **configuration parameters, not hardcoded into the contract** (DR3, T-06 §2). Warning messages refer to the "configured time limit".
 
 #### Response 200
 
@@ -364,6 +368,8 @@ Every request processed by ai-ml-service is logged with structured JSON containi
 | Anomaly payload has no code | T-13 §1, NFR8.2 | Feature extraction uses purely numeric and metadata metrics. Storing or transferring code for anomaly scoring violates data minimization. |
 | Standardized reason categories | T-13 §2 | Enumerating `EXCESSIVE_EXECUTION_TIME`, `HIGH_MEMORY_USAGE`, `OUTPUT_FLOODING`, `ABNORMAL_TERMINATION` ensures consistent UI messaging. |
 | Threshold deferred to Sprint 3 | T-13 §4, FR8.1 | Synthetic training in T-12 and baseline model in T-15 precede final statistical calibration. Hard-coding thresholds in v0 contract is prohibited. |
+| Configured limits (DR3) | T-06 §2, DR3, NFR4 | Execution limits (5s, 128MB, 1MB output) are host-configurable defaults, not fixed contract constants. Warning messages refer to "configured time limit". |
+| Binary byte units | T-13 §3.1, NFR4.4 | Standard binary units (1 KB = 1024 bytes, 1 MB = 1,048,576 bytes) apply to `stdout_bytes` and `stderr_bytes`. |
 | Unified error envelope | T-06 §7 | Ensures execution-service handles errors uniformly across all downstream endpoints. |
 
 ---
