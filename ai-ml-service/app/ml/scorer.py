@@ -6,37 +6,43 @@ from typing import Dict, Any
 class AnomalyScorer:
     """Loads the baseline model and scores individual execution runs."""
     
-    def __init__(self, model_path: str = "models/baseline_anomaly_model.joblib"):
+    REQUIRED_FEATURES = [
+        "execution_time_ms", 
+        "peak_memory_mb", 
+        "stdout_bytes", 
+        "stderr_bytes", 
+        "exit_code", 
+        "timed_out", 
+        "oom_killed"
+    ]
+    
+    def __init__(self, model_path: str = None):
+        if model_path is None:
+            # Resolve model path relative to this file to avoid working directory mismatches in tests
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            model_path = os.path.join(base_dir, "../../models/baseline_anomaly_model.joblib")
+            
         if not os.path.exists(model_path):
             raise FileNotFoundError(f"Model not found at {model_path}. Run training script first.")
         self.model = joblib.load(model_path)
         
     def score_run(self, metrics: Dict[str, Any]) -> float:
-        """
-        Takes a dictionary of execution metrics and returns an anomaly score.
-        Higher score = more anomalous.
-        """
-        # Extract the exact features used during training
+        missing = [f for f in self.REQUIRED_FEATURES if f not in metrics]
+        if missing:
+            raise ValueError(f"Missing required execution metric keys for anomaly scoring: {missing}")
+        
         features = {
-            "execution_time_ms": metrics.get("execution_time_ms", 0.0),
-            "peak_memory_mb": metrics.get("peak_memory_mb", 0.0),
-            "stdout_bytes": metrics.get("stdout_bytes", 0),
-            "stderr_bytes": metrics.get("stderr_bytes", 0),
-            "exit_code": metrics.get("exit_code", 0),
-            "timed_out": int(metrics.get("timed_out", False)),
-            "oom_killed": int(metrics.get("oom_killed", False))
+            "execution_time_ms": float(metrics["execution_time_ms"]),
+            "peak_memory_mb": float(metrics["peak_memory_mb"]),
+            "stdout_bytes": int(metrics["stdout_bytes"]),
+            "stderr_bytes": int(metrics["stderr_bytes"]),
+            "exit_code": int(metrics["exit_code"]),
+            "timed_out": int(metrics["timed_out"]),
+            "oom_killed": int(metrics["oom_killed"])
         }
         
-        # Convert to DataFrame for the scikit-learn pipeline
         df = pd.DataFrame([features])
-        
-        # Isolation forest returns scores where lower is more anomalous (negative).
-        # We invert it so higher = more anomalous, scaling roughly to [0, 1] for our contract.
         raw_score = self.model.decision_function(df)[0]
         normalized_score = 0.5 - (raw_score / 2.0) 
         
-        # Ensure it stays within standard bounds
         return max(0.0, min(1.0, float(normalized_score)))
-
-# Singleton instance to be imported by the router in Sprint 2
-# baseline_scorer = AnomalyScorer() # Intentionally commented out until T-15 evaluation is done

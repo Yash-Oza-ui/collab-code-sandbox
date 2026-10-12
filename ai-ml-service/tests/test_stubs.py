@@ -10,6 +10,48 @@ from fastapi.testclient import TestClient
 from app.main import app
 
 client = TestClient(app)
+import pytest
+from app.ml.scorer import AnomalyScorer
+
+def test_scorer_missing_features_raises_error():
+    """Verify that missing metrics raise a ValueError instead of defaulting silently."""
+    scorer = AnomalyScorer()
+    incomplete_metrics = {
+        "execution_time_ms": 100.0
+        # Missing memory, exit code, etc.
+    }
+    with pytest.raises(ValueError, match="Missing required execution metric keys"):
+        scorer.score_run(incomplete_metrics)
+
+def test_anomaly_score_direction():
+    """Verify directional sanity check: extreme outlier scores higher than normal run."""
+    scorer = AnomalyScorer()
+    
+    normal_run = {
+        "execution_time_ms": 50.0,
+        "peak_memory_mb": 10.0,
+        "stdout_bytes": 10,
+        "stderr_bytes": 0,
+        "exit_code": 0,
+        "timed_out": False,
+        "oom_killed": False
+    }
+    
+    extreme_outlier = {
+        "execution_time_ms": 999999.0,
+        "peak_memory_mb": 4096.0,
+        "stdout_bytes": 0,
+        "stderr_bytes": 5000,
+        "exit_code": 137,
+        "timed_out": True,
+        "oom_killed": True
+    }
+    
+    normal_score = scorer.score_run(normal_run)
+    outlier_score = scorer.score_run(extreme_outlier)
+    
+    # Outlier must score strictly higher (more anomalous) than the normal run
+    assert outlier_score > normal_score
 
 
 def test_anomaly_stub():
