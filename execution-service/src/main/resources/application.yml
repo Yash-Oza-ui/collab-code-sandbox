@@ -4,6 +4,12 @@ server:
 spring:
   application:
     name: execution-service
+  # Enforce the 1 MiB run-request body cap (T-06 section 2).
+  # Overridden by app.execution.limits.max-request-body-bytes at runtime.
+  servlet:
+    multipart:
+      max-request-size: 1MB
+      max-file-size: 1MB
 
 # Spring Boot Actuator – exposes /actuator/health (T-06 section 1)
 management:
@@ -15,11 +21,21 @@ management:
     health:
       show-details: never
 
-# CORS: allow requests from the browser client (T-06 section 2)
-# Override with CLIENT_ORIGIN env var in production.
 app:
+  # CORS: allow requests from the browser client (T-06 section 2)
+  # Override with CLIENT_ORIGIN env var in production.
   cors:
     allowed-origin: ${CLIENT_ORIGIN:http://localhost:3000}
+
+  # Internal sync-service URL used by execution-service to broadcast run
+  # results to the room (T-06 section 5, FR4.5).
+  # Override with SYNC_SERVICE_INTERNAL_URL env var in production.
+  sync-service:
+    internal-url: ${SYNC_SERVICE_INTERNAL_URL:http://localhost:8081}  # PLACEHOLDER – US-08 wires this in
+
+  # Shared secret for the internal endpoint (T-06 section 5, NFR10).
+  # NEVER committed. Set INTERNAL_API_TOKEN in your local .env (git-ignored).
+  internal-api-token: ${INTERNAL_API_TOKEN:}  # PLACEHOLDER – required in production
 
   # ---------------------------------------------------------------
   # Resource limits for sandboxed code execution (DR3, NFR4)

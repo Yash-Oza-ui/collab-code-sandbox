@@ -33,9 +33,7 @@ mvnw.cmd -B test        # Windows
 
 ---
 
-## How to verify (curl)
-
-Replace `<port>` with `8082` and `<run-path>` with `/v1/runs`.
+## How to verify (curl — real values, no placeholders)
 
 ```bash
 # 1. Health – expected: 200 {"status":"UP"}
@@ -91,7 +89,17 @@ Sprint 2 sets real limits (NFR4).
 | `max-output-bytes` | 1 048 576 | NFR4.4 – 1 MiB stdout+stderr cap |
 | `max-request-body-bytes` | 1 048 576 | T-06 section 2 – request body cap |
 
-Override any value by setting `APP_EXECUTION_LIMITS_MEMORY_MB=256` (etc.) in your environment.
+Override any value with env vars: `APP_EXECUTION_LIMITS_MEMORY_MB=256`, etc.
+
+---
+
+## Environment variables
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `CLIENT_ORIGIN` | `http://localhost:3000` | Browser origin allowed by CORS (T-06 section 2) |
+| `SYNC_SERVICE_INTERNAL_URL` | `http://localhost:8081` | Where execution-service sends run results (T-06 section 5). **PLACEHOLDER** — wired in US-08. |
+| `INTERNAL_API_TOKEN` | _(none)_ | Shared secret for the internal broadcast endpoint (T-06 section 5). **Never committed.** Set in your local `.env`. |
 
 ---
 
@@ -105,12 +113,17 @@ Override any value by setting `APP_EXECUTION_LIMITS_MEMORY_MB=256` (etc.) in you
 
 ```
 execution-service/
+├── Dockerfile
+├── mvnw / mvnw.cmd          # Maven Wrapper – no local Maven needed
+├── .mvn/wrapper/
+│   └── maven-wrapper.properties
 ├── pom.xml
 └── src/
     ├── main/
     │   ├── java/com/collabcode/execution/
     │   │   ├── ExecutionServiceApplication.java   # entry point
     │   │   ├── config/
+    │   │   │   ├── CorsConfig.java                # CORS (T-06 §2)
     │   │   │   └── ExecutionLimitsProperties.java # DR3 limits (Bhavya)
     │   │   ├── controller/
     │   │   │   ├── RunController.java             # POST /v1/runs
@@ -119,13 +132,13 @@ execution-service/
     │   │       ├── RunRequest.java                # T-06 §4.1
     │   │       └── RunResponse.java               # T-06 §4.2
     │   └── resources/
-    │       └── application.yml                    # port, limits config
+    │       └── application.yml                    # port, CORS, sync-service URL, limits config
     └── test/
         └── java/com/collabcode/execution/
             ├── config/
             │   └── ExecutionLimitsPropertiesTest.java  # DR3 test (Bhavya)
             └── controller/
-                └── RunControllerTest.java              # endpoint tests
+                └── RunControllerTest.java              # endpoint tests (Jay + Bhavya)
 ```
 
 ---
