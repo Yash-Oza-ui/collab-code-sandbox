@@ -63,7 +63,7 @@ flowchart TD
 | `.pre-commit-config.yaml` | Shared pre-commit hook configuration |
 | `.gitignore` | Files excluded from version control |
 
-The service folders are scaffold locations; their presence does not mean the services are implemented. Platform responsibilities (auth, room ownership, data, and infrastructure) are assigned a service home through T-05.
+The service folders are scaffold locations; their presence does not mean the services are implemented.   Platform features (room and owner state, removed-user block list, GitHub login and import, history retention) live in `sync-service/`; AI consent and cost cap stay in `ai-ml-service/`. See [docs/decisions/platform-home.md](docs/decisions/platform-home.md).
 
 ---
 
@@ -74,7 +74,7 @@ The service folders are scaffold locations; their presence does not mean the ser
 | Frontend | React, Monaco Editor, Yjs; client framework/build setup recorded in T-01 |
 | Real-time Sync | Java / Spring Boot, WebSockets |
 | Execution & Sandbox Service | Java / Spring Boot, self-managed Docker containers |
-| Platform / Data | Java / Spring Boot; database and queue choices documented as finalized |
+| Platform / Data | Java / Spring Boot; inside `sync-service` (see `docs/decisions/platform-home.md`); database and queue not chosen yet |
 | AI/ML Service | Python, LLM API, scikit-learn |
 
 Endpoint paths, ports, and payloads are agreed in T-06 (service contracts) and T-07 (execution-to-AI/ML contract). Judge0 and Piston are references only, not the runtime.
