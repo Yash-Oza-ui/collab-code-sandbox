@@ -4,7 +4,7 @@
 **Issue:** T-06 · #9
 **Branch:** `feature/T-06-service-contracts`
 **Author:** Yash Oza (Category D, PR1: sections 1 to 6)
-**Next:** Femina Rathod (PR2: section 7, error shapes and examples), then v1 (section 8, owner token)
+**PR2:** Femina Rathod (section 7, error shapes and examples) · **Next:** v1 (section 8, owner token)
 **Related:** `docs/ai-ml-contract.md` (T-07, execution-service to ai-ml-service)
 
 This document fixes the endpoint paths, ports and field names the four services and the client share, so every category builds against the same shapes. v0 covers what the scaffolds and T-11 need first. Field names are meant to hold from here on. Until v1 is published, a field may still be renamed if every consumer is told in #dev and the change is logged under "Changes". **After v1, never rename a field without telling every consumer and logging it under "Changes".**
@@ -17,7 +17,7 @@ This document fixes the endpoint paths, ports and field names the four services 
 | 4. Client and execution-service (run request and result) | Decided |
 | 5. Delivering a run result to the whole room (FR4.5) | Decided |
 | 6. Ordering rule (NFR9) | Decided |
-| 7. Error shapes | Reserved for Femina (PR2) |
+| 7. Error shapes | Decided (PR2, Femina) |
 | 8. Owner token (FR9.5, T-10) | Reserved for v1, after T-05 |
 | 9. Open items | Listed |
 
@@ -356,9 +356,9 @@ If ai-ml-service is slow, down or returns an error, the run result is not affect
 
 ---
 
-## 7. Error shapes (Femina, PR2)
+## 7. Error shapes
 
-Reserved. The base is the error envelope in `docs/ai-ml-contract.md` section 5:
+Errors use the same envelope as `docs/ai-ml-contract.md` section 5, so a client handles errors from every service the same way.
 
 ```json
 {
@@ -371,14 +371,135 @@ Reserved. The base is the error envelope in `docs/ai-ml-contract.md` section 5:
 }
 ```
 
-PR2 adds codes, HTTP statuses, message text and one full JSON example for each of:
+| Field | Type | Notes |
+|---|---|---|
+| `request_id` | string \| `null` | Echoed from the request body. `null` when the body could not be parsed or had no `request_id`. |
+| `error.code` | string | Machine-readable, `UPPER_SNAKE_CASE`. Clients decide what to do from `code`, never from `message`. |
+| `error.message` | string | One short sentence the UI can show as-is. |
+| `error.retry_after_seconds` | integer \| `null` | Only set for `QUEUE_FULL`. `null` for every other code. |
 
-- Queue full: "busy, try again" (FR16).
-- Unsupported language.
-- Invalid or oversized run request.
-- Internal-endpoint errors (`400`, `401`) from section 5.
+**What is not an error:** a compile error, a non-zero exit, a timeout and an out-of-memory kill are **run results** (HTTP 200, section 4.2), never an error envelope. An error means the run did not happen.
 
-Timeout and memory-limit-exceeded are **not** errors here; they are run results (section 4.2).
+### 7.1 Errors from `POST /v1/runs` (client to execution-service)
+
+| `error.code` | HTTP | `error.message` | When | What the client does |
+|---|---|---|---|---|
+| `QUEUE_FULL` | **503** | `Execution service is busy, try again in a few seconds.` | The execution queue is at its maximum length (FR16). | Show the message. Re-enable Run after `retry_after_seconds`. Do not retry automatically in a loop. |
+| `UNSUPPORTED_LANGUAGE` | **422** | `Language '<value>' is not supported. Use one of: cpp, python, c, java, javascript.` | `language` is not one of the five ids in section 2 (DR1). | Show the message. Fix the request; do not retry unchanged. |
+| `INVALID_REQUEST` | **422** | `Field '<name>' is missing or invalid.` | A required field is missing or has the wrong type, or `request_id` / `session_id` is not a UUID, or `room_id` breaks the rules in section 3.2. `<name>` is the first bad field. | Fix the request; do not retry unchanged. |
+| `REQUEST_TOO_LARGE` | **413** | `Run request is larger than 1 MiB.` | The request body is over the 1 MiB limit in section 2. | Show the message. Do not retry unchanged. |
+
+- `QUEUE_FULL` also sends the standard `Retry-After` HTTP header with the same number of seconds as `retry_after_seconds`. The number comes from configuration (DR3); clients must read it from the response, not hard-code it.
+- `422` matches the status T-07 uses for an invalid request, so both contracts treat a bad payload the same way.
+- `REQUEST_TOO_LARGE` may be raised by the web framework before the body is read. execution-service must still return this envelope (with `request_id: null`), not the framework's default error page.
+
+**`QUEUE_FULL`** (FR16)
+
+```http
+HTTP/1.1 503 Service Unavailable
+Retry-After: 5
+Content-Type: application/json
+```
+
+```json
+{
+  "request_id": "0b9d2f3e-7a41-4c58-9e1b-5d3c8a6f2e10",
+  "error": {
+    "code": "QUEUE_FULL",
+    "message": "Execution service is busy, try again in a few seconds.",
+    "retry_after_seconds": 5
+  }
+}
+```
+
+**`UNSUPPORTED_LANGUAGE`** (DR1)
+
+```json
+{
+  "request_id": "0b9d2f3e-7a41-4c58-9e1b-5d3c8a6f2e10",
+  "error": {
+    "code": "UNSUPPORTED_LANGUAGE",
+    "message": "Language 'rust' is not supported. Use one of: cpp, python, c, java, javascript.",
+    "retry_after_seconds": null
+  }
+}
+```
+
+**`INVALID_REQUEST`**
+
+```json
+{
+  "request_id": "0b9d2f3e-7a41-4c58-9e1b-5d3c8a6f2e10",
+  "error": {
+    "code": "INVALID_REQUEST",
+    "message": "Field 'code' is missing or invalid.",
+    "retry_after_seconds": null
+  }
+}
+```
+
+**`REQUEST_TOO_LARGE`**
+
+```json
+{
+  "request_id": null,
+  "error": {
+    "code": "REQUEST_TOO_LARGE",
+    "message": "Run request is larger than 1 MiB.",
+    "retry_after_seconds": null
+  }
+}
+```
+
+### 7.2 Errors from the internal endpoint (execution-service to sync-service)
+
+These come from `POST /internal/rooms/{room_id}/messages` (section 5). Only execution-service calls this endpoint, so these errors are logged by execution-service, never shown to a user. In every case **nothing is broadcast**.
+
+| `error.code` | HTTP | `error.message` | When |
+|---|---|---|---|
+| `INVALID_MESSAGE` | **400** | `Message body is not valid: <reason>.` | The body is not JSON, `type` is missing or empty, the body is over 4 MiB, or `room_id` breaks the rules in section 3.2. |
+| `UNAUTHORIZED` | **401** | `Missing or invalid internal token.` | `X-Internal-Token` is missing or does not match `INTERNAL_API_TOKEN`. |
+
+- `request_id` is taken from the body when it has one (a `run-result` always does), otherwise `null`.
+- The `401` message never says whether the token was missing or wrong, and the token is never logged.
+
+**`INVALID_MESSAGE`**
+
+```json
+{
+  "request_id": "0b9d2f3e-7a41-4c58-9e1b-5d3c8a6f2e10",
+  "error": {
+    "code": "INVALID_MESSAGE",
+    "message": "Message body is not valid: field 'type' is missing.",
+    "retry_after_seconds": null
+  }
+}
+```
+
+**`UNAUTHORIZED`**
+
+```json
+{
+  "request_id": null,
+  "error": {
+    "code": "UNAUTHORIZED",
+    "message": "Missing or invalid internal token.",
+    "retry_after_seconds": null
+  }
+}
+```
+
+### 7.3 Summary for implementers
+
+| HTTP | Code | Endpoint | Retry? |
+|---|---|---|---|
+| 200 | (run result, not an error) | `POST /v1/runs` | — |
+| 400 | `INVALID_MESSAGE` | internal | No, fix the body |
+| 401 | `UNAUTHORIZED` | internal | No, fix the token |
+| 413 | `REQUEST_TOO_LARGE` | `POST /v1/runs` | No |
+| 422 | `INVALID_REQUEST` | `POST /v1/runs` | No |
+| 422 | `UNSUPPORTED_LANGUAGE` | `POST /v1/runs` | No |
+| 503 | `QUEUE_FULL` | `POST /v1/runs` | Yes, after `retry_after_seconds` |
 
 ---
 
@@ -392,7 +513,7 @@ Reserved for v1, after T-05 decides where owner state lives (FR9.5, T-10). Decid
 
 | # | Item | Owner | Needed by |
 |---|---|---|---|
-| 1 | Error shapes (section 7) | Femina | v0 PR2 |
+| 1 | ~~Error shapes (section 7)~~ Done in PR2 | Femina | v0 PR2 |
 | 2 | Owner-token section (section 8) | Yash, after T-05 | v1 |
 | 3 | An empty room keeps no document, because the relay stores nothing (section 3.5). A person who joins after everyone has left gets a blank document unless a client still has a local copy (`y-indexeddb`, FR11.2). Decide whether v1 needs server-side state. | T-02 owners and Category A | v1 review |
 | 4 | Room creation: who creates a room and when (section 3.2). | T-05 and T-10 | v1 |
@@ -422,3 +543,4 @@ Each person confirms their own section in a PR comment: "I can implement my part
 |---|---|---|
 | v0 (revised) | Oct 2026 | After review by the T-01 owner: client port note and client variable names (section 1), page route `/room/{room_id}` (3.2), secure-context note for the session id (3.3), awareness-frame echo and query-awareness frame (3.5, found by testing y-websocket 3.1.0), and clearer wording of the field-name rule. |
 | v0 | Oct 2026 | First draft: ports and health (adopted from T-08), conventions, sync connection and session id, run request and result, FR4.5 delivery, ordering rule. Error shapes and owner token reserved. |
+| v0 (PR2) | Oct 2026 | Section 7 added (Femina): error envelope from T-07, codes `QUEUE_FULL` (503), `UNSUPPORTED_LANGUAGE` (422), `INVALID_REQUEST` (422), `REQUEST_TOO_LARGE` (413) for `POST /v1/runs`, and `INVALID_MESSAGE` (400), `UNAUTHORIZED` (401) for the internal endpoint, each with a JSON example. No existing field renamed. |
