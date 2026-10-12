@@ -35,6 +35,9 @@ def generate(seed=42, rows=5000, anomaly_ratio=0.2):
     rng = random.Random(seed)
     result = []
     for label, count in ((0, rows - anomalous), (1, anomalous)):
+        # Shuffle a balanced language schedule separately from anomaly cases.
+        languages = [LANGUAGES[index % 5] for index in range(count)]
+        rng.shuffle(languages)
         for index in range(count):
             total = rng.randint(0, 102399)
             row = dict(execution_time_ms=rng.randint(0, 2499),
@@ -42,7 +45,7 @@ def generate(seed=42, rows=5000, anomaly_ratio=0.2):
                        stdout_bytes=total, stderr_bytes=0,
                        exit_code=rng.choice((0, 0, 0, 1)),
                        timed_out=False, oom_killed=False,
-                       language=LANGUAGES[index % 5], label=label)
+                       language=languages[index], label=label)
             if label:
                 # Cycle through every rule, including explicit resource kills.
                 kind = index % 6
@@ -64,6 +67,8 @@ def generate(seed=42, rows=5000, anomaly_ratio=0.2):
                     row['execution_time_ms'] = rng.randint(4001, 4500)
             row['stderr_bytes'] = rng.randint(0, total)
             row['stdout_bytes'] = total - row['stderr_bytes']
+            if classify(row) != label:
+                raise ValueError('generated row does not satisfy its intended T-13 label')
             result.append(row)
     rng.shuffle(result)
     return result

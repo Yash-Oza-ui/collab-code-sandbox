@@ -78,11 +78,22 @@ This is not a production anomaly score threshold; that remains Sprint 3 work.
 Default: 80% normal / 20% anomalous, a chosen training fixture ratio, not estimated
 real prevalence. `--anomaly-ratio` controls it. Anomalous count is rounded with
 `int(rows * ratio + 0.5)`; the remainder is normal. Each class must contain at
-least five rows, ensuring all five languages in both classes. Languages cycle
-within each class, then a local seeded random generator shuffles rows.
-Anomaly cases cycle independently of language. Very small datasets may not
+least five rows, ensuring all five languages in both classes. A balanced language list is independently shuffled within each class before
+anomaly cases cycle through their six-case schedule. A local seeded generator
+then shuffles the final rows. This removes the shared-index coupling; finite
+samples may still have random correlations. The default-seed test checks all
+30 language/case combinations and bounds sampling imbalance. Very small datasets may not
 cover every anomaly case; default 5000 rows covers all six.
 
 Synthetic clean labels may make baseline performance optimistic. Real validation,
 language calibration, boundary runs and final warning thresholds belong to later
 work. No model, endpoint, warning UI or external AI call is introduced here.
+
+## Automated validation
+
+Eight tests cover schema and integrity, per-row classification, all six cases,
+combined-output boundaries, S06 precedence, reproducible CLI bytes, custom ratios,
+changed seeds and invalid CLI arguments. A mocked classifier test confirms that
+the generator rejects rows whose intended label is not established.
+The revised assignment changes CSV bytes from the earlier generator version;
+repeatability applies to this version with identical seed and parameters.
