@@ -1,19 +1,29 @@
 package com.collabcode.execution.controller;
 
+import com.collabcode.execution.broadcast.RoomBroadcastService;
+import com.collabcode.execution.runner.CodeRunner;
+import com.collabcode.execution.runner.ExecutionResult;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.mock.mockito.MockBean;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
 /**
  * T-03 acceptance tests – Bhavya Vekariya (feature/T-03-execution-scaffold-limits-health).
+ *
+ * These were the original scaffold tests. They are preserved unchanged in
+ * purpose but updated in US-08 (Jay) to mock CodeRunner and RoomBroadcastService
+ * so they still pass after the stub factory was replaced with real execution.
  *
  * Covers:
  *   1. Health endpoint returns 200        (T-03 AC5, T-06 section 1)
@@ -32,6 +42,17 @@ class RunControllerTest {
     @Autowired
     private MockMvc mockMvc;
 
+    @MockBean
+    private CodeRunner codeRunner;
+
+    @MockBean
+    private RoomBroadcastService broadcastService;
+
+    private static ExecutionResult okResult() {
+        return new ExecutionResult("Hello from python!\n", "", 0,
+                15.0, 4.2, false, false, null, false, null);
+    }
+
     // ------------------------------------------------------------------ health
 
     @Test
@@ -46,6 +67,9 @@ class RunControllerTest {
     @Test
     @DisplayName("Valid request returns 200 with stdout and stderr present (T-03 AC3, FR4.2)")
     void run_validRequest_returns200WithStdoutAndStderr() throws Exception {
+        when(codeRunner.execute(anyString(), anyString(), anyString()))
+                .thenReturn(okResult());
+
         String body = """
                 {
                   "request_id": "0b9d2f3e-7a41-4c58-9e1b-5d3c8a6f2e10",
@@ -79,6 +103,9 @@ class RunControllerTest {
     @Test
     @DisplayName("All five DR1 languages are accepted")
     void run_allSupportedLanguages_return200() throws Exception {
+        when(codeRunner.execute(anyString(), anyString(), anyString()))
+                .thenReturn(okResult());
+
         for (String lang : new String[]{"cpp", "python", "c", "java", "javascript"}) {
             String body = String.format("""
                     {

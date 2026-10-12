@@ -21,6 +21,12 @@ app:
   cors:
     allowed-origin: ${CLIENT_ORIGIN:http://localhost:3000}
 
+  # sync-service connection (T-06 section 5, RoomBroadcastService)
+  # INTERNAL_API_TOKEN must be set in your local .env (never commit the real value, NFR10).
+  sync-service:
+    internal-url:   ${SYNC_SERVICE_INTERNAL_URL:http://localhost:8081}
+    internal-token: ${INTERNAL_API_TOKEN:}
+
   # ---------------------------------------------------------------
   # Resource limits for sandboxed code execution (DR3, NFR4)
   # Values are PLACEHOLDERS – real limits are set in Sprint 2 (NFR4).
