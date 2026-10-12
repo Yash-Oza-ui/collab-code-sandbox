@@ -505,7 +505,55 @@ These come from `POST /internal/rooms/{room_id}/messages` (section 5). Only exec
 
 ## 8. Owner token (v1)
 
-Reserved for v1, after T-05 decides where owner state lives (FR9.5, T-10). Decided already: the owner token is **not** sent in the WebSocket URL, and it is separate from the session id in section 3.3.
+### v1 completion proposal — requires category review before merge
+
+T-05 places room/owner state in sync-service. No existing v0 field is renamed.
+A random valid link may still open a new empty, unowned room (instant join).
+Only the following REST creation operation issues ownership; visiting an unknown
+link never claims ownership. Empty-room documents are not persisted in Sprint 1.
+
+`POST http://localhost:8081/v1/rooms` accepts an empty JSON object `{}` and
+returns HTTP 201 with `{"room_id":"<server-generated id>","owner_token":"<random secret>"}`.
+The server generates a fresh room id; callers cannot select or take over an id.
+
+`GET http://localhost:8081/v1/rooms/{room_id}/owner` requires
+`X-Owner-Token: <owner_token>`. Correct token: HTTP 200,
+`{"room_id":"<id>","is_owner":true}`. Wrong/missing token or unknown room:
+HTTP 403 with common error envelope, `request_id:null`, code `NOT_OWNER`,
+message `Missing or invalid owner token.`, retry_after_seconds null.
+
+Client configuration adds `VITE_PLATFORM_API_URL=http://localhost:8081`.
+Store tokens in localStorage keyed by room id; never include them in URLs,
+shared links, awareness or logs. They identify browser possession, not a human
+identity. Anyone stealing a bearer token can impersonate its owner. Clear site
+data loses ownership; server restart loses in-memory ownership (Sprint 1 only).
+Store only SHA-256 hashes server-side and compare in constant time.
+
+The forwarding path continues to keep no Yjs document/history. Platform state
+is separate from connected-session membership and survives a browser refresh.
+
+### Remaining v1 clarifications
+
+Output cap applies to combined captured stdout/stderr bytes. UTF-8 truncation
+must discard incomplete trailing code points. For future T-07 anomaly calls,
+stdout_bytes/stderr_bytes mean bytes retained by the capture, not bytes attempted
+before truncation. This is a proposed resolution of the T-13/Jay open item and
+requires Jay's confirmation; it does not edit the original T-13 document.
+Sprint 1 is Python-only execution; valid other DR1 languages return HTTP 422
+UNSUPPORTED_LANGUAGE with a clear 'not available yet' message. A run did not
+occur, so this is an error envelope rather than a fabricated run result.
+OOM uses `failure_kind: "non_zero_exit"`, never the undocumented value `"oom"`.
+Python wall time excludes queueing; container startup can affect deadline timing.
+A missing sampled memory reading is 0 (unknown), not proof of zero memory use;
+accurate peak-memory measurement is Sprint 2 validation work.
+T-15 and T-16 remain internal prototypes, with no execution-to-AI calls in
+Sprint 1. Section 6 describes the later ordering rule when wiring is introduced.
+
+Execution-to-relay delivery failure returns HTTP 503, common envelope code
+RESULT_DELIVERY_FAILED, with message 'Run finished but room delivery failed.'
+The run must not be re-executed automatically. Result delivery is one attempt;
+reliable replay/persistence is later work. Never silently report room delivery
+success when the relay is unavailable.
 
 ---
 
@@ -544,3 +592,12 @@ Each person confirms their own section in a PR comment: "I can implement my part
 | v0 (revised) | Oct 2026 | After review by the T-01 owner: client port note and client variable names (section 1), page route `/room/{room_id}` (3.2), secure-context note for the session id (3.3), awareness-frame echo and query-awareness frame (3.5, found by testing y-websocket 3.1.0), and clearer wording of the field-name rule. |
 | v0 | Oct 2026 | First draft: ports and health (adopted from T-08), conventions, sync connection and session id, run request and result, FR4.5 delivery, ordering rule. Error shapes and owner token reserved. |
 | v0 (PR2) | Oct 2026 | Section 7 added (Femina): error envelope from T-07, codes `QUEUE_FULL` (503), `UNSUPPORTED_LANGUAGE` (422), `INVALID_REQUEST` (422), `REQUEST_TOO_LARGE` (413) for `POST /v1/runs`, and `INVALID_MESSAGE` (400), `UNAUTHORIZED` (401) for the internal endpoint, each with a JSON example. No existing field renamed. |
+| v1 proposal | 12 Oct 2026 | Owner creation/check, platform URL, combined captured output and unavailable-language semantics. Await category confirmations; this package does not record approvals. |
+
+### Runner infrastructure error (v1 proposal addition)
+
+When Docker/image infrastructure is unavailable, POST /v1/runs returns HTTP 503
+with common envelope code RUNNER_UNAVAILABLE, request_id null, message
+'Sandbox runner is unavailable. Check Docker and the runtime image.', and
+retry_after_seconds null. This must not be confused with failed user code,
+which remains an HTTP 200 run result. Do not retry automatically.
