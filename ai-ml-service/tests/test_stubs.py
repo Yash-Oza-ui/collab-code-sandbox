@@ -37,8 +37,11 @@ def test_anomaly_stub():
     assert data["reasons"] == []
 
 
+from unittest.mock import AsyncMock, patch
+
+
 def test_explain_stub_with_consent():
-    """Test POST /v1/explain stub returns 200 when user has consented."""
+    """Test POST /v1/explain returns 200 when user has consented."""
     payload = {
         "request_id": "test-req-002",
         "room_id": "test-room-01",
@@ -54,7 +57,9 @@ def test_explain_stub_with_consent():
         "oom_killed": False,
         "failure_kind": "non_zero_exit",
     }
-    response = client.post("/v1/explain", json=payload)
+    mock_explanation = "Execution failed with exit code 1. Review stderr for details."
+    with patch("app.routers.explain.generate_explanation", new=AsyncMock(return_value=mock_explanation)):
+        response = client.post("/v1/explain", json=payload)
     assert response.status_code == 200
     data = response.json()
     assert data["request_id"] == "test-req-002"
