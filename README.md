@@ -109,6 +109,67 @@ cd collab-code-sandbox
 
 Service-specific setup instructions will be added as scaffolds merge. Follow the shared pre-commit setup before contributing; never commit API keys or real `.env` files.
 
+### 🔐 Setup for teammates: secret scanning (do this once, before your first commit)
+
+Every commit is scanned for secrets by [gitleaks](https://github.com/gitleaks/gitleaks) through a shared pre-commit hook (NFR10, US-32). The rules live in `.pre-commit-config.yaml`, so everyone uses the same version.
+
+**1. Install pre-commit** (skip if `pre-commit --version` already works)
+
+| OS | Command |
+|---|---|
+| Windows | `py -m pip install pre-commit` |
+| macOS / Linux | `pip install pre-commit` (add `--break-system-packages` if pip refuses to install into the system Python) |
+
+On Windows, if `pre-commit` is "not recognized" after installing, use `py -m pre_commit` in place of `pre-commit` in the commands below.
+
+**2. Activate the hook in your clone** (run inside the repo folder)
+
+```bash
+git switch main
+git pull --ff-only origin main
+pre-commit install
+pre-commit --version
+```
+
+The first commit after this takes a minute or two, because pre-commit downloads and builds gitleaks once. Later commits are fast.
+
+**3. Check that it works**
+
+```bash
+pre-commit run --all-files
+```
+
+Expected: `Detect hardcoded secrets.....Passed`.
+
+**What a blocked commit looks like**
+
+If a staged change contains something that looks like a key, the commit is rejected and gitleaks prints the finding with the secret redacted:
+
+```text
+Detect hardcoded secrets.................................................Failed
+- hook id: gitleaks
+- exit code: 1
+
+Finding:     api_key = "REDACTED"
+Secret:      REDACTED
+RuleID:      generic-api-key
+File:        leak-test.txt
+Line:        1
+
+WRN leaks found: 1
+```
+
+When this happens:
+
+1. Remove the secret from the file and load it from an environment variable instead. Put real values in a local `.env` file (already in `.gitignore`) and commit only a `.env.example` with placeholder values.
+2. `git add` the fixed file and commit again.
+3. If a real key ever reached GitHub, tell the team lead and **rotate the key**. Deleting it in a later commit is not enough, because it stays in history.
+
+**Rules**
+
+- Never use `git commit --no-verify` to get past the hook. A CI scan on pull requests is planned as a backstop (T-09).
+- Before every PR, run `pre-commit run --all-files`.
+
 ---
 
 ## 🌿 Git Branch Naming Conventions
@@ -127,6 +188,17 @@ All team members must follow these branch naming rules. Use a short, descriptive
 For existing Sprint 1 issues, follow the branch names already stated in their **PR Instructions** to avoid confusion. The conventions above apply to new work and follow-ups.
 
 > ❌ Direct pushes to `main` are forbidden. All changes must go through a Pull Request under the repository's branch-protection rules.
+
+## ⚙️ How CI works
+
+Every pull request to `main` runs the **CI** workflow (`.github/workflows/ci.yml`):
+
+- One job per service folder: `client`, `sync-service`, `execution-service` and `ai-ml-service`. Each job builds and tests its folder.
+- A folder that is still a placeholder (no `package.json`, `requirements.txt`/`pyproject.toml`, or `pom.xml`/`build.gradle` yet) is skipped with a notice and does not fail the run. The job switches on by itself as soon as that build file is merged.
+- The final **`build-and-test`** job is the required status check on `main`. It is green only when every job above passed, so a failing test anywhere blocks the merge.
+- Dependencies (npm, pip, Maven/Gradle) are cached to keep runs fast.
+
+To see the result, open the **Checks** tab of your PR, or run `gh pr checks <pr-number>`. If a job is red, open it, fix the failure on your branch and push again; the checks re-run automatically.
 
 ## Contributing
 
