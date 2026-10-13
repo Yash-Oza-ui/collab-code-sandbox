@@ -120,3 +120,18 @@ The generator uses the eight T-13 features plus a label column. It contains only
 The dataset generator and its unittest checks require only the Python standard library. The API service requires the dependencies listed above.
 
 Keep generated CSV files out of commits. The production anomaly score threshold will be chosen during Sprint 3 validation.
+
+## Anomaly Detection Baseline (T-15)
+
+**Note:** The current anomaly model is a minimal baseline trained **exclusively on synthetic data** (T-12) to establish the pipeline. It does not yet reflect real user execution metrics. 
+
+**Algorithm Choice:** 
+We utilize an **Isolation Forest** via `scikit-learn`. This was chosen because:
+1. It is explicitly designed for anomaly/outlier detection without requiring strictly balanced classes.
+2. It handles multi-dimensional tabular limits (time, memory, output bytes) effectively.
+3. Inference time is extremely fast, ensuring we do not delay the room broadcast sync (NFR9).
+
+### Training the Model
+To generate the model locally (requires the synthetic dataset from T-12):
+```bash
+python scripts/train_baseline.py --data path/to/synthetic_dataset.csv --seed 42
