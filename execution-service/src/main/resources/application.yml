@@ -1,0 +1,46 @@
+server:
+  port: 8082   # T-06 section 1: execution-service listens on 8082
+
+spring:
+  application:
+    name: execution-service
+
+# Spring Boot Actuator – exposes /actuator/health (T-06 section 1)
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      show-details: never
+
+# CORS: allow requests from the browser client (T-06 section 2)
+# Override with CLIENT_ORIGIN env var in production.
+app:
+  cors:
+    allowed-origin: ${CLIENT_ORIGIN:http://localhost:3000}
+
+  # sync-service connection (T-06 section 5, RoomBroadcastService)
+  # INTERNAL_API_TOKEN must be set in your local .env (never commit the real value, NFR10).
+  sync-service:
+    internal-url:   ${SYNC_SERVICE_INTERNAL_URL:http://localhost:8081}
+    internal-token: ${INTERNAL_API_TOKEN:}
+
+  # ---------------------------------------------------------------
+  # Resource limits for sandboxed code execution (DR3, NFR4)
+  # Values are PLACEHOLDERS – real limits are set in Sprint 2 (NFR4).
+  # Structure is final and must not be hard-coded in Java source.
+  # ---------------------------------------------------------------
+  execution:
+    limits:
+      # NFR4.1 – maximum wall-clock time per run (seconds)
+      wall-time-seconds: 5          # PLACEHOLDER
+      # NFR4.2 – maximum memory per container (megabytes)
+      memory-mb: 128                # PLACEHOLDER
+      # NFR4.3 – maximum number of processes / threads inside the container
+      pids-limit: 64                # PLACEHOLDER
+      # NFR4.4 – maximum total output (stdout + stderr combined, bytes)
+      max-output-bytes: 1048576     # PLACEHOLDER (1 MiB)
+      # Maximum size of a single run request body (bytes)
+      max-request-body-bytes: 1048576  # PLACEHOLDER (1 MiB, T-06 section 2)
