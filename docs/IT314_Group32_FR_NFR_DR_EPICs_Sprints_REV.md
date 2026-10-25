@@ -47,7 +47,7 @@ This document takes the stakeholders, survey results and document analysis from 
 | FR8.1 | Unusual execution behaviour produces a warning with a short reason. "Unusual" means an anomaly score above a threshold chosen during model validation in Sprint 3. | Medium Final |   | Interview: S4; survey: 78% want warnings |
 | FR8.2 | The warning arrives after the result as a separate message (NFR9) and never blocks it. It is shown to everyone in the room, like the result itself (FR4.5). | Medium Final |   | Survey: 22% said it depends on how it is shown |
 |   | FR9: Room owner controls |   |   |   |
-| FR9.1 | The room owner is notified each time someone joins. Medium Final |   |   | Interview: S3 |
+| FR9.1 | The room owner is notified each time someone joins.  |  Medium Final |   | Interview: S3 |
 | FR9.2 | The owner can remove any participant at any time. | High | Final | Interview: S3 |
 | FR9.3 | The owner can switch on join approval for a room. Instant join stays the default. | Medium Final |   | Interview: S3; FR1 |
 | FR9.4 | The owner can make a guest read-only. This is enforced on the server, not only hidden in the interface. A read-only guest can see the document, cursors and run results, but cannot edit or press Run. | Medium Final |   | Interview: S3; team review |

@@ -1,0 +1,53 @@
+# Integration-test stack for collab-code-sandbox (T-08)
+#
+# Each service sits behind a profile with the same name as its folder, so the
+# stack still starts while some folders are placeholders. Do not call
+# `docker compose up` directly; use the helper, which turns on only the
+# services whose folder has a Dockerfile:
+#
+#   bash tests/integration/up.sh      # build + start what exists
+#   bash tests/integration/smoke.sh   # one PASS / SKIP / FAIL line per service
+#   docker compose --profile "*" down
+#
+# Ports and health paths are PROVISIONAL defaults until T-06
+# (docs/api-contracts.md) fixes them. Override them in a local .env file
+# (copy .env.example). No secrets in this file (NFR10).
+
+services:
+  client:
+    profiles: ["client"]
+    build: ./client
+    environment:
+      PORT: ${CLIENT_PORT:-3000}
+    ports:
+      - "${CLIENT_PORT:-3000}:${CLIENT_PORT:-3000}"
+
+  sync-service:
+    profiles: ["sync-service"]
+    build: ./sync-service
+    environment:
+      SERVER_PORT: ${SYNC_SERVICE_PORT:-8081} # Spring Boot reads SERVER_PORT
+    ports:
+      - "${SYNC_SERVICE_PORT:-8081}:${SYNC_SERVICE_PORT:-8081}"
+
+  execution-service:
+    profiles: ["execution-service"]
+    build: ./execution-service
+    environment:
+      SERVER_PORT: ${EXECUTION_SERVICE_PORT:-8082}
+    ports:
+      - "${EXECUTION_SERVICE_PORT:-8082}:${EXECUTION_SERVICE_PORT:-8082}"
+    # The execution service starts sandbox containers itself. T-03 decides how
+    # it reaches Docker (for example by mounting the host socket below).
+    # volumes:
+    #   - /var/run/docker.sock:/var/run/docker.sock
+
+  ai-ml-service:
+    profiles: ["ai-ml-service"]
+    build: ./ai-ml-service
+    environment:
+      PORT: ${AI_ML_SERVICE_PORT:-8000}
+      # LLM API keys are never written here. Put them in your local .env
+      # (git-ignored) and reference them as ${VARIABLE_NAME}.
+    ports:
+      - "${AI_ML_SERVICE_PORT:-8000}:${AI_ML_SERVICE_PORT:-8000}"
