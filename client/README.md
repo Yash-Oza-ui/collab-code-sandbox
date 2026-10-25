@@ -15,16 +15,21 @@ The `client/` package is the web frontend for **Collab Code Sandbox**, providing
   - *Rationale:* Instant hot module replacement (HMR), lightweight build times, native TypeScript support, and zero configuration friction for team collaboration.
 - **Code Editor:** **Monaco Editor** (`@monaco-editor/react` & `monaco-editor`)
   - *Rationale:* Industry-standard browser editor powering VS Code, supporting syntax highlighting, keybindings, multi-cursor, and high-performance editing for C++, Python, C, Java, and JavaScript.
+  - *Note on CDN Dependency:* `@monaco-editor/react` currently fetches the Monaco Editor bundle from CDN (`cdn.jsdelivr.net`) at runtime in the browser. An active internet connection is required when loading the editor.
 - **Collaborative State (CRDT):** **Yjs** (`yjs`)
   - *Rationale:* High-performance Conflict-free Replicated Data Type (CRDT) document model providing conflict-free simultaneous edit merging without central coordinator locking.
-- **Testing & Tooling:** **Vitest** for fast unit tests and **ESLint** for code quality.
-- **Cross-Browser Compatibility (NFR12):** Built and tested using standard web APIs to ensure smooth execution on current Chrome, Edge, and Firefox.
+- **Testing & Tooling:** **Vitest** with `happy-dom` for DOM-aware tests, and **ESLint** for code quality.
+- **Intended Browser Compatibility Target (NFR12):** Current desktop versions of **Chrome**, **Edge**, and **Firefox**. Standard web APIs are used, avoiding browser-specific extensions. Formal multi-browser test verification is scheduled for **Sprint 2**.
 
 ---
 
-## 2. Prerequisites
+## 2. Prerequisites & Supported Engines
 
-- **Node.js:** v20.x or higher (matching the GitHub Actions CI environment)
+Based on `package-lock.json` engine requirements (e.g., Vite, esbuild, rollup):
+- **Node.js:**
+  - If running **Node 20**: requires at least **v20.19.0** (`^20.19.0`).
+  - If running **Node 22**: requires at least **v22.12.0** (`>=22.12.0`).
+  - Compatible with Node 20 CI runtime (`ubuntu-latest`, setup-node 20).
 - **npm:** v10.x or higher
 
 ---
@@ -80,7 +85,7 @@ The dev server is configured with:
 ### Room URL Route (T-06 §3.2)
 - Room routes follow `/room/{room_id}`, where `{room_id}` is 1 to 64 alphanumeric characters (`A-Z`, `a-z`, `0-9`, `_`, `-`).
 - The editor page reads this ID from the URL path.
-- Typing in the Monaco editor works immediately upon page load.
+- Typing in the Monaco editor works upon loading the page (requires internet access to fetch Monaco from CDN).
 
 ---
 
@@ -104,17 +109,21 @@ npm run preview
 
 ## 7. Testing & Linting
 
-### Unit Tests
+### Unit and Regression Tests
 Run the Vitest test suite:
 
 ```bash
 npm test
 ```
 
-Current test suites cover:
+Test suites cover:
 - `src/roomId.test.ts`: URL room ID validation and parsing rules (T-06 §3.2).
-- `src/roomDoc.test.ts`: Yjs `Y.Doc` initialization, shared type creation, and lifecycle destruction.
 - `src/config.test.ts`: Environment configuration parsing and fallback to T-06 service contract defaults.
+- `src/roomDoc.test.tsx`:
+  - `createRoomDoc` unit tests (instantiation, shared text mutations, clean destruction).
+  - `useRoomDoc` StrictMode regression test (verifies that during React StrictMode effect replay, each replaced document is destroyed, the document after effect replay is live, and the document is destroyed on final unmount).
+  - Room ID change regression test (verifies old document is destroyed when switching rooms).
+  - `RoomPage` component regression test under `<StrictMode>`.
 
 ### Code Quality (Linting)
 Run ESLint:
@@ -125,34 +134,38 @@ npm run lint
 
 ---
 
-## 8. Yjs Collaborative Editing Note (T-01 Boundary)
+## 8. Yjs Collaborative Editing & StrictMode Lifecycle (T-01 Boundary)
 
 In T-01:
 - `yjs` is installed as a primary dependency.
-- A dedicated `Y.Doc` instance is created and lifecycle-managed on `RoomPage` via `src/roomDoc.ts`.
+- **StrictMode-Safe Lifecycle:** `useRoomDoc` (`src/roomDoc.ts`) creates each `Y.Doc` inside effect setup and destroys that exact instance in effect cleanup. No disposable documents are instantiated during the render phase. In development with React StrictMode enabled, effect replay cleanly destroys the first instance and recreates a live document without leaving stale or destroyed documents.
+- **Ref Availability:** The active document is exposed via `docRef` for subsequent **US-01** and **US-02** integrations.
 - Per T-01 specification, the client does **not** connect to the sync relay yet. The WebSocket provider connection and Monaco editor binding are implemented in **US-01** and **US-02**.
 
 ---
 
-## 9. Fresh-Clone Verification Steps
+## 9. Fresh-Clone Verification Procedure (For Reviewers / Teammates)
 
-For teammates verifying on a clean clone:
+The following steps are provided for another team member or reviewer to verify the client scaffold on a fresh clone:
 
 ```bash
-# 1. Enter the client directory
+# 1. From repository root, navigate into the client folder
 cd client
 
-# 2. Install dependencies cleanly
+# 2. Clean install dependencies
 npm ci
 
-# 3. Verify tests pass
+# 3. Run the automated test suite (all tests must pass)
 npm test
 
-# 4. Verify production build succeeds
+# 4. Compile and verify production build
 npm run build
 
-# 5. Start dev server and verify the editor in browser
+# 5. Run linter (must pass with 0 errors and 0 warnings)
+npm run lint
+
+# 6. Start the local dev server
 npm run dev
-# -> Navigate to http://localhost:3000/room/test-room
-# -> Verify Monaco editor renders and typing works
+# -> Open http://localhost:3000/room/test-room in a browser with internet access
+# -> Confirm the header displays "Room: test-room" and the Monaco editor renders
 ```
