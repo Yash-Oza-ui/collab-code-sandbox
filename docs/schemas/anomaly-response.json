@@ -1,0 +1,16 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "request_id": { "type": "string" },
+    "is_anomalous": { "type": "boolean" },
+    "score": { "type": "number" },
+    "reasons": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "message_short": { "type": "string" }
+  },
+  "required": ["request_id", "is_anomalous", "score", "reasons", "message_short"],
+  "additionalProperties": false
+}

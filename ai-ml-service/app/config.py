@@ -11,8 +11,10 @@ class Settings:
 
     def __init__(self) -> None:
         self.PORT: int = int(os.getenv("PORT", "8000"))
-        self.LLM_API_KEY: Optional[str] = os.getenv("LLM_API_KEY")
+        self.LLM_API_KEY: Optional[str] = os.getenv("LLM_API_KEY") or os.getenv("GEMINI_API_KEY")
         self.LLM_MODEL: str = os.getenv("LLM_MODEL", "gemini-1.5-flash")
+        self.LLM_BASE_URL: Optional[str] = os.getenv("LLM_BASE_URL")
+        self.LLM_TIMEOUT_SECONDS: float = float(os.getenv("LLM_TIMEOUT_SECONDS", "10.0"))
 
     def __repr__(self) -> str:
         # Never print or log the actual API key (NFR8.2)
