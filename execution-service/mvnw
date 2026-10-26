@@ -1,0 +1,58 @@
+#!/bin/sh
+# ----------------------------------------------------------------------------
+# Maven wrapper shell script for Unix/macOS/Git-Bash.
+# ----------------------------------------------------------------------------
+
+set -e
+
+# If system maven is available, use it directly (fastest, standard in CI runners)
+if command -v mvn >/dev/null 2>&1; then
+  exec mvn "$@"
+fi
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+MAVEN_PROJECTBASEDIR="$SCRIPT_DIR"
+MAVEN_WRAPPER_PROPERTIES="$MAVEN_PROJECTBASEDIR/.mvn/wrapper/maven-wrapper.properties"
+
+if [ -f "$MAVEN_WRAPPER_PROPERTIES" ]; then
+  distributionUrl=$(sed -n 's/distributionUrl=//p' "$MAVEN_WRAPPER_PROPERTIES" | tr -d '\r')
+else
+  distributionUrl="https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/3.9.9/apache-maven-3.9.9-bin.zip"
+fi
+
+MAVEN_USER_HOME="${MAVEN_USER_HOME:-$HOME/.m2}"
+MAVEN_DIR="$MAVEN_USER_HOME/wrapper/dists/apache-maven-3.9.9"
+
+if [ ! -x "$MAVEN_DIR/bin/mvn" ]; then
+  mkdir -p "$MAVEN_USER_HOME/wrapper/dists"
+  tmpFile="$MAVEN_USER_HOME/wrapper/dists/mvn-dist.zip"
+  echo "Downloading Maven from $distributionUrl..."
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL --ssl-no-revoke -o "$tmpFile" "$distributionUrl" 2>/dev/null || curl -fsSL -o "$tmpFile" "$distributionUrl"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -q -O "$tmpFile" "$distributionUrl"
+  else
+    echo "ERROR: Neither curl nor wget found." >&2
+    exit 1
+  fi
+  extractDir="$MAVEN_USER_HOME/wrapper/dists/tmp-extract-$$"
+  mkdir -p "$extractDir"
+  if command -v unzip >/dev/null 2>&1; then
+    unzip -q "$tmpFile" -d "$extractDir"
+  elif command -v jar >/dev/null 2>&1; then
+    (cd "$extractDir" && jar xf "$tmpFile")
+  else
+    echo "ERROR: Neither unzip nor jar found." >&2
+    exit 1
+  fi
+  rm -f "$tmpFile"
+  extractedFolder=$(find "$extractDir" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -n 1)
+  if [ -n "$extractedFolder" ]; then
+    rm -rf "$MAVEN_DIR"
+    mv "$extractedFolder" "$MAVEN_DIR"
+  fi
+  rm -rf "$extractDir"
+  chmod +x "$MAVEN_DIR/bin/mvn" 2>/dev/null || true
+fi
+
+exec "$MAVEN_DIR/bin/mvn" "$@"
