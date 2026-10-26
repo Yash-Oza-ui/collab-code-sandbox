@@ -132,6 +132,37 @@ We utilize an **Isolation Forest** via `scikit-learn`. This was chosen because:
 3. Inference time is extremely fast, ensuring we do not delay the room broadcast sync (NFR9).
 
 ### Training the Model
-To generate the model locally (requires the synthetic dataset from T-12):
+To generate and train the model locally (requires the synthetic dataset from T-12):
 ```bash
-python scripts/train_baseline.py --data path/to/synthetic_dataset.csv --seed 42
+python generate_dataset.py --out data.csv
+python scripts/train_baseline.py --data data.csv --seed 42
+```
+This saves the trained Isolation Forest pipeline to `models/baseline_anomaly_model.joblib` and the held-out test split (20%) to `models/test_set.csv`.
+
+### Evaluating the Model (Prince's part)
+Run the evaluation script on the held-out test set:
+```bash
+python scripts/evaluate_baseline.py --data data.csv --seed 42
+# or directly on the saved held-out test set:
+python scripts/evaluate_baseline.py --test-data models/test_set.csv
+```
+
+### Baseline Evaluation Results (Held-Out Synthetic Data)
+
+| Metric | Value | Notes |
+|---|---|---|
+| **ROC-AUC** | **0.9997** | Threshold-independent ranking separation |
+| **PR-AUC** | **0.9990** | Precision-Recall area under curve |
+| **Precision** (@ 0.50) | 0.9949 | At neutral normalized cutoff |
+| **Recall** (@ 0.50) | 0.9238 | At neutral normalized cutoff |
+| **F1-Score** (@ 0.50) | 0.9580 | Harmonic mean of precision and recall |
+| **Normal Mean Score** | 0.4506 | Distribution center for normal samples |
+| **Anomalous Mean Score** | 0.5495 | Distribution center for anomalous samples |
+| **Separation Margin** | +0.0989 | Difference between anomalous and normal mean |
+
+> **Important Disclaimer (Synthetic Data Only):**
+> These results are evaluated **exclusively on synthetic data** generated under T-13 rule boundaries. They demonstrate that the Isolation Forest pipeline effectively separates synthetic execution stress profiles from normal runs. **They say nothing yet about real user code or real-world execution telemetry.** Real validation, tuning, and threshold selection will take place in Sprint 3 using real execution metrics (FR8.1).
+
+### Sanity Check & Reproducibility
+- **Directional Sanity Check:** Evaluated via `tests/test_evaluation.py`. A clearly anomalous row (e.g., wall-clock timeout kill, memory spike > 115 MB, or output flooding > 900 KB) scores strictly higher than a typical quick execution.
+- **Reproducibility:** Two runs with the same random seed (`--seed 42`) yield identical model parameters, test splits, and evaluation metrics.

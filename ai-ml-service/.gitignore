@@ -1,2 +1,5 @@
-# Machine Learning models
+# Machine Learning models & data artifacts
 *.joblib
+*.csv
+models/
+data/
