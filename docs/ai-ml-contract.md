@@ -18,22 +18,41 @@
 
 ## Contents
 
-1. [Overview](#1-overview)
-2. [Base URL and Health Check](#2-base-url-and-health-check)
-3. [Common Request Fields](#3-common-request-fields)
-4. [Endpoints](#4-endpoints)
-   - 4.1 [GET /health](#41-get-health)
-   - 4.2 [POST /v1/review](#42-post-v1review)
-   - 4.3 [POST /v1/explain](#43-post-v1explain)
-   - 4.4 [POST /v1/anomaly](#44-post-v1anomaly)
-5. [Error Envelope](#5-error-envelope)
-6. [Ordering Rule — NFR9](#6-ordering-rule--nfr9)
-7. [Room Broadcast Follow-ups (Sync Integration)](#7-room-broadcast-follow-ups-sync-integration)
-8. [Cache Key — NFR5.2](#8-cache-key--nfr52)
-9. [Logging Fields — NFR8](#9-logging-fields--nfr8)
-10. [Design Decisions](#10-design-decisions)
-11. [Examples](#11-examples)
-12. [Open Items (v0)](#12-open-items-v0)
+- [AI/ML Service — Execution-to-AI/ML Contract](#aiml-service--execution-to-aiml-contract)
+  - [Contents](#contents)
+  - [1. Overview](#1-overview)
+  - [2. Base URL and Health Check](#2-base-url-and-health-check)
+  - [3. Common Request Fields](#3-common-request-fields)
+  - [4. Endpoints](#4-endpoints)
+    - [4.1 `GET /health`](#41-get-health)
+    - [4.2 `POST /v1/review`](#42-post-v1review)
+      - [Request body](#request-body)
+      - [Response 200](#response-200)
+    - [4.3 `POST /v1/explain`](#43-post-v1explain)
+      - [Request body](#request-body-1)
+      - [Response 200](#response-200-1)
+    - [4.4 `POST /v1/anomaly`](#44-post-v1anomaly)
+      - [Request body](#request-body-2)
+      - [Response 200](#response-200-2)
+      - [Reason Categories (`reason_category_id`, from T-13 §2)](#reason-categories-reason_category_id-from-t-13-2)
+  - [5. Error Envelope](#5-error-envelope)
+    - [Error Codes](#error-codes)
+  - [6. Ordering Rule — NFR9 \& T-06 §6](#6-ordering-rule--nfr9--t-06-6)
+  - [7. Room Broadcast Follow-ups (Sync Integration)](#7-room-broadcast-follow-ups-sync-integration)
+    - [7.1 `anomaly-warning` (FR8.2)](#71-anomaly-warning-fr82)
+    - [7.2 `ai-explanation` (FR13.2)](#72-ai-explanation-fr132)
+  - [8. Cache Key — NFR5.2](#8-cache-key--nfr52)
+  - [9. Logging Fields — NFR8](#9-logging-fields--nfr8)
+  - [10. Design Decisions](#10-design-decisions)
+  - [11. Examples](#11-examples)
+    - [11.1 Review (`POST /v1/review`)](#111-review-post-v1review)
+    - [11.2 Explanation (`POST /v1/explain`)](#112-explanation-post-v1explain)
+    - [11.3 Anomaly — Normal Execution (`POST /v1/anomaly`)](#113-anomaly--normal-execution-post-v1anomaly)
+    - [11.4 Anomaly — Anomalous Execution (`POST /v1/anomaly`)](#114-anomaly--anomalous-execution-post-v1anomaly)
+    - [11.5 Error — Consent Missing (`POST /v1/explain`)](#115-error--consent-missing-post-v1explain)
+    - [11.6 Java Review Example (`POST /v1/review`)](#116-java-review-example-post-v1review)
+    - [11.7 C Explanation Example (`POST /v1/example`)](#117-c-explanation-example-post-v1example)
+  - [12. Open Items (v0)](#12-open-items-v0)
 
 ---
 
@@ -534,7 +553,70 @@ Every request processed by ai-ml-service is logged with structured JSON containi
   }
 }
 ```
+---
+### 11.6 Java Review Example (`POST /v1/review`)
 
+**Request**
+```json
+{
+  "request_id": "a1b2c3d4-5678-90ef-1234-567890abcdef",
+  "room_id": "room-demo-02",
+  "request_type": "review",
+  "language": "java",
+  "consent": true,
+  "code": "class Main {\n    public static void main(String[] args) {\n        System.out.println(\"Hello\");\n    }\n}",
+  "stderr": "",
+  "exit_code": 0,
+  "execution_time_ms": 120,
+  "peak_memory_mb": 45.2,
+  "timed_out": false,
+  "oom_killed": false,
+  "failure_kind": null
+}
+```
+---
+
+### 11.7 C Explanation Example (`POST /v1/example`)
+
+**Request**
+```json
+
+{
+  "request_id": "b2c3d4e5-6789-01fa-2345-678901bcdefa",
+  "room_id": "room-demo-02",
+  "request_type": "explanation",
+  "language": "c",
+  "consent": true,
+  "code": "#include <stdio.h>\nint main() {\n    int *ptr = NULL;\n    *ptr = 10;\n    return 0;\n}",
+  "stderr": "Segmentation fault (core dumped)",
+  "exit_code": 139,
+  "execution_time_ms": 12,
+  "peak_memory_mb": 1.4,
+  "timed_out": false,
+  "oom_killed": false,
+  "failure_kind": "non_zero_exit"
+}
+``` 
+---
+
+###11.8 JavaScript Anomaly Example(`POST /v1/anomaly`)
+**Request**
+```json
+{
+  "request_id": "c3d4e5f6-7890-12ab-3456-789012cdefab",
+  "room_id": "room-demo-03",
+  "request_type": "anomaly",
+  "language": "javascript",
+  "consent": true,
+  "execution_time_ms": 4800,
+  "peak_memory_mb": 110.5,
+  "stdout_bytes": 1024000,
+  "stderr_bytes": 0,
+  "exit_code": 0,
+  "timed_out": false,
+  "oom_killed": false
+}
+```
 ---
 
 ## 12. Open Items (v0)
