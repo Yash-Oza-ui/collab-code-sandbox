@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+                             https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>3.2.5</version>
+        <relativePath/>
+    </parent>
+
+    <groupId>com.collabcode</groupId>
+    <artifactId>sync-service</artifactId>
+    <version>0.0.1-SNAPSHOT</version>
+    <name>sync-service</name>
+    <description>WebSocket relay for collab-code-sandbox (T-02)</description>
+
+    <properties>
+        <java.version>21</java.version>
+    </properties>
+
+    <dependencies>
+        <!--
+            spring-boot-starter-web provides embedded Tomcat and Spring MVC,
+            which are required for the /internal REST endpoint and for the
+            JSR-356 WebSocket container configured by
+            ServletServerContainerFactoryBean.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+
+        <!--
+            spring-boot-starter-websocket provides @EnableWebSocket,
+            WebSocketConfigurer, AbstractWebSocketHandler, and
+            ServletServerContainerFactoryBean.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-websocket</artifactId>
+        </dependency>
+
+        <!--
+            Actuator exposes /actuator/health (port 8081), which is the health
+            path agreed in T-06 (docs/api-contracts.md section 1) and checked
+            by the T-08 smoke test.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+
+        <!-- Test scope: Spring Boot test harness + embedded server -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+        </plugins>
+    </build>
+</project>
