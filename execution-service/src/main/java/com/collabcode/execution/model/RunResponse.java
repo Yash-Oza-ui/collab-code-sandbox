@@ -6,8 +6,11 @@ import com.fasterxml.jackson.annotation.JsonInclude;
  * Run result body – T-06 section 4.2.
  *
  * All fields are present in every response, including failed runs (FR4.2).
- * Placeholder values are clearly marked in this scaffold; real values come
- * from US-08 (Jay) and US-09 (Quincy) which plug in actual Docker execution.
+ * Field names intentionally match T-06 section 4.2 and docs/ai-ml-contract.md.
+ *
+ * History:
+ *  T-03 scaffold – stub factory method (stubPlaceholder).
+ *  US-08 (Jay)   – full field population from ExecutionResult; stub removed.
  */
 @JsonInclude(JsonInclude.Include.ALWAYS)
 public class RunResponse {
@@ -58,44 +61,35 @@ public class RunResponse {
      */
     private String message;
 
-    // ----- static factory for the stub placeholder (T-03) -----
-
-    /**
-     * Returns a clearly-marked stub result.
-     * US-08 replaces this with real Docker output once T-03 merges.
-     */
-    public static RunResponse stubPlaceholder(RunRequest req) {
-        RunResponse r = new RunResponse();
-        r.request_id      = req.getRequest_id();
-        r.room_id         = req.getRoom_id();
-        r.language        = req.getLanguage();
-        // PLACEHOLDER – replaced by US-08 (Docker execution)
-        r.stdout          = "[PLACEHOLDER] No code was executed. US-08 will provide real output.";
-        r.stderr          = "";
-        r.exit_code       = 0;
-        r.execution_time_ms = 0.0;
-        r.peak_memory_mb  = 0.0;
-        r.timed_out       = false;
-        r.oom_killed      = false;
-        r.failure_kind    = null;
-        r.output_truncated = false;
-        r.message         = null;
-        return r;
-    }
-
     // ----- getters (Jackson serialises these) -----
 
-    public String getRequest_id()        { return request_id; }
-    public String getRoom_id()           { return room_id; }
-    public String getLanguage()          { return language; }
-    public String getStdout()            { return stdout; }
-    public String getStderr()            { return stderr; }
-    public int    getExit_code()         { return exit_code; }
-    public double getExecution_time_ms() { return execution_time_ms; }
-    public double getPeak_memory_mb()    { return peak_memory_mb; }
-    public boolean isTimed_out()         { return timed_out; }
-    public boolean isOom_killed()        { return oom_killed; }
-    public String getFailure_kind()      { return failure_kind; }
-    public boolean isOutput_truncated()  { return output_truncated; }
-    public String getMessage()           { return message; }
+    public String  getRequest_id()        { return request_id; }
+    public String  getRoom_id()           { return room_id; }
+    public String  getLanguage()          { return language; }
+    public String  getStdout()            { return stdout; }
+    public String  getStderr()            { return stderr; }
+    public int     getExit_code()         { return exit_code; }
+    public double  getExecution_time_ms() { return execution_time_ms; }
+    public double  getPeak_memory_mb()    { return peak_memory_mb; }
+    public boolean isTimed_out()          { return timed_out; }
+    public boolean isOom_killed()         { return oom_killed; }
+    public String  getFailure_kind()      { return failure_kind; }
+    public boolean isOutput_truncated()   { return output_truncated; }
+    public String  getMessage()           { return message; }
+
+    // ----- setters (used by RunController to build from ExecutionResult) -----
+
+    public void setRequest_id(String request_id)               { this.request_id = request_id; }
+    public void setRoom_id(String room_id)                     { this.room_id = room_id; }
+    public void setLanguage(String language)                   { this.language = language; }
+    public void setStdout(String stdout)                       { this.stdout = stdout; }
+    public void setStderr(String stderr)                       { this.stderr = stderr; }
+    public void setExit_code(int exit_code)                    { this.exit_code = exit_code; }
+    public void setExecution_time_ms(double execution_time_ms) { this.execution_time_ms = execution_time_ms; }
+    public void setPeak_memory_mb(double peak_memory_mb)       { this.peak_memory_mb = peak_memory_mb; }
+    public void setTimed_out(boolean timed_out)                { this.timed_out = timed_out; }
+    public void setOom_killed(boolean oom_killed)              { this.oom_killed = oom_killed; }
+    public void setFailure_kind(String failure_kind)           { this.failure_kind = failure_kind; }
+    public void setOutput_truncated(boolean output_truncated)  { this.output_truncated = output_truncated; }
+    public void setMessage(String message)                     { this.message = message; }
 }

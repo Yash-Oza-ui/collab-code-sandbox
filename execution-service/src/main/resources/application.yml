@@ -27,15 +27,11 @@ app:
   cors:
     allowed-origin: ${CLIENT_ORIGIN:http://localhost:3000}
 
-  # Internal sync-service URL used by execution-service to broadcast run
-  # results to the room (T-06 section 5, FR4.5).
-  # Override with SYNC_SERVICE_INTERNAL_URL env var in production.
+  # sync-service connection (T-06 section 5, RoomBroadcastService)
+  # INTERNAL_API_TOKEN must be set in your local .env (never commit the real value, NFR10).
   sync-service:
-    internal-url: ${SYNC_SERVICE_INTERNAL_URL:http://localhost:8081}  # PLACEHOLDER – US-08 wires this in
-
-  # Shared secret for the internal endpoint (T-06 section 5, NFR10).
-  # NEVER committed. Set INTERNAL_API_TOKEN in your local .env (git-ignored).
-  internal-api-token: ${INTERNAL_API_TOKEN:}  # PLACEHOLDER – required in production
+    internal-url:   ${SYNC_SERVICE_INTERNAL_URL:http://localhost:8081}
+    internal-token: ${INTERNAL_API_TOKEN:}
 
   # ---------------------------------------------------------------
   # Resource limits for sandboxed code execution (DR3, NFR4)
