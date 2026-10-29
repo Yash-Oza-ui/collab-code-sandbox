@@ -170,7 +170,37 @@ def test_review_stub_without_consent():
         "timed_out": False,
         "oom_killed": False,
     }
+    
     response = client.post("/v1/review", json=payload)
     assert response.status_code == 403
     data = response.json()
     assert data["error"]["code"] == "CONSENT_MISSING"
+
+
+def test_logging_excludes_raw_code(caplog):
+    """Test that application logs never contain raw user code (NFR8.2)."""
+    import logging
+    caplog.set_level(logging.INFO, logger="ai_ml_service")
+    
+    unique_code_string = "STRICTLY_CONFIDENTIAL_USER_CODE_998877"
+    payload = {
+        "request_id": "test-log-001",
+        "room_id": "test-room-01",
+        "request_type": "review",
+        "language": "python",
+        "consent": True,
+        "code": unique_code_string,
+        "stderr": "",
+        "exit_code": 0,
+        "execution_time_ms": 10.0,
+        "peak_memory_mb": 5.0,
+        "timed_out": False,
+        "oom_killed": False,
+    }
+    
+    response = client.post("/v1/review", json=payload)
+    assert response.status_code == 200
+    
+    # Verify the request was logged, but the raw code was stripped
+    assert "Request: POST /v1/review" in caplog.text
+    assert unique_code_string not in caplog.text
