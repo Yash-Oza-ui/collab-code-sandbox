@@ -147,7 +147,7 @@ curl -s -X POST http://localhost:8082/v1/runs \
     "stdin":      "abc"
   }'
 
-# 5. Missing 'code' – expected: 400 INVALID_REQUEST
+# 5. Missing 'code' – expected: 422 INVALID_REQUEST
 curl -i -X POST http://localhost:8082/v1/runs \
   -H "Content-Type: application/json" \
   -d '{

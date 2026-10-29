@@ -61,7 +61,7 @@ public class RunController {
 
         // Semantic language check (complement to @NotBlank from Bean Validation)
         if (!SUPPORTED_LANGUAGES.contains(req.getLanguage())) {
-            throw new UnsupportedLanguageException(req.getLanguage());
+            throw new UnsupportedLanguageException(req.getLanguage(), req.getRequest_id());
         }
 
         // --- Execute the code ---
@@ -113,6 +113,10 @@ public class RunController {
     public static class UnsupportedLanguageException extends RuntimeException {
         private final String language;
         private final String requestId;
+
+        public UnsupportedLanguageException(String language) {
+            this(language, null);
+        }
 
         public UnsupportedLanguageException(String language, String requestId) {
             super("Language '" + language + "' is not supported. Use one of: cpp, python, c, java, javascript.");

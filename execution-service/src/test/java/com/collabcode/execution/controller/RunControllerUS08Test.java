@@ -34,8 +34,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  *   3. Stdin run    – stdout "ABC\n"
  *   4. Compile error – stderr with error text, failure_kind "compile_error"
  *   5. Broadcast is called with room_id and correct type field (FR4.5)
- *   6. Missing 'code' → 400 INVALID_REQUEST
- *   7. Missing 'language' → 400 INVALID_REQUEST
+ *   6. Missing 'code' → 422 INVALID_REQUEST
+ *   7. Missing 'language' → 422 INVALID_REQUEST
  *   8. Unsupported language → 422 UNSUPPORTED_LANGUAGE
  *   9. All five DR1 languages accepted
  *  10. All required result fields present in every response (T-06 §4.2)
@@ -190,11 +190,11 @@ class RunControllerUS08Test {
         assertThat(responseCaptor.getValue().getRequest_id()).isEqualTo(REQUEST_ID);
     }
 
-    // ------------------------------------------------------------------ 6. missing code → 400
+    // ------------------------------------------------------------------ 6. missing code → 422
 
     @Test
-    @DisplayName("Missing 'code' field returns 400 INVALID_REQUEST (T-06 §7)")
-    void run_missingCode_returns400() throws Exception {
+    @DisplayName("Missing 'code' field returns 422 INVALID_REQUEST (T-06 §7)")
+    void run_missingCode_returns422() throws Exception {
         String body = """
                 {
                   "request_id": "%s",
@@ -207,18 +207,19 @@ class RunControllerUS08Test {
         mockMvc.perform(post("/v1/runs")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(body))
-                .andExpect(status().isBadRequest())
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.request_id").value(REQUEST_ID))
                 .andExpect(jsonPath("$.error.code").value("INVALID_REQUEST"))
                 .andExpect(jsonPath("$.error.message").isNotEmpty());
 
         verifyNoInteractions(codeRunner, broadcastService);
     }
 
-    // ------------------------------------------------------------------ 7. missing language → 400
+    // ------------------------------------------------------------------ 7. missing language → 422
 
     @Test
-    @DisplayName("Missing 'language' field returns 400 INVALID_REQUEST")
-    void run_missingLanguage_returns400() throws Exception {
+    @DisplayName("Missing 'language' field returns 422 INVALID_REQUEST")
+    void run_missingLanguage_returns422() throws Exception {
         String body = """
                 {
                   "request_id": "%s",
@@ -231,7 +232,8 @@ class RunControllerUS08Test {
         mockMvc.perform(post("/v1/runs")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(body))
-                .andExpect(status().isBadRequest())
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.request_id").value(REQUEST_ID))
                 .andExpect(jsonPath("$.error.code").value("INVALID_REQUEST"));
 
         verifyNoInteractions(codeRunner, broadcastService);
@@ -246,6 +248,7 @@ class RunControllerUS08Test {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(body("ruby", "puts 'hi'", "")))
                 .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.request_id").value(REQUEST_ID))
                 .andExpect(jsonPath("$.error.code").value("UNSUPPORTED_LANGUAGE"))
                 .andExpect(jsonPath("$.error.message").value(
                         org.hamcrest.Matchers.containsString("ruby")));
