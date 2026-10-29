@@ -26,12 +26,12 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * so they still pass after the stub factory was replaced with real execution.
  *
  * Covers:
- *   1. Health endpoint returns 200        (T-03 AC5, T-06 section 1)
- *   2. Valid request returns 200 with     (T-03 AC3)
+ *   1. Health endpoint returns 200               (T-03 AC5, T-06 section 1)
+ *   2. Valid request returns 200 with            (T-03 AC3)
  *      stdout, stderr and all result fields
- *   3. Missing 'code' field returns 4xx  (T-03 AC4)
- *   4. Missing 'language' returns 4xx    (T-03 AC4)
- *   5. Unsupported language returns 4xx  (T-03 AC4, DR1)
+ *   3. Missing 'code' field returns 422          (T-03 AC4, T-06 section 7.1)
+ *   4. Missing 'language' returns 422            (T-03 AC4, T-06 section 7.1)
+ *   5. Unsupported language returns 422          (T-03 AC4, DR1, T-06 section 7.1)
  *
  * No Docker calls are made. All tests run offline.
  */
@@ -124,11 +124,11 @@ class RunControllerTest {
         }
     }
 
-    // ------------------------------------------------------------------ missing fields → 4xx
+    // ------------------------------------------------------------------ missing fields → 422 INVALID_REQUEST
 
     @Test
-    @DisplayName("Missing 'code' returns 400 with clear message (T-03 AC4)")
-    void run_missingCode_returns400() throws Exception {
+    @DisplayName("Missing 'code' returns 422 with clear message (T-03 AC4, T-06 section 7.1)")
+    void run_missingCode_returns422() throws Exception {
         String body = """
                 {
                   "request_id": "0b9d2f3e-7a41-4c58-9e1b-5d3c8a6f2e10",
@@ -141,14 +141,15 @@ class RunControllerTest {
         mockMvc.perform(post("/v1/runs")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(body))
-                .andExpect(status().isBadRequest())
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.request_id").value("0b9d2f3e-7a41-4c58-9e1b-5d3c8a6f2e10"))
                 .andExpect(jsonPath("$.error.code").value("INVALID_REQUEST"))
-                .andExpect(jsonPath("$.error.message").isNotEmpty());
+                .andExpect(jsonPath("$.error.message").value("Field 'code' is missing or invalid."));
     }
 
     @Test
-    @DisplayName("Missing 'language' returns 400 with clear message (T-03 AC4)")
-    void run_missingLanguage_returns400() throws Exception {
+    @DisplayName("Missing 'language' returns 422 with clear message (T-03 AC4, T-06 section 7.1)")
+    void run_missingLanguage_returns422() throws Exception {
         String body = """
                 {
                   "request_id": "0b9d2f3e-7a41-4c58-9e1b-5d3c8a6f2e10",
@@ -161,14 +162,16 @@ class RunControllerTest {
         mockMvc.perform(post("/v1/runs")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(body))
-                .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.error.code").value("INVALID_REQUEST"));
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.request_id").value("0b9d2f3e-7a41-4c58-9e1b-5d3c8a6f2e10"))
+                .andExpect(jsonPath("$.error.code").value("INVALID_REQUEST"))
+                .andExpect(jsonPath("$.error.message").value("Field 'language' is missing or invalid."));
     }
 
-    // ------------------------------------------------------------------ unsupported language → 4xx
+    // ------------------------------------------------------------------ unsupported language → 422 UNSUPPORTED_LANGUAGE
 
     @Test
-    @DisplayName("Unsupported language returns 422 with clear message (T-03 AC4, DR1)")
+    @DisplayName("Unsupported language returns 422 with clear message (T-03 AC4, DR1, T-06 section 7.1)")
     void run_unsupportedLanguage_returns422() throws Exception {
         String body = """
                 {
@@ -184,8 +187,9 @@ class RunControllerTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(body))
                 .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.request_id").value("0b9d2f3e-7a41-4c58-9e1b-5d3c8a6f2e10"))
                 .andExpect(jsonPath("$.error.code").value("UNSUPPORTED_LANGUAGE"))
                 .andExpect(jsonPath("$.error.message").value(
-                        org.hamcrest.Matchers.containsString("ruby")));
+                        "Language 'ruby' is not supported. Use one of: cpp, python, c, java, javascript."));
     }
 }

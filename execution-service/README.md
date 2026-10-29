@@ -191,6 +191,10 @@ Sprint 2 sets real limits (NFR4).
 
 ```
 execution-service/
+├── Dockerfile
+├── mvnw / mvnw.cmd          # Maven Wrapper – no local Maven needed
+├── .mvn/wrapper/
+│   └── maven-wrapper.properties
 ├── pom.xml
 └── src/
     ├── main/
@@ -199,6 +203,7 @@ execution-service/
     │   │   ├── broadcast/
     │   │   │   └── RoomBroadcastService.java     # FR4.5: POST to sync-service (US-08, Jay)
     │   │   ├── config/
+    │   │   │   ├── CorsConfig.java                # CORS (T-06 §2)
     │   │   │   └── ExecutionLimitsProperties.java # DR3 limits (Bhavya)
     │   │   ├── controller/
     │   │   │   ├── RunController.java             # POST /v1/runs (US-08, Jay)

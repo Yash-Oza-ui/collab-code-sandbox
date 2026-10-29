@@ -4,6 +4,12 @@ server:
 spring:
   application:
     name: execution-service
+  # Enforce the 1 MiB run-request body cap (T-06 section 2).
+  # Overridden by app.execution.limits.max-request-body-bytes at runtime.
+  servlet:
+    multipart:
+      max-request-size: 1MB
+      max-file-size: 1MB
 
 # Spring Boot Actuator – exposes /actuator/health (T-06 section 1)
 management:
@@ -15,9 +21,9 @@ management:
     health:
       show-details: never
 
-# CORS: allow requests from the browser client (T-06 section 2)
-# Override with CLIENT_ORIGIN env var in production.
 app:
+  # CORS: allow requests from the browser client (T-06 section 2)
+  # Override with CLIENT_ORIGIN env var in production.
   cors:
     allowed-origin: ${CLIENT_ORIGIN:http://localhost:3000}
 
