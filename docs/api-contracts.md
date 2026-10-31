@@ -585,6 +585,165 @@ Each person confirms their own section in a PR comment: "I can implement my part
 
 ---
 
+# Version 2 (T-17 · #61)
+
+Version 2 continues T-06 (#9) and writes down the 15 decisions of Backlog v2 section 6.1. It is authored across two PRs that share this file: **decisions 1 to 7** (rooms, join, roles, sockets, modules) on `docs/T-17-contracts-v2-rooms`, and **decisions 8 to 15** (run spec, results, visibility, permission errors, legacy types, carried items) on `docs/T-17-contracts-v2-runs-errors`. Whichever merges first, the other rebases onto it.
+
+**The merged v0/v1 text above is not edited.** Each decision below states which v0/v1 rule it replaces. Where v2 and the text above disagree, v2 wins for Sprint 2 work.
+
+**Status legend.** *Decided* — the requirements or an accepted decision record force the behaviour. *Proposed* — a design choice that each category confirms in the PR (the T-06 rule). **All field and code names are Proposed until this version is merged and confirmed.** Every JSON example is made-up data; never real user code.
+
+| # | Topic | Status | PR |
+|---|---|---|---|
+| 1 | Room creation | Decided | rooms |
+| 2 | Who generates the room id | Decided | rooms |
+| 3 | Unknown room | Decided | rooms |
+| 4 | Join and unique names | Proposed | rooms |
+| 5 | Roles | Proposed | rooms |
+| 6 | Sockets | Proposed | rooms |
+| 7 | Module addressing | Proposed | rooms |
+| 8–15 | Run spec, results, visibility, permission errors, legacy types, internal codes, carried items | see companion PR | runs-errors |
+
+## V2.1 Room creation (decisions 1, 2) — Decided
+
+A room is created **only** by `POST /v1/rooms` on sync-service. Replaces the v0 rule (section 3.2) that the relay creates a room on first connect, and supersedes the v1 proposal body in section 8.
+
+```
+POST http://localhost:8081/v1/rooms
+Content-Type: application/json
+```
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `mode` | `"pair"` \| `"open"` | Yes | Fixed at creation, immutable (FR17). |
+| `preset` | `"teach_interview"` \| `"debug_together"` | Pair only | Omitted in Open mode. |
+| `language` | one of the five (section 2) | Open only | The workspace language. Omitted in Pair mode. |
+
+The server generates the `room_id`: at least **128 bits** from a secure random generator, written in **base64url**, within the existing 1 to 64 character rule (section 3.2). The client cannot choose or take over an id (NFR16, US-62).
+
+Request (Open mode):
+
+```json
+{ "mode": "open", "language": "python" }
+```
+
+Response `201 Created`:
+
+```json
+{
+  "room_id": "k3Yc1t9Qx7mBvA2nR0sLpQ",
+  "owner_token": "<owner-token>",
+  "mode": "open",
+  "preset": null,
+  "language": "python"
+}
+```
+
+Request (Pair mode):
+
+```json
+{ "mode": "pair", "preset": "teach_interview" }
+```
+
+Response `201 Created`:
+
+```json
+{
+  "room_id": "Zq8-Lw2Ef6Th0Yx4Rn7Jb",
+  "owner_token": "<owner-token>",
+  "mode": "pair",
+  "preset": "teach_interview",
+  "language": null
+}
+```
+
+## V2.2 Unknown room (decision 3) — Decided
+
+Connecting to a `room_id` that does not exist closes the socket with close code **`4404`**. The v0 rule that the relay creates a room on first connect is withdrawn. A room exists only after `POST /v1/rooms`.
+
+## V2.3 Join and unique names (decision 4) — Proposed
+
+Replaces the v0 rule (section 3.4) that the client sends no text frames. After connecting to the control socket (V2.5), the client sends **one** text message `join`:
+
+```json
+{
+  "type": "join",
+  "display_name": "Ada",
+  "owner_token": "<owner-token>"
+}
+```
+
+`owner_token` is sent **only** by the Host, and never in the URL (T-10). The server answers `joined`:
+
+```json
+{
+  "type": "joined",
+  "session_id": "7c1e4a52-3b0d-4f6a-9a2e-8d5f1b6c3e90",
+  "role": "host",
+  "mode": "open",
+  "preset": null,
+  "permissions": { "can_edit": true, "can_run": true }
+}
+```
+
+or `join-refused` with a `reason` of `NAME_TAKEN` (FR42), `ROOM_FULL` (US-63), `USER_BLOCKED` (US-28) or `APPROVAL_PENDING`:
+
+```json
+{ "type": "join-refused", "reason": "NAME_TAKEN", "message": "That display name is already in use in this room." }
+```
+
+## V2.4 Roles (decision 5) — Proposed
+
+Three roles: `host`, `participant`, `observer`. The server sends a `roster` message; the client takes labels and roles from it, **not** from awareness (awareness can be forged).
+
+```json
+{
+  "type": "roster",
+  "members": [
+    { "session_id": "7c1e4a52-3b0d-4f6a-9a2e-8d5f1b6c3e90", "display_name": "Ada", "role": "host", "permissions": { "can_edit": true, "can_run": true } },
+    { "session_id": "2b9f6d10-5c48-4a7e-b1d0-9e3f8c5b2a61", "display_name": "Lin", "role": "observer", "permissions": { "can_edit": false, "can_run": false } }
+  ]
+}
+```
+
+## V2.5 Sockets (decision 6) — Proposed
+
+Two sockets replace the single v0 socket (section 3.1), keeping all v0 relay rules (awareness echo, query-awareness frame, 1 MiB limit — section 3.5) on the document socket.
+
+| Socket | URL | Carries |
+|---|---|---|
+| Control | `ws://localhost:8081/ws/rooms/{room_id}?session_id=...` | text messages only (join, roster, run-result, edit-rejected, module-updated) |
+| Document | `ws://localhost:8081/ws/rooms/{room_id}/docs/{doc_id}?session_id=...` | Yjs binary frames only |
+
+Pair mode has one document, `main`. Open mode has one document per module, and its `doc_id` **is** the `module_id`. New close code **`4410`** (room closed, FR31.2) joins `4404` (room not found) and the v0 codes.
+
+## V2.6 Module addressing (decision 7) — Proposed
+
+`module_id` is a server-generated opaque id (at least 16 URL-safe characters), never reused, surviving rename and transfer. `name` is the file name with the language extension, unique in the workspace, changeable by the owner. Module operations are REST calls on sync-service (list, request, approve, rename, delete, transfer, set runnable, set entry file, grant/revoke write access, save). Each result is also pushed as a `module-updated` control message:
+
+```json
+{
+  "type": "module-updated",
+  "module_id": "mod_9Qx7mBvA2nR0",
+  "name": "solver.py",
+  "owner_session_id": "7c1e4a52-3b0d-4f6a-9a2e-8d5f1b6c3e90",
+  "runnable": true,
+  "is_entry": false,
+  "version": 4
+}
+```
+
+## V2.7 Review confirmations for decisions 1–7
+
+Each person confirms their own section in a PR comment: "I can implement my part from Version 2 (decisions 1–7) alone."
+
+- [ ] **Het (A):** V2.3 join, V2.4 roster, V2.5 sockets (client side).
+- [ ] **Yash and Femina (D):** V2.1–V2.2 room creation, V2.5–V2.6 sockets and modules (server).
+
+Decisions 8–15 and their confirmations (Jay, Prince) are in the companion PR `docs/T-17-contracts-v2-runs-errors`. When the full Version 2 is merged and confirmed, close T-06 (#9) with a comment listing the items carried forward (decision 15).
+
+---
+
 ## Changes
 
 | Version | Date | Change |
@@ -593,6 +752,7 @@ Each person confirms their own section in a PR comment: "I can implement my part
 | v0 | Oct 2026 | First draft: ports and health (adopted from T-08), conventions, sync connection and session id, run request and result, FR4.5 delivery, ordering rule. Error shapes and owner token reserved. |
 | v0 (PR2) | Oct 2026 | Section 7 added (Femina): error envelope from T-07, codes `QUEUE_FULL` (503), `UNSUPPORTED_LANGUAGE` (422), `INVALID_REQUEST` (422), `REQUEST_TOO_LARGE` (413) for `POST /v1/runs`, and `INVALID_MESSAGE` (400), `UNAUTHORIZED` (401) for the internal endpoint, each with a JSON example. No existing field renamed. |
 | v1 proposal | 12 Oct 2026 | Owner creation/check, platform URL, combined captured output and unavailable-language semantics. Await category confirmations; this package does not record approvals. |
+| v2 (decisions 1–7) | 31 Oct 2026 | Version 2 scaffold + decisions 1–7 added (T-17, #61, `docs/T-17-contracts-v2-rooms`): room creation (`POST /v1/rooms`), server-generated room id, `4404`/`4410` close codes, join/roster and roles, control + document sockets, module addressing and `module-updated`. No v0/v1 field renamed in place. Names Proposed until confirmed. Decisions 8–15 follow in the companion PR. |
 
 ### Runner infrastructure error (v1 proposal addition)
 
