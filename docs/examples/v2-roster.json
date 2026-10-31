@@ -1,0 +1,17 @@
+{
+  "type": "roster",
+  "members": [
+    {
+      "session_id": "7c1e4a52-3b0d-4f6a-9a2e-8d5f1b6c3e90",
+      "display_name": "Ada",
+      "role": "host",
+      "permissions": { "can_edit": true, "can_run": true }
+    },
+    {
+      "session_id": "2b9f6d10-5c48-4a7e-b1d0-9e3f8c5b2a61",
+      "display_name": "Lin",
+      "role": "observer",
+      "permissions": { "can_edit": false, "can_run": false }
+    }
+  ]
+}

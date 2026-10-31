@@ -619,7 +619,9 @@ Content-Type: application/json
 | `preset` | `"teach_interview"` \| `"debug_together"` | Pair only | Omitted in Open mode. |
 | `language` | one of the five (section 2) | Open only | The workspace language. Omitted in Pair mode. |
 
-The server generates the `room_id`: at least **128 bits** from a secure random generator, written in **base64url**, within the existing 1 to 64 character rule (section 3.2). The client cannot choose or take over an id (NFR16, US-62).
+The server generates the `room_id`: at least **128 bits** from a secure random generator, written in **base64url without `=` padding** (so it uses only `A-Za-z0-9_-` and stays inside the §3.2 charset), within the existing 1 to 64 character rule. 128 bits is **22 base64url characters**, so a valid id is at least 22 characters long. The client cannot choose or take over an id (NFR16, US-62).
+
+If `preset` is sent in Open mode, or `language` in Pair mode, or a field required for the chosen mode is missing, the server rejects the request with `INVALID_REQUEST` (HTTP 422); the exact error shape is finalised with decisions 8–15. The owner-check endpoint `GET /v1/rooms/{room_id}/owner` from section 8 is **retained unchanged** (needed by T-10).
 
 Request (Open mode):
 
@@ -649,7 +651,7 @@ Response `201 Created`:
 
 ```json
 {
-  "room_id": "Zq8-Lw2Ef6Th0Yx4Rn7Jb",
+  "room_id": "Zq8-Lw2Ef6Th0Yx4Rn7JbA",
   "owner_token": "<owner-token>",
   "mode": "pair",
   "preset": "teach_interview",
@@ -657,9 +659,11 @@ Response `201 Created`:
 }
 ```
 
+> **Example files.** The v2 shapes above are saved as parsable JSON under `docs/examples/`: [`v2-create-room-open-request.json`](examples/v2-create-room-open-request.json), [`v2-create-room-open-response.json`](examples/v2-create-room-open-response.json), [`v2-create-room-pair-request.json`](examples/v2-create-room-pair-request.json), [`v2-create-room-pair-response.json`](examples/v2-create-room-pair-response.json), and (for later sections) `v2-join.json`, `v2-joined.json`, `v2-roster.json`, `v2-module.json`, `v2-module-updated.json`. The old `create-room-request.json` (`{}`) and `create-room-response.json` are the **v1** shapes — do not copy them for v2.
+
 ## V2.2 Unknown room (decision 3) — Decided
 
-Connecting to a `room_id` that does not exist closes the socket with close code **`4404`**. The v0 rule that the relay creates a room on first connect is withdrawn. A room exists only after `POST /v1/rooms`.
+Connecting to a `room_id` that does not exist closes the socket with close code **`4404`**. The v0 rule that the relay creates a room on first connect is withdrawn. A room exists only after `POST /v1/rooms`. This also withdraws the section 8 sentence "A random valid link may still open a new empty, unowned room (instant join)": there are no unowned rooms, and an unknown link never creates one.
 
 ## V2.3 Join and unique names (decision 4) — Proposed
 
@@ -673,28 +677,42 @@ Replaces the v0 rule (section 3.4) that the client sends no text frames. After c
 }
 ```
 
-`owner_token` is sent **only** by the Host, and never in the URL (T-10). The server answers `joined`:
+`owner_token` is sent **only** by the Host, and never in the URL (T-10). A missing or invalid `owner_token` is **not an error**: the session simply joins without the Host role (its role comes from the room rules). The token is validated by the T-10 owner check and is never echoed or logged. The server answers `joined`:
 
 ```json
 {
   "type": "joined",
   "session_id": "7c1e4a52-3b0d-4f6a-9a2e-8d5f1b6c3e90",
   "role": "host",
-  "mode": "open",
-  "preset": null,
+  "mode": "pair",
+  "preset": "teach_interview",
   "permissions": { "can_edit": true, "can_run": true }
 }
 ```
 
-or `join-refused` with a `reason` of `NAME_TAKEN` (FR42), `ROOM_FULL` (US-63), `USER_BLOCKED` (US-28) or `APPROVAL_PENDING`:
+- **`joined.session_id` is an echo** of the id the client generated and sent in the connection URL (v0 §3.3); the server does not assign a new one.
+- **`permissions.can_edit` applies to Pair mode's single shared file.** In Open mode, edit rights are **per module** (FR22.2, Requirements v2 §7.4): the Host has no room-level edit right and may edit a module only as its owner or a granted writer. So in Open mode `can_edit` is not used (the client takes write access from module state, V2.6); `can_run` applies in both modes.
+- **Reconnect is not `NAME_TAKEN`.** A session rejoining with the **same `session_id`** and the same `display_name` (a refresh or a second tab) is accepted — FR42 identifies a person by session id. `NAME_TAKEN` is only for a **different** session id claiming a name already in use.
+
+Otherwise the server sends `join-refused` with a `reason` of `NAME_TAKEN` (FR42), `ROOM_FULL` (US-63), `USER_BLOCKED` (US-28) or `APPROVAL_PENDING`:
 
 ```json
 { "type": "join-refused", "reason": "NAME_TAKEN", "message": "That display name is already in use in this room." }
 ```
 
+- **`USER_BLOCKED` vs close code `4403`.** A removed user (US-28) opening a **new** connection is refused at join with `USER_BLOCKED`; a removed user who is **already connected** has the socket closed with code **`4403`** (reserved in v0 §3.6).
+- **After `APPROVAL_PENDING`** the server later sends either `join-approved` (followed by the normal `joined`) or `join-declined`:
+
+```json
+{ "type": "join-approved" }
+```
+```json
+{ "type": "join-declined", "message": "The Host declined your request to join." }
+```
+
 ## V2.4 Roles (decision 5) — Proposed
 
-Three roles: `host`, `participant`, `observer`. The server sends a `roster` message; the client takes labels and roles from it, **not** from awareness (awareness can be forged).
+Three roles: `host`, `participant`, `observer`. The server sends a `roster` message; the client takes labels and roles from it, **not** from awareness (awareness can be forged). `roster` is sent **after every join, leave, or role/permission change**, so the client always has the current list.
 
 ```json
 {
@@ -706,6 +724,8 @@ Three roles: `host`, `participant`, `observer`. The server sends a `roster` mess
 }
 ```
 
+The example is a **Pair** room; `permissions` follow the same per-mode rule as `joined` (V2.3), so in Open mode `can_edit` is not used and write access comes from module state (V2.6).
+
 ## V2.5 Sockets (decision 6) — Proposed
 
 Two sockets replace the single v0 socket (section 3.1), keeping all v0 relay rules (awareness echo, query-awareness frame, 1 MiB limit — section 3.5) on the document socket.
@@ -715,11 +735,63 @@ Two sockets replace the single v0 socket (section 3.1), keeping all v0 relay rul
 | Control | `ws://localhost:8081/ws/rooms/{room_id}?session_id=...` | text messages only (join, roster, run-result, edit-rejected, module-updated) |
 | Document | `ws://localhost:8081/ws/rooms/{room_id}/docs/{doc_id}?session_id=...` | Yjs binary frames only |
 
-Pair mode has one document, `main`. Open mode has one document per module, and its `doc_id` **is** the `module_id`. New close code **`4410`** (room closed, FR31.2) joins `4404` (room not found) and the v0 codes.
+Pair mode has one document, `main`. Open mode has one document per module, and its `doc_id` **is** the `module_id`. A session must `join` on the control socket **before** opening a document socket; a document socket opened without a prior join is closed with `4400`.
+
+New close codes: **`4410`** (room closed, FR31.2) and **`4405`** (unknown `doc_id`/`module_id` on the document socket — `4404` means the room, not the document, is unknown). These join `4404` (room not found) and the v0 codes (`4400`, `4403`, `1009`).
 
 ## V2.6 Module addressing (decision 7) — Proposed
 
-`module_id` is a server-generated opaque id (at least 16 URL-safe characters), never reused, surviving rename and transfer. `name` is the file name with the language extension, unique in the workspace, changeable by the owner. Module operations are REST calls on sync-service (list, request, approve, rename, delete, transfer, set runnable, set entry file, grant/revoke write access, save). Each result is also pushed as a `module-updated` control message:
+`module_id` is a server-generated opaque id (at least 16 URL-safe characters), never reused, surviving rename and transfer. `name` is the file name with the language extension, unique in the workspace, changeable by the owner (Open mode only).
+
+### Module object
+
+The shape returned by the module endpoints and carried by `module-updated`:
+
+```json
+{
+  "module_id": "mod_9Qx7mBvA2nR0",
+  "name": "solver.py",
+  "owner_session_id": "7c1e4a52-3b0d-4f6a-9a2e-8d5f1b6c3e90",
+  "writers": ["2b9f6d10-5c48-4a7e-b1d0-9e3f8c5b2a61"],
+  "runnable": true,
+  "is_entry": false,
+  "version": 4,
+  "pending": false
+}
+```
+
+`writers` is the list of session ids granted write access besides the owner. `pending` is `true` while a create request awaits Host approval.
+
+### Module operations (REST on sync-service)
+
+All paths are under `/v1/rooms/{room_id}/modules`. "Who" is who may call it. Each successful call also pushes a `module-updated` to the room (see below). Error codes (`NOT_MODULE_OWNER`, `NOT_OWNER`, `MODULE_NOT_FOUND`, `NAME_TAKEN`, …) come from **decision 12** and are written in the companion PR.
+
+| Operation | Method & path | Who | Request body | Success |
+|---|---|---|---|---|
+| List | `GET /v1/rooms/{room_id}/modules` | any member | — | `200` array of module objects |
+| Request (create) | `POST /v1/rooms/{room_id}/modules` | any participant | `{ "name": "solver.py" }` | `201` module object (or `202` with `pending: true` if approval is on) |
+| Approve | `POST /v1/rooms/{room_id}/modules/{module_id}/approve` | Host | — | `200` module object (`pending: false`) |
+| Rename | `PATCH /v1/rooms/{room_id}/modules/{module_id}` | owner or Host | `{ "name": "solver2.py" }` | `200` module object |
+| Delete | `DELETE /v1/rooms/{room_id}/modules/{module_id}` | owner or Host | — | `204` |
+| Transfer owner | `POST /v1/rooms/{room_id}/modules/{module_id}/transfer` | owner or Host | `{ "to_session_id": "…" }` | `200` module object |
+| Set runnable | `PATCH /v1/rooms/{room_id}/modules/{module_id}` | owner | `{ "runnable": true }` | `200` module object |
+| Set entry file | `PATCH /v1/rooms/{room_id}/modules/{module_id}` | Host or owner | `{ "is_entry": true }` | `200` module object |
+| Grant write | `POST /v1/rooms/{room_id}/modules/{module_id}/writers` | owner | `{ "session_id": "…" }` | `200` module object |
+| Revoke write | `DELETE /v1/rooms/{room_id}/modules/{module_id}/writers/{session_id}` | owner | — | `200` module object |
+| Save version | `POST /v1/rooms/{room_id}/modules/{module_id}/save` | owner or writer | — | `200` `{ "module_id": "…", "version": 5 }` |
+
+Example — grant write access:
+
+```
+POST http://localhost:8081/v1/rooms/{room_id}/modules/mod_9Qx7mBvA2nR0/writers
+Content-Type: application/json
+
+{ "session_id": "2b9f6d10-5c48-4a7e-b1d0-9e3f8c5b2a61" }
+```
+
+### `module-updated` push
+
+Every module change is pushed to the room as a `module-updated` control message carrying the module object plus a `deleted` flag:
 
 ```json
 {
@@ -727,11 +799,15 @@ Pair mode has one document, `main`. Open mode has one document per module, and i
   "module_id": "mod_9Qx7mBvA2nR0",
   "name": "solver.py",
   "owner_session_id": "7c1e4a52-3b0d-4f6a-9a2e-8d5f1b6c3e90",
+  "writers": ["2b9f6d10-5c48-4a7e-b1d0-9e3f8c5b2a61"],
   "runnable": true,
   "is_entry": false,
-  "version": 4
+  "version": 4,
+  "deleted": false
 }
 ```
+
+When a module is deleted, `deleted` is `true` and only `module_id` is guaranteed to be present. The `writers` list lets the client render per-module write access (FR24.2) and the full module list (FR22).
 
 ## V2.7 Review confirmations for decisions 1–7
 
@@ -753,6 +829,7 @@ Decisions 8–15 and their confirmations (Jay, Prince) are in the companion PR `
 | v0 (PR2) | Oct 2026 | Section 7 added (Femina): error envelope from T-07, codes `QUEUE_FULL` (503), `UNSUPPORTED_LANGUAGE` (422), `INVALID_REQUEST` (422), `REQUEST_TOO_LARGE` (413) for `POST /v1/runs`, and `INVALID_MESSAGE` (400), `UNAUTHORIZED` (401) for the internal endpoint, each with a JSON example. No existing field renamed. |
 | v1 proposal | 12 Oct 2026 | Owner creation/check, platform URL, combined captured output and unavailable-language semantics. Await category confirmations; this package does not record approvals. |
 | v2 (decisions 1–7) | 31 Oct 2026 | Version 2 scaffold + decisions 1–7 added (T-17, #61, `docs/T-17-contracts-v2-rooms`): room creation (`POST /v1/rooms`), server-generated room id, `4404`/`4410` close codes, join/roster and roles, control + document sockets, module addressing and `module-updated`. No v0/v1 field renamed in place. Names Proposed until confirmed. Decisions 8–15 follow in the companion PR. |
+| v2 (1–7, review) | 1 Nov 2026 | Review fixes (#79): 22-char room id + base64url-without-padding note; `joined`/`roster` `can_edit` clarified as Pair-only (per-module in Open, FR22.2); full module REST operations table, module object, and `writers`/`deleted` on `module-updated`; join-flow details (reconnect ≠ `NAME_TAKEN`, invalid owner_token, `APPROVAL_PENDING` → `join-approved`/`join-declined`, `session_id` echo, `USER_BLOCKED` vs `4403`); document socket join-first + close code `4405`; §8 unowned-room sentence withdrawn; `GET /v1/rooms/{id}/owner` retained; v2 example files added under `docs/examples/`. |
 
 ### Runner infrastructure error (v1 proposal addition)
 

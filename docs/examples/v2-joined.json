@@ -1,0 +1,11 @@
+{
+  "type": "joined",
+  "session_id": "7c1e4a52-3b0d-4f6a-9a2e-8d5f1b6c3e90",
+  "role": "host",
+  "mode": "pair",
+  "preset": "teach_interview",
+  "permissions": {
+    "can_edit": true,
+    "can_run": true
+  }
+}
