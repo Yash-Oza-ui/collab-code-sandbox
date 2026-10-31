@@ -198,6 +198,34 @@ jobs:
       - uses: gitleaks/gitleaks-action@v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  
+  integration:
+    name: integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      SMOKE_TIMEOUT: "120" # cold CI builds start slower than a laptop
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create .env from .env.example (no secrets in the repo, NFR10)
+        run: cp .env.example .env
+
+      - name: Start services
+        run: bash tests/integration/up.sh
+
+      - name: Smoke test and integration tests
+        run: bash tests/integration/run-all.sh
+
+      - name: Show container status and logs (on failure)
+        if: failure()
+        run: |
+          docker compose --profile "*" ps -a || true
+          docker compose --profile "*" logs --no-color --tail=200 || true
+
+      - name: Stop services
+        if: always()
+        run: docker compose --profile "*" down -v --remove-orphans || true
 
   # ---------------------------------------------------------------- summary
   # The single required status check. Green only if every job above passed
@@ -205,7 +233,7 @@ jobs:
   summary:
     name: build-and-test
     if: always()
-    needs: [client, ai-ml-service, spring-boot, gitleaks]
+    needs: [client, ai-ml-service, spring-boot, gitleaks, integration]
     runs-on: ubuntu-latest
     steps:
       - name: Check results of all jobs
