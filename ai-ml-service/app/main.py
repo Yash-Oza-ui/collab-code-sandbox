@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError, HTTPException
 
 from app.config import settings
-from app.routers import anomaly, explain, review
+from app.routers import explain
 
 app = FastAPI(
     title="Collab Code Sandbox — AI/ML Service",
@@ -85,6 +85,4 @@ def health_check():
 
 
 # Register API routers
-app.include_router(anomaly.router)
 app.include_router(explain.router)
-app.include_router(review.router)
