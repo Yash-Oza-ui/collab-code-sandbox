@@ -1,633 +1,341 @@
 # AI/ML Service — Execution-to-AI/ML Contract
 
-**Version:** v0 (draft)
-**Issue:** T-07 · #10
-**Branch:** `feature/T-07-ai-contract`
-**Author:** Prince Gadara (Category C — PR1: contract specification & alignment)
-**Reviewers:** Digvijay Parmar (PR2 — JSON Schemas & model integration)
-**Status:** Aligned with `docs/api-contracts.md` (T-06 v0) and `ai-ml-service/docs/anomaly-spec.md` (T-13 draft).
-
----
-
-> **T-06 & T-13 Alignment Note**
-> This document is fully aligned with:
-> 1. `docs/api-contracts.md` (T-06 v0, Yash Oza): Port 8000, health path `/health`, `snake_case` JSON fields, common execution metrics, error envelope shape (§7), and strict execution ordering (§6, NFR9).
-> 2. `ai-ml-service/docs/anomaly-spec.md` (T-13, Digvijay Parmar): Metric feature list (`execution_time_ms`, `peak_memory_mb`, `stdout_bytes`, `stderr_bytes`, `exit_code`, `timed_out`, `oom_killed`, `language`), reason categories (`reason_category_id`), and threshold deferred to Sprint 3 validation.
-
----
-
-## Contents
-
-- [AI/ML Service — Execution-to-AI/ML Contract](#aiml-service--execution-to-aiml-contract)
-  - [Contents](#contents)
-  - [1. Overview](#1-overview)
-  - [2. Base URL and Health Check](#2-base-url-and-health-check)
-  - [3. Common Request Fields](#3-common-request-fields)
-  - [4. Endpoints](#4-endpoints)
-    - [4.1 `GET /health`](#41-get-health)
-    - [4.2 `POST /v1/review`](#42-post-v1review)
-      - [Request body](#request-body)
-      - [Response 200](#response-200)
-    - [4.3 `POST /v1/explain`](#43-post-v1explain)
-      - [Request body](#request-body-1)
-      - [Response 200](#response-200-1)
-    - [4.4 `POST /v1/anomaly`](#44-post-v1anomaly)
-      - [Request body](#request-body-2)
-      - [Response 200](#response-200-2)
-      - [Reason Categories (`reason_category_id`, from T-13 §2)](#reason-categories-reason_category_id-from-t-13-2)
-  - [5. Error Envelope](#5-error-envelope)
-    - [Error Codes](#error-codes)
-  - [6. Ordering Rule — NFR9 \& T-06 §6](#6-ordering-rule--nfr9--t-06-6)
-  - [7. Room Broadcast Follow-ups (Sync Integration)](#7-room-broadcast-follow-ups-sync-integration)
-    - [7.1 `anomaly-warning` (FR8.2)](#71-anomaly-warning-fr82)
-    - [7.2 `ai-explanation` (FR13.2)](#72-ai-explanation-fr132)
-  - [8. Cache Key — NFR5.2](#8-cache-key--nfr52)
-  - [9. Logging Fields — NFR8](#9-logging-fields--nfr8)
-  - [10. Design Decisions](#10-design-decisions)
-  - [11. Examples](#11-examples)
-    - [11.1 Review (`POST /v1/review`)](#111-review-post-v1review)
-    - [11.2 Explanation (`POST /v1/explain`)](#112-explanation-post-v1explain)
-    - [11.3 Anomaly — Normal Execution (`POST /v1/anomaly`)](#113-anomaly--normal-execution-post-v1anomaly)
-    - [11.4 Anomaly — Anomalous Execution (`POST /v1/anomaly`)](#114-anomaly--anomalous-execution-post-v1anomaly)
-    - [11.5 Error — Consent Missing (`POST /v1/explain`)](#115-error--consent-missing-post-v1explain)
-    - [11.6 Java Review Example (`POST /v1/review`)](#116-java-review-example-post-v1review)
-    - [11.7 C Explanation Example (`POST /v1/example`)](#117-c-explanation-example-post-v1example)
-  - [12. Open Items (v0)](#12-open-items-v0)
+**Version:** v2  
+**Issue:** T-18 · Backlog v2 §6.2  
+**Built against:** Requirements Specification v2 (`docs/IT314_Group32_Requirements_v2_Final.md`), Product Backlog v2 (`docs/IT314_Group32_Backlog_v2_Final.md`), and `docs/ai-ml-service.md`  
+**Authors:** Prince Gadara (Tasks 1 & 2), Chandan (Task 3), Digvijay Parmar (Tasks 4 & 5)  
+**Status:** Decided / Aligned with v2 Architecture (CHG-01)  
 
 ---
 
 ## 1. Overview
 
-This document defines the HTTP contract between the **execution-service** (caller, Java/Spring Boot) and the **ai-ml-service** (service, Python/FastAPI), operating on port 8000. It covers three operational endpoints — `review`, `explain`, and `anomaly` — plus the container health check.
+This document specifies the HTTP contract between **execution-service** (caller, Java/Spring Boot) and **ai-ml-service** (service, Python/FastAPI), operating on port 8000.
 
-**Caller:** execution-service
-**Service:** ai-ml-service
-**Port:** 8000 (`PORT`, fixed in T-06 §1)
+Per **Requirements v2** and **CHG-01 §4.6**, the AI/ML service delivers 5 core tasks:
+1. **Task 1: Time complexity measurement and verified optimizations** (runs input sizes $n, 2n, 4n$; AST/regex rules first; verifies patches in sandbox).
+2. **Task 2: Slowdown detection on run history** (median & MAD baseline for same `input_hash`; flags runs $\ge 8\times$ slower; diff highlights).
+3. **Task 3: Failing-input search and minimization** (edge cases first; random generator; delta reduction to small failing input; Save as Test Case).
+4. **Task 4: C/C++ crash explanation** (AddressSanitizer and UndefinedBehaviorSanitizer report parsing; LLM explanation on error summary + relevant snippet only).
+5. **Task 5: AI usage and cost control** (normalized-code caching, telemetry counters, hourly per-room limit, monthly budget cap with alert at 80%, `COST_CAP_REACHED`).
 
-Core architectural rules enforced by this contract:
-
-- **Non-blocking execution (NFR9, T-06 §6):** The execution-service calls this service **only after** delivering execution results to room participants. AI/ML processing runs asynchronously (fork/join) and never delays execution output.
-- **Privacy & Data minimization (NFR8.2, T-13 §1):**
-  - `review` and `explain` requests require user consent (FR12) and include code/stderr.
-  - `anomaly` requests include **only numeric metrics and language metadata — no source code, no stderr text, no stdin**.
-- **Consent gating (FR12):** `review` and `explain` require `consent: true`. A `consent: false` payload returns `CONSENT_MISSING` (HTTP 403).
-- **Metric passthrough:** Field names for execution metrics match `docs/api-contracts.md` §4.2 character-for-character so execution-service forwards them directly without translation.
+### Core Architectural Rules
+- **Non-blocking execution (NFR9, CR08):** Execution results are returned immediately to the user. Analyses run asynchronously and their results arrive as separate messages to the run's audience.
+- **Dual Consent & Gating (FR12, FR35, CR12):** Any step contacting an external LLM requires `consent == true` (user) and `ai_enabled == true` (Host switch).
+- **Graceful Fallback / AI-free continuity (NFR7.5, FR35.3, FR40.5):** If AI is disabled, consent is missing, rate limits are hit, or the cost cap is reached, AI-free analysis (measurements, rules, statistics, sanitizer parsing) proceeds and returns HTTP 200 with `ai_step: { "status": "skipped", "error_code": "..." }`.
+- **Data Minimization & Privacy (NFR8.2, US-25):** Telemetry logs and counters contain metadata only (`request_id`, `room_id`, `request_type`, `language`, `status`, `error_code`, `latency_ms`). Logs never contain source code, stdin, stderr, or prompts.
+- **Relevant Snippet Only (FR40.2, US-76):** External AI prompts contain only the error summary and relevant function/snippet, never the full file.
 
 ---
 
 ## 2. Base URL and Health Check
 
-```
-http://ai-ml-service:8000
-```
-
-- Inside Docker Compose network: `http://ai-ml-service:8000` (matches `docker-compose.yml` service name and T-06 §1).
-- Host / local development: `http://localhost:8000`.
-- All operational endpoints are prefixed with `/v1`.
-- Health check is hosted at `/health` (HTTP 200).
+- Inside Docker network: `http://ai-ml-service:8000`
+- Local development: `http://localhost:8000`
+- Health check: `GET /health` -> `{"status": "ok", "version": "v2"}`
 
 ---
 
-## 3. Common Request Fields
+## 3. Common Request Envelope
 
-Every POST endpoint body includes these standard envelope fields:
+Every analysis endpoint requires the following envelope fields:
 
-| Field          | Type                                                            | Required | Notes                                                                                           |
-|----------------|-----------------------------------------------------------------|----------|-------------------------------------------------------------------------------------------------|
-| `request_id`   | string (UUID v4)                                                | Yes      | Generated by the client for the run (T-06 §2). Echoed unchanged in every response and log line. |
-| `room_id`      | string                                                          | Yes      | Identifies the room. Used for correlation and per-room rate limiting (NFR5.3).                 |
-| `request_type` | `"review"` \| `"explanation"` \| `"anomaly"`                  | Yes      | Identifies the requested action. Must match the route invoked.                                  |
-| `language`     | `"cpp"` \| `"python"` \| `"c"` \| `"java"` \| `"javascript"` | Yes      | Exact DR1 language identifiers (matching T-06 §2 and T-13 §1).                                  |
-| `consent`      | boolean                                                         | Yes      | `true` when user has consented to external AI analysis (FR12). Required for `review` & `explain`. |
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `request_id` | string (UUID v4) | Yes | Correlation ID matching the original run request. |
+| `room_id` | string | Yes | Room identifier. Used for rate-limiting, history, and telemetry. |
+| `analysis_id` | string (UUID v4) | Yes | Identifier for this specific analysis operation. |
+| `request_type` | `"complexity"` \| `"slowdown"` \| `"failing_input"` \| `"crash_explanation"` | Yes | Specific analysis task type. |
+| `language` | `"cpp"` \| `"python"` \| `"c"` \| `"java"` \| `"javascript"` | Yes | Programming language identifier (DR1). |
+| `consent` | boolean | Yes | User AI consent status (FR12). |
+| `ai_enabled` | boolean | Yes | Room Host AI switch status (FR35). |
 
 ---
 
 ## 4. Endpoints
 
-### 4.1 `GET /health`
-
-Liveness probe for Docker container and T-08 smoke tests. Returns 200 when the FastAPI service is running. Does not probe external LLM APIs.
-
-**Response 200**
-
+### 4.1 Health Check
+`GET /health`  
+Response (200 OK):
 ```json
 {
   "status": "ok",
-  "version": "v0"
+  "version": "v2"
 }
 ```
 
 ---
 
-### 4.2 `POST /v1/review`
+### 4.2 Task 1: Time Complexity & Verified Optimizations
+`POST /v1/analyses/complexity`
 
-On-demand AI code review (FR7). Triggered explicitly by a user with consent (FR12). Never called automatically.
+Per FR36.1–FR36.4, US-65–US-67. Analyzes growth rate across sizes $n, 2n, 4n$, runs AST/regex rules for common slow patterns, and optionally verifies fixes in the sandbox.
 
-#### Request body
-
-Common fields (§3) plus:
-
-| Field               | Type                                                             | Required | Notes                                                                      |
-|---------------------|------------------------------------------------------------------|----------|----------------------------------------------------------------------------|
-| `code`              | string                                                           | Yes      | Source code to review (FR4.1).                                             |
-| `stderr`            | string                                                           | Yes      | Stderr output from the run, or `""` if successful.                         |
-| `exit_code`         | integer                                                          | Yes      | Exit code of the process (T-06 §4.2).                                      |
-| `execution_time_ms` | number                                                           | Yes      | Wall-clock execution time in milliseconds (T-06 §4.2).                     |
-| `peak_memory_mb`    | number                                                           | Yes      | Peak memory usage in megabytes (T-06 §4.2).                                |
-| `timed_out`         | boolean                                                          | Yes      | `true` if killed by wall-time limit (NFR4.1, T-06 §4.2).                    |
-| `oom_killed`        | boolean                                                          | Yes      | `true` if killed by memory limit (NFR4.2, T-06 §4.2).                       |
-| `failure_kind`      | `"compile_error"` \| `"non_zero_exit"` \| `"timeout"` \| `null` | Yes      | `null` when execution succeeded (T-06 §4.2).                               |
-
-#### Response 200
-
+#### Request Body
 ```json
 {
-  "request_id": "<uuid echoed from request>",
-  "summary": "One-sentence overall code assessment.",
-  "comments": [
-    {
-      "line": 12,
-      "severity": "warning",
-      "message": "Human-readable description of the issue.",
-      "suggestion": "Optional remediation hint or null."
-    }
+  "request_id": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+  "room_id": "room-pair-101",
+  "analysis_id": "c1f7a0b3-9e4a-4d2b-a71c-1c2e3f4a5b6c",
+  "request_type": "complexity",
+  "language": "python",
+  "consent": true,
+  "ai_enabled": true,
+  "code": "def solve(n):\n    total = 0\n    for i in range(n):\n        for j in range(n):\n            total += 1\n    return total",
+  "measurements": [
+    {"input_size": 100, "runtimes_ms": [1.1, 1.2, 1.1]},
+    {"input_size": 200, "runtimes_ms": [4.3, 4.5, 4.4]},
+    {"input_size": 400, "runtimes_ms": [17.8, 18.0, 17.9]}
   ]
 }
 ```
 
-| Field                   | Type                                  | Notes                                                           |
-|-------------------------|---------------------------------------|-----------------------------------------------------------------|
-| `request_id`            | string                                | Echoed from request.                                            |
-| `summary`               | string                                | Exactly one sentence. Never empty.                              |
-| `comments`              | array                                 | List of comment objects. Empty array `[]` if no issues found.   |
-| `comments[].line`       | integer \| null                       | 1-based source line number, or `null` for file-level comments.  |
-| `comments[].severity`   | `"info"` \| `"warning"` \| `"error"`  | Severity level.                                                 |
-| `comments[].message`    | string                                | Description of the issue.                                       |
-| `comments[].suggestion` | string \| null                        | Optional remediation suggestion.                                |
-
----
-
-### 4.3 `POST /v1/explain`
-
-Short plain-language explanation of a failed execution (FR13.1). Called when an execution fails and the user has consented (FR12).
-
-**Constraint:** The `explanation` string must be **at most 3 sentences**, plain prose, without markdown formatting.
-
-#### Request body
-
-Same fields as `/v1/review` (§4.2): common fields (§3) plus `code`, `stderr`, `exit_code`, `execution_time_ms`, `peak_memory_mb`, `timed_out`, `oom_killed`, `failure_kind`.
-
-#### Response 200
-
+#### Response Body (200 OK)
 ```json
 {
-  "request_id": "<uuid echoed from request>",
-  "explanation": "At most 3 sentences in plain language explaining the failure."
-}
-```
-
----
-
-### 4.4 `POST /v1/anomaly`
-
-ML-based anomaly scoring of execution metrics (FR8.1, T-13). Called after **every** execution run (success or failure) by execution-service.
-
-**Privacy guarantee (NFR8.2, T-13 §1):** Anomaly scoring operates **strictly** on execution metrics and metadata. **No `code`, `stderr` text, or `stdin` fields are accepted.**
-
-#### Request body
-
-Common fields (§3) plus the metrics defined in `ai-ml-service/docs/anomaly-spec.md` (T-13 §1):
-
-| Field               | Type     | Required | Notes                                                               |
-|---------------------|----------|----------|---------------------------------------------------------------------|
-| `execution_time_ms` | number   | Yes      | Wall-clock execution time in milliseconds (T-06 §4.2, T-13 §1).     |
-| `peak_memory_mb`    | number   | Yes      | Peak memory usage in megabytes (T-06 §4.2, T-13 §1).                |
-| `stdout_bytes`      | integer  | Yes      | Byte length of standard output generated (T-13 §1).                 |
-| `stderr_bytes`      | integer  | Yes      | Byte length of standard error output generated (T-13 §1).            |
-| `exit_code`         | integer  | Yes      | Process exit code (T-06 §4.2, T-13 §1).                             |
-| `timed_out`         | boolean  | Yes      | `true` if killed by configured wall-time limit (default 5s, DR3).   |
-| `oom_killed`        | boolean  | Yes      | `true` if killed by configured memory limit (default 128MB, DR3).   |
-
-> **Unit Conventions & Configured Limits (DR3):**
-> - Standard binary units apply: **1 KB = 1024 bytes (KiB)** and **1 MB = 1,048,576 bytes (MiB)** for `stdout_bytes` and `stderr_bytes`.
-> - Resource constraints (current defaults: 5s wall time NFR4.1, 128 MB memory NFR4.2, 1 MB output cap NFR4.4) are **configuration parameters, not hardcoded into the contract** (DR3, T-06 §2). Warning messages refer to the "configured time limit".
-
-#### Response 200
-
-```json
-{
-  "request_id": "<uuid echoed from request>",
-  "is_anomalous": false,
-  "score": 0.21,
-  "reasons": [],
-  "message_short": ""
-}
-```
-
-| Field           | Type    | Notes                                                                                                                                           |
-|-----------------|---------|-------------------------------------------------------------------------------------------------------------------------------------------------|
-| `request_id`    | string  | Echoed from request.                                                                                                                            |
-| `is_anomalous`  | boolean | `true` when `score` exceeds threshold. Threshold is chosen during Sprint 3 validation (T-13 §4, FR8.1). Sprint 1 baseline stub returns `false`.|
-| `score`         | number  | Continuous anomaly score in `[0.0, 1.0]`. Higher indicates greater anomaly.                                                                     |
-| `reasons`       | array   | List of `reason_category_id` strings (see table below). Empty array `[]` when `is_anomalous` is `false`.                                       |
-| `message_short` | string  | Short user-facing warning sentence broadcast to the room (FR8.2). Empty string `""` when `is_anomalous` is `false`.                             |
-
-#### Reason Categories (`reason_category_id`, from T-13 §2)
-
-When `is_anomalous: true`, `reasons` contains one or more of the following standard identifiers, and `message_short` provides the human-readable explanation:
-
-| `reason_category_id`      | Description / `message_short` template (T-13 §2)                             |
-|---------------------------|-------------------------------------------------------------------------------|
-| `EXCESSIVE_EXECUTION_TIME`| "The execution took unusually long, nearing the configured time limit."       |
-| `HIGH_MEMORY_USAGE`       | "The code consumed an unexpectedly large amount of memory."                   |
-| `OUTPUT_FLOODING`         | "The code generated an unusually massive amount of text output."              |
-| `ABNORMAL_TERMINATION`    | "The execution crashed or triggered a system resource kill."                 |
-
----
-
-## 5. Error Envelope
-
-Error responses across all endpoints adhere to the standard project error envelope (matching `docs/api-contracts.md` §7):
-
-```json
-{
-  "request_id": "<uuid from request, or null if unparseable>",
-  "error": {
-    "code": "RATE_LIMITED_PROVIDER",
-    "message": "The AI provider returned HTTP 429. Retry after 30 seconds.",
-    "retry_after_seconds": 30
+  "request_id": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+  "analysis_id": "c1f7a0b3-9e4a-4d2b-a71c-1c2e3f4a5b6c",
+  "task": "complexity",
+  "growth_rate": 2.01,
+  "estimated_complexity": "O(n^2)",
+  "r2_score": 0.999,
+  "projected_timeout_input_size": 6500,
+  "slow_patterns": [
+    {
+      "pattern": "nested_loops",
+      "line": 3,
+      "message": "Nested loop detected: potential quadratic time complexity O(n^2)."
+    }
+  ],
+  "ai_step": {
+    "status": "ok",
+    "suggested_fix": null,
+    "verified": false
   }
 }
 ```
 
-`retry_after_seconds` is an `integer` when a retry window is known, or `null` otherwise.
-
-### Error Codes
-
-| Code                    | HTTP Status | Trigger Condition                                                                                     | Expected Caller Behaviour                                                                     |
-|-------------------------|-------------|-------------------------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------|
-| `RATE_LIMITED_PROVIDER` | **429**     | Upstream AI provider returned HTTP 429. `retry_after_seconds` passed from provider `Retry-After`.    | Caller waits `retry_after_seconds` then retries. Editor & execution continue unaffected.      |
-| `COST_CAP_REACHED`      | **402**     | Monthly spend cap reached (NFR7.2).                                                                   | Surface "AI temporarily unavailable" in room. Code execution is unaffected.                   |
-| `CONSENT_MISSING`       | **403**     | `consent` is `false` on a `review` or `explain` call (FR12.2).                                        | Do not retry without obtaining explicit user consent.                                         |
-| `INVALID_REQUEST`       | **422**     | Missing required fields, unrecognised `language`, invalid types, or malformed JSON payload.          | Inspect and correct request payload; do not retry unchanged.                                  |
-| `PROVIDER_ERROR`        | **502**     | Upstream AI provider returned 5xx or unparseable response body.                                       | May retry with exponential backoff.                                                           |
-| `PROVIDER_TIMEOUT`      | **504**     | Upstream AI provider timed out.                                                                       | May retry.                                                                                    |
-
 ---
 
-## 6. Ordering Rule — NFR9 & T-06 §6
+### 4.3 Task 2: Detect Slowdowns in Run History
+`POST /v1/analyses/slowdown`
 
-> **The ai-ml-service is NEVER in the critical path of code execution results.**
+Per FR37.1–FR37.4, US-68–US-69. Compares runs with identical `input_hash` against historical median and MAD baseline. Flags runs $\ge 8\times$ slower.
 
-The execution-service executes the following sequence:
-
-```mermaid
-sequenceDiagram
-    participant C as Client / Room
-    participant E as execution-service
-    participant S as sync-service
-    participant AI as ai-ml-service
-
-    C->>E: POST /v1/runs
-    E->>E: Run code in temporary Docker container
-    E->>S: POST /internal/rooms/{room_id}/messages (run-result)
-    S-->>C: Broadcast run-result
-    E-->>C: 200 OK run result
-    Note over E,AI: Execution complete — async follow-ups begin
-    E->>AI: POST /v1/anomaly
-    AI-->>E: 200 OK anomaly score & reasons
-    opt is_anomalous == true
-        E->>S: POST /internal/rooms/{room_id}/messages (anomaly-warning)
-        S-->>C: Broadcast anomaly-warning
-    end
-    opt user consented & requested review/explanation
-        E->>AI: POST /v1/explain or POST /v1/review
-        AI-->>E: 200 OK result
-        E->>S: POST /internal/rooms/{room_id}/messages (ai-explanation)
-        S-->>C: Broadcast ai-explanation
-    end
-```
-
-1. Run user code in an isolated container.
-2. Deliver the `run-result` to sync-service for broadcast and return HTTP 200 to the caller.
-3. **Only after step 2**, invoke `POST /v1/anomaly`.
-4. If `is_anomalous: true`, dispatch an `anomaly-warning` follow-up message to the room via sync-service.
-5. If requested and consented, invoke `POST /v1/explain` or `POST /v1/review`, and dispatch `ai-explanation` follow-up message to sync-service.
-
----
-
-## 7. Room Broadcast Follow-ups (Sync Integration)
-
-Messages forwarded to sync-service (`POST /internal/rooms/{room_id}/messages`) use the reserved frame types defined in `docs/api-contracts.md` §3.6:
-
-### 7.1 `anomaly-warning` (FR8.2)
-
+#### Request Body
 ```json
 {
-  "type": "anomaly-warning",
-  "request_id": "0b9d2f3e-7a41-4c58-9e1b-5d3c8a6f2e10",
-  "room_id": "room-demo-01",
-  "reasons": ["EXCESSIVE_EXECUTION_TIME"],
-  "message_short": "The execution took unusually long, nearing the configured time limit."
-}
-```
-
-### 7.2 `ai-explanation` (FR13.2)
-
-```json
-{
-  "type": "ai-explanation",
-  "request_id": "c9bf9e57-1685-4c89-bafb-ff5af830be8a",
-  "room_id": "room-demo-01",
-  "explanation": "The program read past the end of a 3-element array using index 10, causing a segmentation fault. Fix the array index or add bounds checking."
-}
-```
-
----
-
-## 8. Cache Key — NFR5.2
-
-To limit API spend (NFR7), identical `review` and `explain` requests are cached service-wide by SHA-256 hash:
-
-```
-SHA-256( code + "\n" + language + "\n" + request_type + "\n" + stderr_if_relevant )
-```
-
-- `stderr_if_relevant` is the literal stderr text for `explain` requests, and `""` for `review` requests.
-- **Only the hash is cached** — raw user code is never stored persistently (NFR8.2).
-- Anomaly scoring is **not cached** since execution metrics vary between runs.
-- Cache implementation is scheduled for Sprint 3.
-
----
-
-## 9. Logging Fields — NFR8
-
-Every request processed by ai-ml-service is logged with structured JSON containing only these operational fields:
-
-| Field          | Type    | Notes                                                         |
-|----------------|---------|---------------------------------------------------------------|
-| `request_id`   | string  | Echoed from request.                                          |
-| `room_id`      | string  | Echoed from request.                                          |
-| `request_type` | string  | `"review"`, `"explanation"`, or `"anomaly"`.                  |
-| `language`     | string  | DR1 identifier.                                               |
-| `status`       | string  | `"success"` or `"error"`.                                     |
-| `error_code`   | string  | Error code from §5, or `null` on success.                     |
-| `latency_ms`   | integer | Processing duration in milliseconds.                          |
-
-**Prohibited from logs (NFR8.2):** User code, stderr text, stdin, response text, or any user identifiers beyond `room_id`.
-
----
-
-## 10. Design Decisions
-
-| Decision | Traceability | Rationale |
-|---|---|---|
-| Single port 8000 & `/health` endpoint | T-06 §1, T-08 | Consistent integration test surface across all 4 services. |
-| Zero metric translation | T-06 §4.2, T-13 §1 | Field names match execution-service run result (`execution_time_ms`, `peak_memory_mb`, `exit_code`, `timed_out`, `oom_killed`) so execution-service forwards them directly without transformation. |
-| Anomaly payload has no code | T-13 §1, NFR8.2 | Feature extraction uses purely numeric and metadata metrics. Storing or transferring code for anomaly scoring violates data minimization. |
-| Standardized reason categories | T-13 §2 | Enumerating `EXCESSIVE_EXECUTION_TIME`, `HIGH_MEMORY_USAGE`, `OUTPUT_FLOODING`, `ABNORMAL_TERMINATION` ensures consistent UI messaging. |
-| Threshold deferred to Sprint 3 | T-13 §4, FR8.1 | Synthetic training in T-12 and baseline model in T-15 precede final statistical calibration. Hard-coding thresholds in v0 contract is prohibited. |
-| Configured limits (DR3) | T-06 §2, DR3, NFR4 | Execution limits (5s, 128MB, 1MB output) are host-configurable defaults, not fixed contract constants. Warning messages refer to "configured time limit". |
-| Binary byte units | T-13 §3.1, NFR4.4 | Standard binary units (1 KB = 1024 bytes, 1 MB = 1,048,576 bytes) apply to `stdout_bytes` and `stderr_bytes`. |
-| Unified error envelope | T-06 §7 | Ensures execution-service handles errors uniformly across all downstream endpoints. |
-
----
-
-## 11. Examples
-
-### 11.1 Review (`POST /v1/review`)
-
-**Request**
-
-```json
-{
-  "request_id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
-  "room_id": "room-demo-01",
-  "request_type": "review",
-  "language": "cpp",
-  "consent": true,
-  "code": "#include <iostream>\nint main() {\n    int unused_var;\n    std::cout << \"hello\" << std::endl;\n    return 0;\n}",
-  "stderr": "",
-  "exit_code": 0,
-  "execution_time_ms": 312,
-  "peak_memory_mb": 4.1,
-  "timed_out": false,
-  "oom_killed": false,
-  "failure_kind": null
-}
-```
-
-**Response 200**
-
-```json
-{
-  "request_id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
-  "summary": "The code compiles and runs successfully; one unused variable detected.",
-  "comments": [
-    {
-      "line": 3,
-      "severity": "warning",
-      "message": "Variable 'unused_var' is declared but never read.",
-      "suggestion": "Remove 'unused_var' or initialize it with a used value."
-    }
-  ]
-}
-```
-
----
-
-### 11.2 Explanation (`POST /v1/explain`)
-
-**Request**
-
-```json
-{
-  "request_id": "c9bf9e57-1685-4c89-bafb-ff5af830be8a",
-  "room_id": "room-demo-01",
-  "request_type": "explanation",
-  "language": "cpp",
-  "consent": true,
-  "code": "#include <iostream>\nint main() {\n    int arr[3] = {1, 2, 3};\n    std::cout << arr[10] << std::endl;\n    return 0;\n}",
-  "stderr": "Segmentation fault (core dumped)",
-  "exit_code": 139,
-  "execution_time_ms": 88,
-  "peak_memory_mb": 3.9,
-  "timed_out": false,
-  "oom_killed": false,
-  "failure_kind": "non_zero_exit"
-}
-```
-
-**Response 200**
-
-```json
-{
-  "request_id": "c9bf9e57-1685-4c89-bafb-ff5af830be8a",
-  "explanation": "The program read past the bounds of a 3-element array using index 10, which caused a segmentation fault with exit code 139. Ensure the index is within 0 to 2 before accessing the array."
-}
-```
-
----
-
-### 11.3 Anomaly — Normal Execution (`POST /v1/anomaly`)
-
-**Request**
-
-```json
-{
-  "request_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
-  "room_id": "room-demo-01",
-  "request_type": "anomaly",
+  "request_id": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+  "room_id": "room-pair-101",
+  "analysis_id": "d2e6f1a4-8c3b-4b1a-9f2e-3d4c5b6a7b8c",
+  "request_type": "slowdown",
   "language": "python",
   "consent": true,
-  "execution_time_ms": 210,
-  "peak_memory_mb": 14.5,
-  "stdout_bytes": 14,
-  "stderr_bytes": 0,
-  "exit_code": 0,
-  "timed_out": false,
-  "oom_killed": false
+  "ai_enabled": true,
+  "input_hash": "a591a6d40bf420404a011733cfb7b190d62c65bf0bcda32b57b277d9ad9f146e",
+  "current_run": {
+    "execution_time_ms": 1250.0,
+    "peak_memory_mb": 14.2,
+    "code": "def process():\n    time.sleep(1.2)\n    return 42"
+  }
 }
 ```
 
-**Response 200**
-
+#### Response Body (200 OK)
 ```json
 {
-  "request_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
-  "is_anomalous": false,
-  "score": 0.08,
-  "reasons": [],
-  "message_short": ""
+  "request_id": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+  "analysis_id": "d2e6f1a4-8c3b-4b1a-9f2e-3d4c5b6a7b8c",
+  "task": "slowdown",
+  "input_hash": "a591a6d40bf420404a011733cfb7b190d62c65bf0bcda32b57b277d9ad9f146e",
+  "is_slowdown": true,
+  "slowdown_factor": 12.5,
+  "baseline": {
+    "median_ms": 100.0,
+    "mad_ms": 5.0,
+    "sample_count": 8
+  },
+  "changed_lines": [
+    {"line": 2, "content": "    time.sleep(1.2)"}
+  ],
+  "ai_step": {
+    "status": "ok",
+    "explanation": "Runtime increased by 12.5x due to added sleep/delay."
+  }
 }
 ```
 
 ---
 
-### 11.4 Anomaly — Anomalous Execution (`POST /v1/anomaly`)
+### 4.4 Task 3: Failing Inputs & Input Minimization
+`POST /v1/analyses/failing-input`
 
-**Request**
+Per FR38.1–FR38.5, US-70–US-72. Searches edge cases and delta-reduces failing inputs.
 
+#### Request Body
 ```json
 {
-  "request_id": "e72a49b2-32b1-4c12-9c32-11a5b8e90f23",
-  "room_id": "room-demo-01",
-  "request_type": "anomaly",
+  "request_id": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+  "room_id": "room-pair-101",
+  "analysis_id": "f3b2c1d0-1a2b-3c4d-5e6f-7a8b9c0d1e2f",
+  "request_type": "failing_input",
+  "language": "python",
+  "consent": true,
+  "ai_enabled": true,
+  "failing_input": "99, 102, -5, 0, 14, 88, 33, 12, 1000",
+  "failure_type": "wrong_output",
+  "expected_output": "1000",
+  "actual_output": "0"
+}
+```
+
+#### Response Body (200 OK)
+```json
+{
+  "request_id": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+  "analysis_id": "f3b2c1d0-1a2b-3c4d-5e6f-7a8b9c0d1e2f",
+  "task": "failing_input",
+  "minimized_input": "0",
+  "original_input_length": 37,
+  "minimized_input_length": 1,
+  "failure_type": "wrong_output",
+  "can_save_as_test_case": true
+}
+```
+
+---
+
+### 4.5 Task 4: C/C++ Crash Explanation
+`POST /v1/analyses/crash-explanation`
+
+Per FR39.1–FR39.3, DR5, US-73–US-74. Deterministically parses AddressSanitizer and UndefinedBehaviorSanitizer output and explains crashes using small code snippets only.
+
+#### Request Body
+```json
+{
+  "request_id": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+  "room_id": "room-pair-101",
+  "analysis_id": "e4d3c2b1-0f1e-2d3c-4b5a-6789abcdef01",
+  "request_type": "crash_explanation",
   "language": "cpp",
   "consent": true,
-  "execution_time_ms": 4890,
-  "peak_memory_mb": 121.4,
-  "stdout_bytes": 950000,
-  "stderr_bytes": 0,
-  "exit_code": 0,
-  "timed_out": false,
-  "oom_killed": false
+  "ai_enabled": true,
+  "sanitizer_output": "==12345==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x602000000014 at pc 0x000000401234 bp 0x7ffd7a435880 sp 0x7ffd7a435878\nREAD of size 4 at 0x602000000014 thread T0\n    #0 0x401233 in main /workspace/main.cpp:12",
+  "code_snippet": "int arr[5];\nreturn arr[10];"
 }
 ```
 
-**Response 200**
-
+#### Response Body (200 OK)
 ```json
 {
-  "request_id": "e72a49b2-32b1-4c12-9c32-11a5b8e90f23",
-  "is_anomalous": true,
-  "score": 0.89,
-  "reasons": ["EXCESSIVE_EXECUTION_TIME", "HIGH_MEMORY_USAGE", "OUTPUT_FLOODING"],
-  "message_short": "The execution took unusually long, nearing the configured time limit."
+  "request_id": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+  "analysis_id": "e4d3c2b1-0f1e-2d3c-4b5a-6789abcdef01",
+  "task": "crash_explanation",
+  "error_type": "heap-buffer-overflow",
+  "line_number": 12,
+  "ai_step": {
+    "status": "ok",
+    "explanation": "Memory was accessed outside array bounds on line 12. Ensure loop or array indexes do not exceed allocated size.",
+    "suggested_fix": "Change index 10 to a valid index between 0 and 4."
+  }
 }
 ```
 
 ---
 
-### 11.5 Error — Consent Missing (`POST /v1/explain`)
+### 4.6 Task 5: AI Usage & Telemetry Counters
+`GET /v1/usage`
 
-**Response 403**
+Per FR40.1, NFR7, US-75. Returns aggregate and per-room usage counters. Never stores or returns user code or text.
+
+#### Response Body (200 OK)
+```json
+{
+  "total_model_calls": 42,
+  "total_tokens_used": 15200,
+  "total_cache_hits": 68,
+  "total_fallback_activations": 3,
+  "monthly_spend_usd": 0.038,
+  "monthly_budget_usd": 10.0,
+  "alert_80_percent_triggered": false,
+  "cost_cap_reached": false,
+  "rooms_tracked": 5
+}
+```
+
+---
+
+### 4.7 Room State Lifecycle
+`DELETE /v1/rooms/{room_id}/state`
+
+Per FR32, FR37.4, US-56. Called by execution-service when a room is closed or deleted. Cleans up all in-memory measurements and room-scoped counters.
+
+#### Response Body (200 OK)
+```json
+{
+  "room_id": "room-pair-101",
+  "status": "cleared"
+}
+```
+
+---
+
+## 5. Retired Endpoints (Backlog v2 §6.2)
+
+1. `POST /v1/review`: Retired. Code review is out-of-scope for the sandbox (FR7 removed).
+2. `POST /v1/explain`: Retired as a general failure explainer (FR13 removed). Replaced by `POST /v1/analyses/crash-explanation` (Task 4, C/C++ sanitizer explanation).
+3. `POST /v1/anomaly`: Retired. Replaced by Task 2 (`POST /v1/analyses/slowdown`). The offline ML scorer (`app/ml/scorer.py`) remains unrouted in the repo for mentor evaluation.
+
+---
+
+## 6. Error Envelope and Error Codes
+
+For unprocessable requests, the standard error envelope is used:
 
 ```json
 {
-  "request_id": "c9bf9e57-1685-4c89-bafb-ff5af830be8a",
+  "request_id": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
   "error": {
-    "code": "CONSENT_MISSING",
-    "message": "User consent is required before code or execution context can be sent to external AI.",
+    "code": "COST_CAP_REACHED",
+    "message": "Monthly AI budget limit has been reached. Paid AI calls are paused.",
     "retry_after_seconds": null
   }
 }
 ```
----
-### 11.6 Java Review Example (`POST /v1/review`)
 
-**Request**
-```json
-{
-  "request_id": "a1b2c3d4-5678-90ef-1234-567890abcdef",
-  "room_id": "room-demo-02",
-  "request_type": "review",
-  "language": "java",
-  "consent": true,
-  "code": "class Main {\n    public static void main(String[] args) {\n        System.out.println(\"Hello\");\n    }\n}",
-  "stderr": "",
-  "exit_code": 0,
-  "execution_time_ms": 120,
-  "peak_memory_mb": 45.2,
-  "timed_out": false,
-  "oom_killed": false,
-  "failure_kind": null
-}
+### Standard Error Codes
+| Code | HTTP Status | Description |
+|---|---|---|
+| `CONSENT_MISSING` | 200 (in `ai_step`) / 403 | User consent is false (FR12). |
+| `AI_DISABLED` | 200 (in `ai_step`) / 403 | Room Host switch is off (FR35). |
+| `COST_CAP_REACHED` | 200 (in `ai_step`) / 429 | Monthly AI spending cap reached (NFR7.2). |
+| `ROOM_RATE_LIMITED` | 200 (in `ai_step`) / 429 | Hourly per-room AI call limit exceeded (NFR5.3). |
+| `INVALID_REQUEST` | 422 | Schema validation failure or missing required fields. |
+| `UNSUPPORTED_LANGUAGE`| 422 | Feature requested on incompatible language (e.g., ASan on Python). |
+| `PROVIDER_ERROR` | 502 | Upstream LLM provider error. |
+| `PROVIDER_TIMEOUT` | 504 | Upstream LLM timeout. |
+
+---
+
+## 7. Normalized Code Caching (NFR5.2)
+
+Cache keys are constructed as:
+$$\text{key} = \text{SHA-256}(\text{normalized\_code} + \text{language} + \text{request\_type} + \text{error\_signature})$$
+
+Normalization rules:
+1. Strip single-line comments (`#`, `//`).
+2. Strip multi-line comments (`/* ... */`, `""" ... """`).
+3. Strip trailing whitespace from all lines.
+4. Collapse contiguous empty lines to a single blank line.
+5. In Python, preserve meaningful leading indentation whitespace. In brace-based languages (C, C++, Java, JS), normalize leading whitespace.
+6. Only the 64-character SHA-256 hex digest is stored.
+
+---
+
+## 8. Privacy & Telemetry Logging (NFR8.1, NFR8.2, US-25)
+
+Every request emits a structured log line with metadata only:
 ```
----
-
-### 11.7 C Explanation Example (`POST /v1/example`)
-
-**Request**
-```json
-
-{
-  "request_id": "b2c3d4e5-6789-01fa-2345-678901bcdefa",
-  "room_id": "room-demo-02",
-  "request_type": "explanation",
-  "language": "c",
-  "consent": true,
-  "code": "#include <stdio.h>\nint main() {\n    int *ptr = NULL;\n    *ptr = 10;\n    return 0;\n}",
-  "stderr": "Segmentation fault (core dumped)",
-  "exit_code": 139,
-  "execution_time_ms": 12,
-  "peak_memory_mb": 1.4,
-  "timed_out": false,
-  "oom_killed": false,
-  "failure_kind": "non_zero_exit"
-}
-``` 
----
-
-###11.8 JavaScript Anomaly Example(`POST /v1/anomaly`)
-**Request**
-```json
-{
-  "request_id": "c3d4e5f6-7890-12ab-3456-789012cdefab",
-  "room_id": "room-demo-03",
-  "request_type": "anomaly",
-  "language": "javascript",
-  "consent": true,
-  "execution_time_ms": 4800,
-  "peak_memory_mb": 110.5,
-  "stdout_bytes": 1024000,
-  "stderr_bytes": 0,
-  "exit_code": 0,
-  "timed_out": false,
-  "oom_killed": false
-}
+request_id=9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d room_id=room-pair-101 request_type=complexity language=python status=200 error_code=none latency_ms=42.5
 ```
----
-
-## 12. Open Items (v0)
-
-| # | Item | Owner | Target | Status |
-|---|---|---|---|---|
-| 1 | Execution features for anomaly model | Digvijay (T-13) | T-07 v0 | **Closed** (defined in `anomaly-spec.md`) |
-| 2 | `reason_category_id` values & templates | Digvijay (T-13) | T-07 v0 | **Closed** (defined in `anomaly-spec.md` §2) |
-| 3 | Base URL and error envelope alignment with T-06 | Prince (T-07) | T-07 v0 | **Closed** (aligned with `api-contracts.md` §1 & §7) |
-| 4 | JSON Schema objects for all request & response types | Digvijay (T-07 PR2) | T-07 PR2 | Open for Digvijay's completing PR |
-| 5 | Cache implementation (NFR5.2) | Prince | Sprint 3 | Open |
-| 6 | Per-room rate limiting (NFR5.3) | Prince | Sprint 3 | Open |
-| 7 | Cost-cap budget enforcement (NFR7.2) | Prince | Sprint 3 | Open |
-| 8 | Anomaly score threshold validation (FR8.1) | Digvijay + Prince | Sprint 3 | Open |
+**Strict Privacy Guarantee:** Telemetry, log lines, exception handlers, and SQLite usage counters **never** record raw source code, stdin, stderr, or prompts.
