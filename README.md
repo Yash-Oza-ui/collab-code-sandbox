@@ -67,6 +67,29 @@ The service folders are scaffold locations; their presence does not mean the ser
 
 ---
 
+## 📄 Project documents
+
+The version 2 requirement and backlog documents and their source documents. Version 1 files are kept unchanged beside them. Items marked **external** are intentionally not committed; their location is stated.
+
+| Document | Where |
+|---|---|
+| Requirements v2 | [docs/IT314_Group32_Requirements_v2_Final.md](docs/IT314_Group32_Requirements_v2_Final.md) |
+| Backlog v2 | [docs/IT314_Group32_Backlog_v2_Final.md](docs/IT314_Group32_Backlog_v2_Final.md) |
+| Change request CHG-01 | [docs/CHG_01.md](docs/CHG_01.md) |
+| Elicitation round 2 | [docs/elicitation-round-2.md](docs/elicitation-round-2.md) |
+| Stakeholders & elicitation | [docs/IT314_Group32_Stakeholders_Elicitation.md](docs/IT314_Group32_Stakeholders_Elicitation.md) |
+| Service contracts | [docs/api-contracts.md](docs/api-contracts.md) · [docs/ai-ml-contract.md](docs/ai-ml-contract.md) |
+| AI/ML requirements v2 (`AI_ML_Requirements_v2.md`) | **External** — maintained by the AI/GenAI + ML team; the committed AI/ML material is [docs/ai-ml-contract.md](docs/ai-ml-contract.md) and [ai-ml-service/docs/](ai-ml-service/docs/). |
+| AI/ML service notes (`ai-ml-service.md`) | **External** — maintained by the AI/GenAI + ML team; see [ai-ml-service/README.md](ai-ml-service/README.md) and [ai-ml-service/docs/](ai-ml-service/docs/). |
+
+### Decision records
+
+| Record | Status |
+|---|---|
+| [Where platform features live (T-05)](docs/decisions/platform-home.md) | Accepted |
+
+---
+
 ## Tech Stack
 
 | Layer | Tech |
