@@ -122,4 +122,8 @@ shell (for example in CI) take priority over both files.
 
 ## CI
 
-One smoke run is hooked into the CI workflow from T-09 (added in the `feature/T-08-integration-skeleton-wiring` PR).
+The `integration` job in `.github/workflows/ci.yml` runs on every pull request and push to `main`.
+It copies `.env.example` to `.env`, runs `up.sh`, then `run-all.sh` (the smoke test plus every
+`test-*.sh`). It is part of the `build-and-test` required check. On failure it prints
+`docker compose ps` and the last 200 log lines, and it always tears the stack down.
+A service folder without a `Dockerfile` is skipped, so the job passes while scaffolds are landing.
