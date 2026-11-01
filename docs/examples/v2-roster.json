@@ -1,0 +1,17 @@
+{
+  "type": "roster",
+  "members": [
+    {
+      "member_id": "m_7a3c9f",
+      "display_name": "Ada",
+      "role": "host",
+      "permissions": { "can_edit": true, "can_run": true }
+    },
+    {
+      "member_id": "m_4b19d2",
+      "display_name": "Lin",
+      "role": "observer",
+      "permissions": { "can_edit": false, "can_run": false }
+    }
+  ]
+}
