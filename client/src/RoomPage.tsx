@@ -48,9 +48,8 @@ export default function RoomPage(props: RoomPageProps = {}) {
           defaultValue=""
           onMount={() => {
             // US-01 / US-02 will bind Monaco to the active docRef.current.
-            // The accepted displayName is available here for the future awareness integration.
+            // The accepted display name is held by RoomPage and exposed through the callback.
             void docRef.current
-            void displayName
           }}
         />
       </div>
