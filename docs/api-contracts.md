@@ -682,7 +682,7 @@ Replaces the v0 rule (section 3.4) that the client sends no text frames. After c
 ```json
 {
   "type": "joined",
-  "session_id": "7c1e4a52-3b0d-4f6a-9a2e-8d5f1b6c3e90",
+  "member_id": "m_7a3c9f",
   "role": "host",
   "mode": "pair",
   "preset": "teach_interview",
@@ -690,9 +690,9 @@ Replaces the v0 rule (section 3.4) that the client sends no text frames. After c
 }
 ```
 
-- **`joined.session_id` is an echo** of the id the client generated and sent in the connection URL (v0 §3.3); the server does not assign a new one.
-- **`permissions.can_edit` applies to Pair mode's single shared file.** In Open mode, edit rights are **per module** (FR22.2, Requirements v2 §7.4): the Host has no room-level edit right and may edit a module only as its owner or a granted writer. So in Open mode `can_edit` is not used (the client takes write access from module state, V2.6); `can_run` applies in both modes.
-- **Reconnect is not `NAME_TAKEN`.** A session rejoining with the **same `session_id`** and the same `display_name` (a refresh or a second tab) is accepted — FR42 identifies a person by session id. `NAME_TAKEN` is only for a **different** session id claiming a name already in use.
+- **Public `member_id`, private `session_id`.** The server assigns a **`member_id`** on join: a public, per-room id used in `roster`, module data and REST targets (V2.4, V2.6). The client's own **`session_id`** (v0 §3.3) stays **private to its browser** — it is the credential in the socket URL and in the `X-Session-Id` header (V2.6), and is **never** placed in `roster`, module data or any broadcast, so one member can never learn another's `session_id` and impersonate them. `joined` is sent only to that one connection.
+- **`permissions.can_edit` applies to Pair mode's single shared file.** In Open mode `can_edit` is **omitted** from `joined` and `roster`: edit rights are per module (FR22.2, Requirements v2 §7.4), so the client takes write access from module state (V2.6). `can_run` applies in both modes.
+- **Reconnect is not `NAME_TAKEN`.** A session rejoining with the **same `session_id`** and the same `display_name` (a refresh or a second tab) is accepted — FR42 identifies a person by session id. `NAME_TAKEN` is only for a **different** session claiming a name already in use.
 
 Otherwise the server sends `join-refused` with a `reason` of `NAME_TAKEN` (FR42), `ROOM_FULL` (US-63), `USER_BLOCKED` (US-28) or `APPROVAL_PENDING`:
 
@@ -700,6 +700,7 @@ Otherwise the server sends `join-refused` with a `reason` of `NAME_TAKEN` (FR42)
 { "type": "join-refused", "reason": "NAME_TAKEN", "message": "That display name is already in use in this room." }
 ```
 
+- **Socket after `join-refused`.** The server **closes** the control socket immediately after a `join-refused`, **except** for `APPROVAL_PENDING`: there the socket stays open until the server sends `join-approved` (then the normal `joined`) or `join-declined` (after which it closes).
 - **`USER_BLOCKED` vs close code `4403`.** A removed user (US-28) opening a **new** connection is refused at join with `USER_BLOCKED`; a removed user who is **already connected** has the socket closed with code **`4403`** (reserved in v0 §3.6).
 - **After `APPROVAL_PENDING`** the server later sends either `join-approved` (followed by the normal `joined`) or `join-declined`:
 
@@ -718,13 +719,13 @@ Three roles: `host`, `participant`, `observer`. The server sends a `roster` mess
 {
   "type": "roster",
   "members": [
-    { "session_id": "7c1e4a52-3b0d-4f6a-9a2e-8d5f1b6c3e90", "display_name": "Ada", "role": "host", "permissions": { "can_edit": true, "can_run": true } },
-    { "session_id": "2b9f6d10-5c48-4a7e-b1d0-9e3f8c5b2a61", "display_name": "Lin", "role": "observer", "permissions": { "can_edit": false, "can_run": false } }
+    { "member_id": "m_7a3c9f", "display_name": "Ada", "role": "host", "permissions": { "can_edit": true, "can_run": true } },
+    { "member_id": "m_4b19d2", "display_name": "Lin", "role": "observer", "permissions": { "can_edit": false, "can_run": false } }
   ]
 }
 ```
 
-The example is a **Pair** room; `permissions` follow the same per-mode rule as `joined` (V2.3), so in Open mode `can_edit` is not used and write access comes from module state (V2.6).
+Members are identified by the public `member_id`, **never** by `session_id` (V2.3). The example is a **Pair** room; in Open mode `can_edit` is **omitted** (write access comes from module state, V2.6).
 
 ## V2.5 Sockets (decision 6) — Proposed
 
@@ -732,12 +733,12 @@ Two sockets replace the single v0 socket (section 3.1), keeping all v0 relay rul
 
 | Socket | URL | Carries |
 |---|---|---|
-| Control | `ws://localhost:8081/ws/rooms/{room_id}?session_id=...` | text messages only (join, roster, run-result, edit-rejected, module-updated) |
+| Control | `ws://localhost:8081/ws/rooms/{room_id}?session_id=...` | text messages only (`join`, `joined`, `join-refused`, `join-approved`, `join-declined`, `roster`, `run-result`, `edit-rejected`, `module-updated`) |
 | Document | `ws://localhost:8081/ws/rooms/{room_id}/docs/{doc_id}?session_id=...` | Yjs binary frames only |
 
-Pair mode has one document, `main`. Open mode has one document per module, and its `doc_id` **is** the `module_id`. A session must `join` on the control socket **before** opening a document socket; a document socket opened without a prior join is closed with `4400`.
+Pair mode has one document, `main`. Open mode has one document per module, and its `doc_id` **is** the `module_id`. A session must `join` on the control socket **before** opening a document socket; a document socket opened without a prior join is closed with **`4406`** (not joined).
 
-New close codes: **`4410`** (room closed, FR31.2) and **`4405`** (unknown `doc_id`/`module_id` on the document socket — `4404` means the room, not the document, is unknown). These join `4404` (room not found) and the v0 codes (`4400`, `4403`, `1009`).
+New close codes: **`4410`** (room closed, FR31.2), **`4405`** (unknown `doc_id`/`module_id` on the document socket — `4404` means the room, not the document, is unknown) and **`4406`** (document socket opened before `join`). These join `4404` (room not found) and the v0 codes (`4400`, `4403`, `1009`).
 
 ## V2.6 Module addressing (decision 7) — Proposed
 
@@ -751,8 +752,8 @@ The shape returned by the module endpoints and carried by `module-updated`:
 {
   "module_id": "mod_9Qx7mBvA2nR0",
   "name": "solver.py",
-  "owner_session_id": "7c1e4a52-3b0d-4f6a-9a2e-8d5f1b6c3e90",
-  "writers": ["2b9f6d10-5c48-4a7e-b1d0-9e3f8c5b2a61"],
+  "owner_member_id": "m_7a3c9f",
+  "writers": ["m_4b19d2"],
   "runnable": true,
   "is_entry": false,
   "version": 4,
@@ -760,33 +761,40 @@ The shape returned by the module endpoints and carried by `module-updated`:
 }
 ```
 
-`writers` is the list of session ids granted write access besides the owner. `pending` is `true` while a create request awaits Host approval.
+`owner_member_id` and `writers` are **public `member_id`s** (V2.3), never `session_id`s. `writers` is the list of members granted write access besides the owner. `pending` is `true` while a create request awaits Host approval.
 
 ### Module operations (REST on sync-service)
 
 All paths are under `/v1/rooms/{room_id}/modules`. "Who" is who may call it. Each successful call also pushes a `module-updated` to the room (see below). Error codes (`NOT_MODULE_OWNER`, `NOT_OWNER`, `MODULE_NOT_FOUND`, `NAME_TAKEN`, …) come from **decision 12** and are written in the companion PR.
 
+**Caller identity.** Every v2 REST call on sync-service — room creation (V2.1), the owner check, and these module operations — identifies the caller by the header `X-Session-Id: <session_id>`: the caller's private session id (v0 §3.3), sent in a header, never in the URL or a body. The server maps it to the caller's `member_id` and role, and checks ownership/role from there. Host-only actions (set entry file, approve, and grant/revoke write when done by the Host) additionally require `X-Owner-Token: <owner_token>`, validated by the T-10 owner check. A call with a missing or unknown `X-Session-Id`, or a Host-only action without a valid owner token, is refused (`401`/`403`; exact codes in decisions 8–15). The owner token is never put in the URL or logged.
+
+**CORS.** These endpoints send CORS headers allowing `CLIENT_ORIGIN` (section 1) and the request headers `Content-Type`, `X-Session-Id` and `X-Owner-Token`, matching how execution-service already allows the browser origin (section 2).
+
 | Operation | Method & path | Who | Request body | Success |
 |---|---|---|---|---|
 | List | `GET /v1/rooms/{room_id}/modules` | any member | — | `200` array of module objects |
-| Request (create) | `POST /v1/rooms/{room_id}/modules` | any participant | `{ "name": "solver.py" }` | `201` module object (or `202` with `pending: true` if approval is on) |
-| Approve | `POST /v1/rooms/{room_id}/modules/{module_id}/approve` | Host | — | `200` module object (`pending: false`) |
-| Rename | `PATCH /v1/rooms/{room_id}/modules/{module_id}` | owner or Host | `{ "name": "solver2.py" }` | `200` module object |
-| Delete | `DELETE /v1/rooms/{room_id}/modules/{module_id}` | owner or Host | — | `204` |
-| Transfer owner | `POST /v1/rooms/{room_id}/modules/{module_id}/transfer` | owner or Host | `{ "to_session_id": "…" }` | `200` module object |
-| Set runnable | `PATCH /v1/rooms/{room_id}/modules/{module_id}` | owner | `{ "runnable": true }` | `200` module object |
-| Set entry file | `PATCH /v1/rooms/{room_id}/modules/{module_id}` | Host or owner | `{ "is_entry": true }` | `200` module object |
-| Grant write | `POST /v1/rooms/{room_id}/modules/{module_id}/writers` | owner | `{ "session_id": "…" }` | `200` module object |
-| Revoke write | `DELETE /v1/rooms/{room_id}/modules/{module_id}/writers/{session_id}` | owner | — | `200` module object |
+| Request (create) | `POST /v1/rooms/{room_id}/modules` | any participant | `{ "name": "solver.py" }` | `202` module object, `pending: true` — awaits Host approval (FR21.1) |
+| Approve | `POST /v1/rooms/{room_id}/modules/{module_id}/approve` | **Host** | `{ "owner_member_id": "m_4b19d2" }` | `200` module object, `pending: false`, owner set (FR21.2) |
+| Rename | `PATCH /v1/rooms/{room_id}/modules/{module_id}` | **owner** (FR21.4) | `{ "name": "solver2.py" }` | `200` module object |
+| Set runnable | `PATCH /v1/rooms/{room_id}/modules/{module_id}` | **owner** | `{ "runnable": true }` | `200` module object |
+| Set entry file | `PATCH /v1/rooms/{room_id}/modules/{module_id}` | **Host** (FR20.3) | `{ "is_entry": true }` | `200` module object |
+| Delete | `DELETE /v1/rooms/{room_id}/modules/{module_id}` | **owner** (FR21.4) | — | `204` |
+| Transfer owner | `POST /v1/rooms/{room_id}/modules/{module_id}/transfer` | **owner** (FR21.4) | `{ "to_member_id": "m_4b19d2" }` | `200` module object |
+| Grant write | `POST /v1/rooms/{room_id}/modules/{module_id}/writers` | **owner or Host** (FR22.1) | `{ "member_id": "m_4b19d2" }` | `200` module object |
+| Revoke write | `DELETE /v1/rooms/{room_id}/modules/{module_id}/writers/{member_id}` | **owner or Host** (FR22.1) | — | `200` module object |
 | Save version | `POST /v1/rooms/{room_id}/modules/{module_id}/save` | owner or writer | — | `200` `{ "module_id": "…", "version": 5 }` |
 
-Example — grant write access:
+A `PATCH` carries **exactly one** of `name`, `runnable` or `is_entry`; the caller allowed depends on the field (owner for `name` and `runnable`, Host for `is_entry`, as the rows show). Sending zero or more than one of these fields is `INVALID_REQUEST`. Module **targets** (`owner_member_id`, `to_member_id`, `member_id`, the `writers` path segment) are always public `member_id`s, never `session_id`s.
+
+Example — grant write access (owner or Host):
 
 ```
 POST http://localhost:8081/v1/rooms/{room_id}/modules/mod_9Qx7mBvA2nR0/writers
 Content-Type: application/json
+X-Session-Id: <caller-session-id>
 
-{ "session_id": "2b9f6d10-5c48-4a7e-b1d0-9e3f8c5b2a61" }
+{ "member_id": "m_4b19d2" }
 ```
 
 ### `module-updated` push
@@ -798,8 +806,8 @@ Every module change is pushed to the room as a `module-updated` control message 
   "type": "module-updated",
   "module_id": "mod_9Qx7mBvA2nR0",
   "name": "solver.py",
-  "owner_session_id": "7c1e4a52-3b0d-4f6a-9a2e-8d5f1b6c3e90",
-  "writers": ["2b9f6d10-5c48-4a7e-b1d0-9e3f8c5b2a61"],
+  "owner_member_id": "m_7a3c9f",
+  "writers": ["m_4b19d2"],
   "runnable": true,
   "is_entry": false,
   "version": 4,
@@ -830,6 +838,7 @@ Decisions 8–15 and their confirmations (Jay, Prince) are in the companion PR `
 | v1 proposal | 12 Oct 2026 | Owner creation/check, platform URL, combined captured output and unavailable-language semantics. Await category confirmations; this package does not record approvals. |
 | v2 (decisions 1–7) | 31 Oct 2026 | Version 2 scaffold + decisions 1–7 added (T-17, #61, `docs/T-17-contracts-v2-rooms`): room creation (`POST /v1/rooms`), server-generated room id, `4404`/`4410` close codes, join/roster and roles, control + document sockets, module addressing and `module-updated`. No v0/v1 field renamed in place. Names Proposed until confirmed. Decisions 8–15 follow in the companion PR. |
 | v2 (1–7, review) | 1 Nov 2026 | Review fixes (#79): 22-char room id + base64url-without-padding note; `joined`/`roster` `can_edit` clarified as Pair-only (per-module in Open, FR22.2); full module REST operations table, module object, and `writers`/`deleted` on `module-updated`; join-flow details (reconnect ≠ `NAME_TAKEN`, invalid owner_token, `APPROVAL_PENDING` → `join-approved`/`join-declined`, `session_id` echo, `USER_BLOCKED` vs `4403`); document socket join-first + close code `4405`; §8 unowned-room sentence withdrawn; `GET /v1/rooms/{id}/owner` retained; v2 example files added under `docs/examples/`. |
+| v2 (1–7, review 2) | 1 Nov 2026 | Second review pass (#79): public **`member_id`** added for `roster`, module `owner_member_id`/`writers` and all REST targets, with `session_id` kept **private to the browser** (closes the impersonation hole); module permissions corrected to Requirements v2 — rename/delete/transfer **owner only** (FR21.4), grant/revoke write **owner or Host** (FR22.1), set entry file **Host only** (FR20.3), `approve` sets the owner (FR21.2), create is always a pending request (FR21.1); REST **caller identity** via `X-Session-Id` (+ `X-Owner-Token` for Host) and **CORS** for `CLIENT_ORIGIN`; `PATCH` single-field rule; socket closed after `join-refused` (except `APPROVAL_PENDING`); full control-socket message list; `4406` not-joined close code; `can_edit` omitted in Open mode. |
 
 ### Runner infrastructure error (v1 proposal addition)
 
