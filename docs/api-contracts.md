@@ -776,7 +776,7 @@ All paths are under `/v1/rooms/{room_id}/modules`. "Who" is who may call it. Eac
 
 **Caller identity.** Every module operation below identifies the caller by the header `X-Session-Id: <session_id>`: the caller's private session id (v0 §3.3), sent in a header, never in the URL or a body. The server maps it to the caller's `member_id` and role, and checks ownership/role from there. Host-only actions (set entry file, approve, and grant/revoke write when done by the Host) additionally require `X-Owner-Token: <owner_token>`, validated by the T-10 owner check. A call with a missing or unknown `X-Session-Id`, or a Host-only action without a valid owner token, is refused (V2.12: `INVALID_REQUEST` for a missing or malformed `X-Session-Id`, `SESSION_NOT_FOUND` for a session that has not joined this room, `NOT_OWNER` for a Host-only action without a valid owner token). The owner token is never put in the URL or logged. Room creation (V2.1) needs no caller identity, and the owner check keeps its v1 header, `X-Owner-Token` (section 8).
 
-**CORS.** These endpoints send CORS headers allowing `CLIENT_ORIGIN` (section 1) and the request headers `Content-Type`, `X-Session-Id` and `X-Owner-Token`, matching how execution-service already allows the browser origin (section 2).
+**CORS.** These endpoints send CORS headers allowing `CLIENT_ORIGIN` (section 1), the methods `GET`, `POST`, `PATCH`, `DELETE` and `OPTIONS` (a browser sends a preflight for `PATCH` and `DELETE`), and the request headers `Content-Type`, `X-Session-Id` and `X-Owner-Token`, matching how execution-service already allows the browser origin (section 2).
 
 | Operation | Method & path | Who | Request body | Success |
 |---|---|---|---|---|
@@ -840,7 +840,7 @@ Decisions 8 to 15 follow Backlog v2 section 6.1 with the five differences below.
 |---|---|---|
 | 1 | `runner` in a run result carries `member_id` and `display_name`, not `session_id` (decision 9). | A result is shown to the room. `session_id` is a private credential (V2.3) and must not appear in anything that is broadcast. |
 | 2 | The permission lookup (decision 11) also returns `member_id`, `display_name`, `mode` and `language`. | execution-service needs them to fill `runner`, to check the `source` kind against the room mode and to check the workspace language, without a second call. |
-| 3 | Three error codes and one `reason` are added: `RUN_NOT_FOUND`, `SESSION_NOT_FOUND`, `ROOM_SERVICE_UNAVAILABLE` and `not_in_room`. | Decision 12 has no code for an unknown or expired run (share), a session that is not in the room, or a lookup that cannot be answered. |
+| 3 | Four error codes and one `reason` are added: `RUN_NOT_FOUND`, `SESSION_NOT_FOUND`, `MEMBER_NOT_FOUND`, `ROOM_SERVICE_UNAVAILABLE` and `not_in_room`. | Decision 12 has no code for an unknown or expired run (share), a session or member that is not in the room, or a lookup that cannot be answered. |
 | 4 | The internal snapshot read has a shape (V2.8). | Decision 8 says execution-service reads the saved versions in one call. T-19 stubs that call, so the stub needs a shape. |
 | 5 | The owner check answers an unknown room with `404 ROOM_NOT_FOUND`, not `403 NOT_OWNER` (V2.12). | Every other REST call on an unknown room answers `ROOM_NOT_FOUND`. A room that does not exist is not a case of "wrong owner". |
 
@@ -1262,6 +1262,7 @@ All use the error envelope of section 7. For module calls on sync-service, `requ
 | `LIMIT_REACHED` | 409 | sync-service | A limit on the number of modules or the size of a module (NFR15). The message names the limit and the value comes from configuration (DR3). The limit on people is `join-refused` with `ROOM_FULL`. |
 | `RUN_NOT_FOUND` | 404 | execution-service | Share of a run that is unknown or no longer held (V2.10). Added, difference 3. |
 | `SESSION_NOT_FOUND` | 404 | sync-service | The session has not joined this room or was removed. Used by the lookup (V2.11) and by module calls (V2.6). Added, difference 3. |
+| `MEMBER_NOT_FOUND` | 404 | sync-service | The `member_id` in the path is not a member of this room (V2.17). Added, difference 3. |
 | `ROOM_SERVICE_UNAVAILABLE` | 503 | execution-service | Lookup or snapshot read could not be answered (V2.8, V2.11). Added, difference 3. |
 
 ### `error.reason`
@@ -1378,6 +1379,7 @@ The relay decides from the **first two bytes** of a binary frame and never parse
 | `NAME_TAKEN` | 409 | sync-service | V2.6 |
 | `LIMIT_REACHED` | 409 | sync-service | V2.6 |
 | `SESSION_NOT_FOUND` | 404 | sync-service | V2.6, V2.11 |
+| `MEMBER_NOT_FOUND` | 404 | sync-service | V2.17 |
 | `INVALID_MESSAGE` | 400 | sync-service, internal | §7.2, V2.14 |
 | `UNAUTHORIZED` | 401 | sync-service, internal | §7.2, V2.11 |
 
@@ -1428,7 +1430,7 @@ A malformed `audience` (V2.10) is also `INVALID_MESSAGE`. The new internal calls
 
 **Not decided in version 2.** These are listed so that nobody assumes they are covered:
 
-- Host controls other than modules have no message or endpoint yet: edit access and requests in Pair mode (FR19.1, FR19.3), removing a user (FR9.2), making an Observer (FR9.4), join approval (FR9.3), restricting Run (FR41.2, FR41.3), the AI switch (FR35.1), transferring the Host role (FR31.1), the audit log (FR34), export (FR33) and deleting a room (FR32). They need a contract entry before the stories that build them.
+- Host controls other than modules and the Observer role (V2.17) have no message or endpoint yet: edit access and requests in Pair mode (FR19.1, FR19.3), removing a user (FR9.2), join approval (FR9.3), restricting Run (FR41.2, FR41.3), the AI switch (FR35.1), transferring the Host role (FR31.1), the audit log (FR34), export (FR33) and deleting a room (FR32). They need a contract entry before the stories that build them.
 - What a run does with a module that has never been saved (FR24.1, FR25.1).
 - A joiner syncs from a connected writer: a read-only peer's sync step 2 is dropped (V2.12). If no writer is connected, a late joiner receives nothing. To be checked when the relay is built.
 - More than one file in a Pair mode `inline` source. Version 2 allows exactly one (FR18).
@@ -1440,9 +1442,57 @@ Each person confirms their own section in a PR comment: "I can implement my part
 - [ ] **Het (A):** what the client sends (V2.8), the result fields and the share button (V2.9, V2.10), the error and `edit-rejected` handling (V2.12), `analysis-result` (V2.13).
 - [ ] **Jay (B):** V2.8 to V2.12, execution-service side (request, result, share, lookup, snapshot, codes).
 - [ ] **Prince (C):** V2.13, and that the result fields still pass through to ai-ml-service as in `docs/ai-ml-contract.md`.
-- [ ] **Yash and Femina (D):** `audience` (V2.10), lookup and snapshot, sync-service side (V2.11, V2.12), close codes and V2.14.
+- [ ] **Yash and Femina (D):** `audience` (V2.10), lookup and snapshot, sync-service side (V2.11, V2.12), close codes, V2.14 and the role change (V2.17).
+- [ ] **Het (A):** also the Host control and the `roster` update in V2.17.
 
 When V2.7 and this list are ticked: tick the v1 confirmations in section 10, close T-06 (#9) with a comment listing the items carried forward (V2.15), and announce it in Slack #dev.
+
+
+## V2.17 Member role change (US-27) — Proposed
+
+Added so that US-27 has a contract to build on. It covers the one Host control that US-27 needs, making a guest an Observer (FR9.4) and back. The other Host controls stay undecided (V2.15).
+
+```
+PATCH http://localhost:8081/v1/rooms/{room_id}/members/{member_id}
+Content-Type: application/json
+X-Session-Id: <caller-session-id>
+X-Owner-Token: <owner-token>
+```
+
+A Host-only action, so it follows the caller-identity rule of V2.6: the caller's `X-Session-Id`, plus a valid `X-Owner-Token`. Without a valid owner token the answer is `403 NOT_OWNER`, which is what US-27 asks for.
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `role` | `"participant"` \| `"observer"` | Yes | The new role. `"host"` is not accepted here (transferring the Host role, FR31.1, is not decided). |
+
+```json
+{
+  "role": "observer"
+}
+```
+
+Response `200`: the member as it appears in `roster` (V2.4).
+
+```json
+{
+  "member_id": "m_4b19d2",
+  "display_name": "Lin",
+  "role": "observer",
+  "permissions": {
+    "can_edit": false,
+    "can_run": false
+  }
+}
+```
+
+Rules:
+
+1. The Host cannot change their own role, and `role` can only be `participant` or `observer`. Anything else is `INVALID_REQUEST` (422).
+2. Setting the role a member already has is `200` and changes nothing.
+3. The change takes effect at once for every connection of that member. The next edit frame is dropped and answered with `edit-rejected` and reason `observer` (V2.12). The next run is refused with `RUN_NOT_ALLOWED` and reason `observer`, through the lookup of V2.11, which now returns `role: "observer"` and `can_run: false`.
+4. The server sends a new `roster` to the whole room (V2.4). The member's `permissions` become `can_edit: false` and `can_run: false` in an Observer. Going back to `participant` gives the permissions the room's preset gives a participant (FR19.2); giving or taking edit access is a separate control (V2.15).
+5. An Observer still receives live edits, cursors and shared results (FR9.4, FR23). Nothing about reading changes.
+6. Errors (V2.12): `404 ROOM_NOT_FOUND`, `404 SESSION_NOT_FOUND` (the caller has not joined), `404 MEMBER_NOT_FOUND` (the target), `403 NOT_OWNER`, `422 INVALID_REQUEST`.
 
 ---
 
@@ -1458,6 +1508,7 @@ When V2.7 and this list are ticked: tick the v1 confirmations in section 10, clo
 | v2 (1–7, review) | 1 Nov 2026 | Review fixes (#79): 22-char room id + base64url-without-padding note; `joined`/`roster` `can_edit` clarified as Pair-only (per-module in Open, FR22.2); full module REST operations table, module object, and `writers`/`deleted` on `module-updated`; join-flow details (reconnect ≠ `NAME_TAKEN`, invalid owner_token, `APPROVAL_PENDING` → `join-approved`/`join-declined`, `session_id` echo, `USER_BLOCKED` vs `4403`); document socket join-first + close code `4405`; §8 unowned-room sentence withdrawn; `GET /v1/rooms/{id}/owner` retained; v2 example files added under `docs/examples/`. |
 | v2 (1–7, review 2) | 1 Nov 2026 | Second review pass (#79): public **`member_id`** added for `roster`, module `owner_member_id`/`writers` and all REST targets, with `session_id` kept **private to the browser** (closes the impersonation hole); module permissions corrected to Requirements v2 — rename/delete/transfer **owner only** (FR21.4), grant/revoke write **owner or Host** (FR22.1), set entry file **Host only** (FR20.3), `approve` sets the owner (FR21.2), create is always a pending request (FR21.1); REST **caller identity** via `X-Session-Id` (+ `X-Owner-Token` for Host) and **CORS** for `CLIENT_ORIGIN`; `PATCH` single-field rule; socket closed after `join-refused` (except `APPROVAL_PENDING`); full control-socket message list; `4406` not-joined close code; `can_edit` omitted in Open mode. |
 | v2 (decisions 8–15) | 1 Nov 2026 | Decisions 8–15 added (T-17, #61, `docs/T-17-contracts-v2-runs-errors`): run `source` object and snapshot read (V2.8), run result fields (V2.9), visibility, `audience` and share (V2.10), permission lookup (V2.11), permission errors, `edit-rejected` and every error and close code in one table (V2.12), `analysis-result` replacing `anomaly-warning` and `ai-explanation` (V2.13), internal endpoint codes (V2.14), carried T-06 items (V2.15). Differences from Backlog v2 §6.1 are listed before V2.8. Corrections in decisions 1–7: example tokens match the example files; caller identity limited to module operations; `pending` added to the `module-updated` example; stable `member_id` stated; owner optional on approve; `analysis-result` added to the control-socket list; owner check answers an unknown room with 404. No v0/v1 text edited. |
+| v2 (member role) | 1 Nov 2026 | V2.17 added: `PATCH /v1/rooms/{room_id}/members/{member_id}` makes a guest an Observer and back (US-27), new code `MEMBER_NOT_FOUND`. CORS methods added to V2.6. Observer role removed from the undecided list in V2.15. |
 
 ### Runner infrastructure error (v1 proposal addition)
 
