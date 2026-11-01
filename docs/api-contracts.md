@@ -602,7 +602,14 @@ Version 2 continues T-06 (#9) and writes down the 15 decisions of Backlog v2 sec
 | 5 | Roles | Proposed | rooms |
 | 6 | Sockets | Proposed | rooms |
 | 7 | Module addressing | Proposed | rooms |
-| 8–15 | Run spec, results, visibility, permission errors, legacy types, internal codes, carried items | see companion PR | runs-errors |
+| 8 | Run specification | Proposed | runs-errors |
+| 9 | Run result | Proposed | runs-errors |
+| 10 | Result visibility | Decided (behaviour), Proposed (fields) | runs-errors |
+| 11 | Permission lookup | Proposed | runs-errors |
+| 12 | Permission errors | Decided (behaviour), Proposed (code names) | runs-errors |
+| 13 | Legacy message types | Decided (removal), Proposed (new name) | runs-errors |
+| 14 | Error codes of the internal endpoint | Proposed | runs-errors |
+| 15 | Items carried from T-06 | Proposed | runs-errors |
 
 ## V2.1 Room creation (decisions 1, 2) — Decided
 
@@ -621,7 +628,7 @@ Content-Type: application/json
 
 The server generates the `room_id`: at least **128 bits** from a secure random generator, written in **base64url without `=` padding** (so it uses only `A-Za-z0-9_-` and stays inside the §3.2 charset), within the existing 1 to 64 character rule. 128 bits is **22 base64url characters**, so a valid id is at least 22 characters long. The client cannot choose or take over an id (NFR16, US-62).
 
-If `preset` is sent in Open mode, or `language` in Pair mode, or a field required for the chosen mode is missing, the server rejects the request with `INVALID_REQUEST` (HTTP 422); the exact error shape is finalised with decisions 8–15. The owner-check endpoint `GET /v1/rooms/{room_id}/owner` from section 8 is **retained unchanged** (needed by T-10).
+If `preset` is sent in Open mode, or `language` in Pair mode, or a field required for the chosen mode is missing, the server rejects the request with `INVALID_REQUEST` (HTTP 422); the error is the one in V2.12 (`INVALID_REQUEST`, or `UNSUPPORTED_LANGUAGE` for a language outside the five). The owner-check endpoint `GET /v1/rooms/{room_id}/owner` from section 8 is **retained** (needed by T-10); only its answer for an unknown room changes (`404 ROOM_NOT_FOUND`, V2.12).
 
 Request (Open mode):
 
@@ -634,7 +641,7 @@ Response `201 Created`:
 ```json
 {
   "room_id": "k3Yc1t9Qx7mBvA2nR0sLpQ",
-  "owner_token": "<owner-token>",
+  "owner_token": "PLACEHOLDER_NOT_A_REAL_TOKEN",
   "mode": "open",
   "preset": null,
   "language": "python"
@@ -652,7 +659,7 @@ Response `201 Created`:
 ```json
 {
   "room_id": "Zq8-Lw2Ef6Th0Yx4Rn7JbA",
-  "owner_token": "<owner-token>",
+  "owner_token": "PLACEHOLDER_NOT_A_REAL_TOKEN",
   "mode": "pair",
   "preset": "teach_interview",
   "language": null
@@ -673,7 +680,7 @@ Replaces the v0 rule (section 3.4) that the client sends no text frames. After c
 {
   "type": "join",
   "display_name": "Ada",
-  "owner_token": "<owner-token>"
+  "owner_token": "PLACEHOLDER_NOT_A_REAL_TOKEN"
 }
 ```
 
@@ -690,7 +697,7 @@ Replaces the v0 rule (section 3.4) that the client sends no text frames. After c
 }
 ```
 
-- **Public `member_id`, private `session_id`.** The server assigns a **`member_id`** on join: a public, per-room id used in `roster`, module data and REST targets (V2.4, V2.6). The client's own **`session_id`** (v0 §3.3) stays **private to its browser** — it is the credential in the socket URL and in the `X-Session-Id` header (V2.6), and is **never** placed in `roster`, module data or any broadcast, so one member can never learn another's `session_id` and impersonate them. `joined` is sent only to that one connection.
+- **Public `member_id`, private `session_id`.** The server assigns a **`member_id`** on join: a public, per-room id used in `roster`, module data and REST targets (V2.4, V2.6). The client's own **`session_id`** (v0 §3.3) stays **private to its browser** — it is the credential in the socket URL and in the `X-Session-Id` header (V2.6), and is **never** placed in `roster`, module data or any broadcast, so one member can never learn another's `session_id` and impersonate them. `joined` is sent only to that one connection. A session keeps the **same `member_id` for the life of the room**: a refresh, a reconnect or a second tab gets the same id back, so module ownership and write access follow the person.
 - **`permissions.can_edit` applies to Pair mode's single shared file.** In Open mode `can_edit` is **omitted** from `joined` and `roster`: edit rights are per module (FR22.2, Requirements v2 §7.4), so the client takes write access from module state (V2.6). `can_run` applies in both modes.
 - **Reconnect is not `NAME_TAKEN`.** A session rejoining with the **same `session_id`** and the same `display_name` (a refresh or a second tab) is accepted — FR42 identifies a person by session id. `NAME_TAKEN` is only for a **different** session claiming a name already in use.
 
@@ -733,7 +740,7 @@ Two sockets replace the single v0 socket (section 3.1), keeping all v0 relay rul
 
 | Socket | URL | Carries |
 |---|---|---|
-| Control | `ws://localhost:8081/ws/rooms/{room_id}?session_id=...` | text messages only (`join`, `joined`, `join-refused`, `join-approved`, `join-declined`, `roster`, `run-result`, `edit-rejected`, `module-updated`) |
+| Control | `ws://localhost:8081/ws/rooms/{room_id}?session_id=...` | text messages only (`join`, `joined`, `join-refused`, `join-approved`, `join-declined`, `roster`, `run-result`, `analysis-result`, `edit-rejected`, `module-updated`) |
 | Document | `ws://localhost:8081/ws/rooms/{room_id}/docs/{doc_id}?session_id=...` | Yjs binary frames only |
 
 Pair mode has one document, `main`. Open mode has one document per module, and its `doc_id` **is** the `module_id`. A session must `join` on the control socket **before** opening a document socket; a document socket opened without a prior join is closed with **`4406`** (not joined).
@@ -761,13 +768,13 @@ The shape returned by the module endpoints and carried by `module-updated`:
 }
 ```
 
-`owner_member_id` and `writers` are **public `member_id`s** (V2.3), never `session_id`s. `writers` is the list of members granted write access besides the owner. `pending` is `true` while a create request awaits Host approval.
+`owner_member_id` and `writers` are **public `member_id`s** (V2.3), never `session_id`s. `writers` is the list of members granted write access besides the owner. `pending` is `true` while a create request awaits Host approval. While it is pending, `owner_member_id` is the requester; the approval confirms it or sets another member (FR21.2).
 
 ### Module operations (REST on sync-service)
 
-All paths are under `/v1/rooms/{room_id}/modules`. "Who" is who may call it. Each successful call also pushes a `module-updated` to the room (see below). Error codes (`NOT_MODULE_OWNER`, `NOT_OWNER`, `MODULE_NOT_FOUND`, `NAME_TAKEN`, …) come from **decision 12** and are written in the companion PR.
+All paths are under `/v1/rooms/{room_id}/modules`. "Who" is who may call it. Each successful call also pushes a `module-updated` to the room (see below). Error codes (`NOT_MODULE_OWNER`, `NOT_OWNER`, `MODULE_NOT_FOUND`, `NAME_TAKEN`, …) are defined in V2.12 (decision 12).
 
-**Caller identity.** Every v2 REST call on sync-service — room creation (V2.1), the owner check, and these module operations — identifies the caller by the header `X-Session-Id: <session_id>`: the caller's private session id (v0 §3.3), sent in a header, never in the URL or a body. The server maps it to the caller's `member_id` and role, and checks ownership/role from there. Host-only actions (set entry file, approve, and grant/revoke write when done by the Host) additionally require `X-Owner-Token: <owner_token>`, validated by the T-10 owner check. A call with a missing or unknown `X-Session-Id`, or a Host-only action without a valid owner token, is refused (`401`/`403`; exact codes in decisions 8–15). The owner token is never put in the URL or logged.
+**Caller identity.** Every module operation below identifies the caller by the header `X-Session-Id: <session_id>`: the caller's private session id (v0 §3.3), sent in a header, never in the URL or a body. The server maps it to the caller's `member_id` and role, and checks ownership/role from there. Host-only actions (set entry file, approve, and grant/revoke write when done by the Host) additionally require `X-Owner-Token: <owner_token>`, validated by the T-10 owner check. A call with a missing or unknown `X-Session-Id`, or a Host-only action without a valid owner token, is refused (V2.12: `INVALID_REQUEST` for a missing or malformed `X-Session-Id`, `SESSION_NOT_FOUND` for a session that has not joined this room, `NOT_OWNER` for a Host-only action without a valid owner token). The owner token is never put in the URL or logged. Room creation (V2.1) needs no caller identity, and the owner check keeps its v1 header, `X-Owner-Token` (section 8).
 
 **CORS.** These endpoints send CORS headers allowing `CLIENT_ORIGIN` (section 1) and the request headers `Content-Type`, `X-Session-Id` and `X-Owner-Token`, matching how execution-service already allows the browser origin (section 2).
 
@@ -775,7 +782,7 @@ All paths are under `/v1/rooms/{room_id}/modules`. "Who" is who may call it. Eac
 |---|---|---|---|---|
 | List | `GET /v1/rooms/{room_id}/modules` | any member | — | `200` array of module objects |
 | Request (create) | `POST /v1/rooms/{room_id}/modules` | any participant | `{ "name": "solver.py" }` | `202` module object, `pending: true` — awaits Host approval (FR21.1) |
-| Approve | `POST /v1/rooms/{room_id}/modules/{module_id}/approve` | **Host** | `{ "owner_member_id": "m_4b19d2" }` | `200` module object, `pending: false`, owner set (FR21.2) |
+| Approve | `POST /v1/rooms/{room_id}/modules/{module_id}/approve` | **Host** | `{}`, or `{ "owner_member_id": "m_4b19d2" }` to choose another owner; the default is the requester (FR21.2) | `200` module object, `pending: false`, owner set |
 | Rename | `PATCH /v1/rooms/{room_id}/modules/{module_id}` | **owner** (FR21.4) | `{ "name": "solver2.py" }` | `200` module object |
 | Set runnable | `PATCH /v1/rooms/{room_id}/modules/{module_id}` | **owner** | `{ "runnable": true }` | `200` module object |
 | Set entry file | `PATCH /v1/rooms/{room_id}/modules/{module_id}` | **Host** (FR20.3) | `{ "is_entry": true }` | `200` module object |
@@ -811,6 +818,7 @@ Every module change is pushed to the room as a `module-updated` control message 
   "runnable": true,
   "is_entry": false,
   "version": 4,
+  "pending": false,
   "deleted": false
 }
 ```
@@ -824,7 +832,617 @@ Each person confirms their own section in a PR comment: "I can implement my part
 - [ ] **Het (A):** V2.3 join, V2.4 roster, V2.5 sockets (client side).
 - [ ] **Yash and Femina (D):** V2.1–V2.2 room creation, V2.5–V2.6 sockets and modules (server).
 
-Decisions 8–15 and their confirmations (Jay, Prince) are in the companion PR `docs/T-17-contracts-v2-runs-errors`. When the full Version 2 is merged and confirmed, close T-06 (#9) with a comment listing the items carried forward (decision 15).
+Decisions 8–15 are in V2.8 to V2.15, and their confirmations (Jay, Prince, and Het and Yash and Femina for their parts) are in V2.16. When the full Version 2 is merged and confirmed, close T-06 (#9) with a comment listing the items carried forward (V2.15).
+
+Decisions 8 to 15 follow Backlog v2 section 6.1 with the five differences below. Each one is repeated where it applies and is **Proposed**, like the names around it.
+
+| # | Difference from Backlog v2 §6.1 | Why |
+|---|---|---|
+| 1 | `runner` in a run result carries `member_id` and `display_name`, not `session_id` (decision 9). | A result is shown to the room. `session_id` is a private credential (V2.3) and must not appear in anything that is broadcast. |
+| 2 | The permission lookup (decision 11) also returns `member_id`, `display_name`, `mode` and `language`. | execution-service needs them to fill `runner`, to check the `source` kind against the room mode and to check the workspace language, without a second call. |
+| 3 | Three error codes and one `reason` are added: `RUN_NOT_FOUND`, `SESSION_NOT_FOUND`, `ROOM_SERVICE_UNAVAILABLE` and `not_in_room`. | Decision 12 has no code for an unknown or expired run (share), a session that is not in the room, or a lookup that cannot be answered. |
+| 4 | The internal snapshot read has a shape (V2.8). | Decision 8 says execution-service reads the saved versions in one call. T-19 stubs that call, so the stub needs a shape. |
+| 5 | The owner check answers an unknown room with `404 ROOM_NOT_FOUND`, not `403 NOT_OWNER` (V2.12). | Every other REST call on an unknown room answers `ROOM_NOT_FOUND`. A room that does not exist is not a case of "wrong owner". |
+
+## V2.8 Run specification (decision 8) — Proposed
+
+Replaces the v0 run request (section 4.1), where the code travels in one string field, `code` (`RunRequest.code` in `main`, PR #48). `POST /v1/runs` keeps its path, port and CORS rules (sections 1, 2 and 4.1).
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `request_id` | string (UUID v4) | Yes | Unchanged (section 2). |
+| `room_id` | string | Yes | Unchanged. |
+| `session_id` | string (UUID v4) | Yes | Unchanged (v0 §3.3). It is the caller's private credential: execution-service uses it only to ask who the caller is (V2.11) and never puts it in a result or a broadcast (V2.3). |
+| `language` | string | Yes | One of the five ids (section 2). In Open mode it must equal the workspace language (FR20.1). |
+| `stdin` | string | No | Defaults to `""`. Unchanged. |
+| `source` | object | Yes | Exactly one source object (below). |
+
+**`code` is no longer part of the request.** Until T-19 lands, execution-service still accepts a Pair mode body that has `code` and no `source`; a body with both is `INVALID_REQUEST`. From T-19 on, any body that has `code` is rejected as `INVALID_REQUEST` (HTTP 422).
+
+### The three `source` shapes
+
+| Room | Run | `source` |
+|---|---|---|
+| Pair | the shared file | `{"kind":"inline","files":[{"name":"main.py","content":"..."}],"entry":"main.py"}` |
+| Open | one runnable module | `{"kind":"saved","target":"module","module_id":"..."}` |
+| Open | through the entry file | `{"kind":"saved","target":"entry","module_ids":["..."]}` or `"module_ids":"all"` |
+
+Rules:
+
+1. `inline` is valid only in a Pair room and `saved` only in an Open room. The room's mode comes from the permission lookup (V2.11). A mismatch is `INVALID_REQUEST` and names `source.kind`. A `language` that differs from the workspace language in an Open room is `INVALID_REQUEST` too.
+2. `inline`: `files` holds exactly one file in Pair mode (FR18). `name` is a plain file name with the language extension (DR4): no `/`, no `\`, no `..`. `entry` must be the `name` of one of the files. The names in the request are the names used inside the run; the T-14 convention `solution.py` is replaced by them.
+3. `saved` with `target: "module"`: the module must exist (`MODULE_NOT_FOUND`) and be marked runnable (`MODULE_NOT_RUNNABLE`; FR20.2, FR25.2). The run contains only that module.
+4. `saved` with `target: "entry"`: the Host must have set an entry file (`NO_ENTRY_FILE`; FR25.3). The run contains the entry file and the listed modules. `module_ids` is either the string `"all"` (every module in the workspace) or a non-empty array of distinct module ids, and each id must exist (`MODULE_NOT_FOUND`). The entry file is part of the run even if it is not listed. If the entry file needs a module that is not listed, the run fails in the normal way and `failure` names that module (FR25.3, FR28). That is a run result, not an error.
+5. In Open mode the client sends no code. execution-service reads the saved versions of all modules in one run **in one call**, so they form one consistent snapshot, and `saved_versions` in the result lists exactly that snapshot (V2.9). The snapshot is read when the request is accepted, before it joins the queue, so the run uses what was saved when Run was pressed (FR25.1).
+6. Any other `kind` or `target`, a missing field, or more than one `source` is `INVALID_REQUEST`.
+
+Pair mode, inline source:
+
+```json
+{
+  "request_id": "0b9d2f3e-7a41-4c58-9e1b-5d3c8a6f2e10",
+  "room_id": "Zq8-Lw2Ef6Th0Yx4Rn7JbA",
+  "session_id": "7c1e4a52-3b0d-4f6a-9a2e-8d5f1b6c3e90",
+  "language": "python",
+  "stdin": "",
+  "source": {
+    "kind": "inline",
+    "files": [
+      {
+        "name": "main.py",
+        "content": "print(\"hello\")\n"
+      }
+    ],
+    "entry": "main.py"
+  }
+}
+```
+
+Open mode, one runnable module:
+
+```json
+{
+  "request_id": "c41e7b09-5d62-4a83-8f17-2b9a6e0d3c54",
+  "room_id": "k3Yc1t9Qx7mBvA2nR0sLpQ",
+  "session_id": "2f8d6b14-9c03-4e7a-b5d1-6a0e3c9f7d28",
+  "language": "python",
+  "stdin": "",
+  "source": {
+    "kind": "saved",
+    "target": "module",
+    "module_id": "mod_9Qx7mBvA2nR0"
+  }
+}
+```
+
+Open mode, through the entry file (`"module_ids": "all"` runs every module):
+
+```json
+{
+  "request_id": "d7a2f5c8-1e39-4b60-a4c2-9f8e1d7b3a06",
+  "room_id": "k3Yc1t9Qx7mBvA2nR0sLpQ",
+  "session_id": "2f8d6b14-9c03-4e7a-b5d1-6a0e3c9f7d28",
+  "language": "python",
+  "stdin": "",
+  "source": {
+    "kind": "saved",
+    "target": "entry",
+    "module_ids": [
+      "mod_9Qx7mBvA2nR0",
+      "mod_5Lm8Np2Qr4St"
+    ]
+  }
+}
+```
+
+### Snapshot read (execution-service to sync-service)
+
+Not one of the 15 decisions' shapes; written here so the one-call rule has a shape to stub (difference 4). The T-19 reader interface is a stub until sync-service has saved modules (US-39, US-45), and US-47 may refine this before it is built.
+
+```
+POST {SYNC_SERVICE_INTERNAL_URL}/internal/rooms/{room_id}/snapshot
+X-Internal-Token: <INTERNAL_API_TOKEN>
+Content-Type: application/json
+```
+
+The body carries the `saved` source object of the run request. sync-service resolves `target` and `module_ids` against the room and returns every module of the run in one response.
+
+```json
+{
+  "source": {
+    "kind": "saved",
+    "target": "entry",
+    "module_ids": [
+      "mod_9Qx7mBvA2nR0",
+      "mod_5Lm8Np2Qr4St"
+    ]
+  }
+}
+```
+
+Response `200`. `entry` is the file the run starts from (for `target: "module"` it is that module). `owner` and `saved_by` are there so execution-service can fill `saved_versions` and `failure` without another call.
+
+```json
+{
+  "room_id": "k3Yc1t9Qx7mBvA2nR0sLpQ",
+  "entry": "main.py",
+  "modules": [
+    {
+      "module_id": "mod_9Qx7mBvA2nR0",
+      "name": "main.py",
+      "content": "from helper import add\nprint(add(2, \"3\"))\n",
+      "version": 4,
+      "owner": {
+        "member_id": "m_7a3c9f",
+        "display_name": "Ada"
+      },
+      "saved_by": {
+        "member_id": "m_7a3c9f",
+        "display_name": "Ada"
+      },
+      "saved_at": "2026-11-01T10:12:04.118Z"
+    },
+    {
+      "module_id": "mod_5Lm8Np2Qr4St",
+      "name": "helper.py",
+      "content": "def add(a, b):\n    return a + b\n",
+      "version": 2,
+      "owner": {
+        "member_id": "m_7a3c9f",
+        "display_name": "Ada"
+      },
+      "saved_by": {
+        "member_id": "m_4b19d2",
+        "display_name": "Lin"
+      },
+      "saved_at": "2026-11-01T10:14:51.733Z"
+    }
+  ]
+}
+```
+
+Errors (the envelope of section 7, `request_id` `null`): `401 UNAUTHORIZED`, `404 ROOM_NOT_FOUND`, `404 MODULE_NOT_FOUND`, `422 MODULE_NOT_RUNNABLE`, `422 NO_ENTRY_FILE`. execution-service returns the same code and HTTP status to the client, with the run's `request_id`. If sync-service cannot be reached, the run is not started and the client gets `503 ROOM_SERVICE_UNAVAILABLE` (V2.11). A module that has never been saved is not decided here (V2.15).
+
+## V2.9 Run result (decision 9) — Proposed
+
+Extends the run result of section 4.2. Every v0 field stays as it is; the fields below are added. The `run-result` text message (section 3.6) is the same object plus `"type": "run-result"`.
+
+| Field | Type | Notes |
+|---|---|---|
+| `runner` | object | `member_id` (V2.3) and `display_name` of the person who pressed Run (FR26). Backlog v2 listed `session_id` here; see difference 1. |
+| `ran_at` | string | When the run started, as ISO 8601 UTC with milliseconds and `Z` (FR26). |
+| `visibility` | `"room"` \| `"private"` | Who may see the result (V2.10). |
+| `saved_versions` | array | Open mode: one entry per module in the snapshot, each with `module_id`, `name`, `version`, `saved_by` (`member_id`, `display_name`) and `saved_at` (ISO 8601 UTC) (FR26). `[]` in Pair mode, so clients never test for `null`. |
+| `failure` | object \| `null` | Open mode, when the run failed and the failure points to one module: `module_id`, `name`, `owner` and `last_saved_by` (each `member_id` and `display_name`) (FR28). `null` for a successful run, in Pair mode, and when the failure cannot be pinned to one module (for example a timeout). |
+| `compile_time_ms` | number \| `null` | Time of the compile stage. `null` when the language has no compile stage. |
+
+Closed by this decision:
+
+- `execution_time_ms` is the **run stage only**. The compile stage is in `compile_time_ms`, so the `0` in the v0 compile-error example stays correct (T-06 open item 5).
+- The output cap (NFR4.4) applies to **stdout and stderr combined** (T-06 open item 6). The cap value comes from configuration (DR3). If the serialized result would still be larger than the 4 MiB text-frame limit (section 3.5, rule 4), which is possible only when the output is mostly characters that JSON writes as six bytes, execution-service cuts the output further until it fits and sets `output_truncated`.
+- An out-of-memory kill is `failure_kind: "non_zero_exit"` with `oom_killed: true`. The value `"oom"` is never used.
+
+Pair mode, success (`visibility` is `room`):
+
+```json
+{
+  "request_id": "0b9d2f3e-7a41-4c58-9e1b-5d3c8a6f2e10",
+  "room_id": "Zq8-Lw2Ef6Th0Yx4Rn7JbA",
+  "language": "python",
+  "stdout": "hello\n",
+  "stderr": "",
+  "exit_code": 0,
+  "execution_time_ms": 38,
+  "peak_memory_mb": 7.9,
+  "timed_out": false,
+  "oom_killed": false,
+  "failure_kind": null,
+  "output_truncated": false,
+  "message": null,
+  "compile_time_ms": null,
+  "runner": {
+    "member_id": "m_7a3c9f",
+    "display_name": "Ada"
+  },
+  "ran_at": "2026-11-01T10:20:05.087Z",
+  "visibility": "room",
+  "saved_versions": [],
+  "failure": null
+}
+```
+
+Open mode, failed run (`visibility` is `private`, `failure` names `helper.py`, whose owner is Ada and whose last saver is Lin):
+
+```json
+{
+  "request_id": "d7a2f5c8-1e39-4b60-a4c2-9f8e1d7b3a06",
+  "room_id": "k3Yc1t9Qx7mBvA2nR0sLpQ",
+  "language": "python",
+  "stdout": "",
+  "stderr": "Traceback (most recent call last):\n  File \"main.py\", line 2, in <module>\n    print(add(2, \"3\"))\n  File \"helper.py\", line 2, in add\n    return a + b\nTypeError: unsupported operand type(s) for +: 'int' and 'str'\n",
+  "exit_code": 1,
+  "execution_time_ms": 41,
+  "peak_memory_mb": 8.4,
+  "timed_out": false,
+  "oom_killed": false,
+  "failure_kind": "non_zero_exit",
+  "output_truncated": false,
+  "message": null,
+  "compile_time_ms": null,
+  "runner": {
+    "member_id": "m_4b19d2",
+    "display_name": "Lin"
+  },
+  "ran_at": "2026-11-01T10:15:30.412Z",
+  "visibility": "private",
+  "saved_versions": [
+    {
+      "module_id": "mod_9Qx7mBvA2nR0",
+      "name": "main.py",
+      "version": 4,
+      "saved_by": {
+        "member_id": "m_7a3c9f",
+        "display_name": "Ada"
+      },
+      "saved_at": "2026-11-01T10:12:04.118Z"
+    },
+    {
+      "module_id": "mod_5Lm8Np2Qr4St",
+      "name": "helper.py",
+      "version": 2,
+      "saved_by": {
+        "member_id": "m_4b19d2",
+        "display_name": "Lin"
+      },
+      "saved_at": "2026-11-01T10:14:51.733Z"
+    }
+  ],
+  "failure": {
+    "module_id": "mod_5Lm8Np2Qr4St",
+    "name": "helper.py",
+    "owner": {
+      "member_id": "m_7a3c9f",
+      "display_name": "Ada"
+    },
+    "last_saved_by": {
+      "member_id": "m_4b19d2",
+      "display_name": "Lin"
+    }
+  }
+}
+```
+
+A client shows a run once per `request_id` (section 3.6). When the same `request_id` arrives again with `visibility: "room"` (after a share, V2.10), the client updates the label instead of adding a second copy.
+
+## V2.10 Result visibility and sharing (decision 10) — Decided (behaviour), Proposed (fields)
+
+| Room | `visibility` | Who receives the result |
+|---|---|---|
+| Pair | `room` | Every connection in the room (FR4.5). Observers receive it. |
+| Open | `private` | Only the runner's connections, that is every tab with the runner's session id (FR27). |
+
+The caller also gets the result in the HTTP response, as in v0 (section 4.2). In Open mode an Observer receives only results that were shared (FR9.4). Analysis messages have the same audience as the run result they belong to (NFR9, CR08, V2.13).
+
+### `audience` on the internal endpoint
+
+`POST /internal/rooms/{room_id}/messages` (section 5) gains an optional top-level field `audience`. Without it the message goes to the whole room, as in v0.
+
+| `audience` | Delivered to |
+|---|---|
+| `{"kind":"room"}` (default) | Every connection in the room. |
+| `{"kind":"sessions","session_ids":["..."]}` | Every connection whose session id is in the list. |
+
+sync-service removes `audience` from the frame before it forwards it, so no client ever sees it, and the 4 MiB limit applies to the forwarded frame. No client-facing message uses a top-level field called `audience`. A missing room is `404 ROOM_NOT_FOUND`; a malformed `audience` is `400 INVALID_MESSAGE` (V2.14). If no connection matches, the answer is `200` with `"delivered": 0`, which is not an error. The response body is unchanged.
+
+```json
+{
+  "audience": {
+    "kind": "sessions",
+    "session_ids": [
+      "2f8d6b14-9c03-4e7a-b5d1-6a0e3c9f7d28"
+    ]
+  },
+  "type": "analysis-result",
+  "request_id": "d7a2f5c8-1e39-4b60-a4c2-9f8e1d7b3a06",
+  "room_id": "k3Yc1t9Qx7mBvA2nR0sLpQ"
+}
+```
+
+```json
+{
+  "audience": {
+    "kind": "room"
+  },
+  "type": "analysis-result",
+  "request_id": "d7a2f5c8-1e39-4b60-a4c2-9f8e1d7b3a06",
+  "room_id": "k3Yc1t9Qx7mBvA2nR0sLpQ"
+}
+```
+
+### Share to room
+
+```
+POST http://localhost:8082/v1/runs/{request_id}/share
+Content-Type: application/json
+```
+
+Allowed to the runner only (FR27). The body carries the caller's `session_id`, as the run request does. This endpoint is on execution-service under `/v1/`, so the CORS rules of section 2 already cover it.
+
+```json
+{
+  "session_id": "2f8d6b14-9c03-4e7a-b5d1-6a0e3c9f7d28"
+}
+```
+
+Response `200`:
+
+```json
+{
+  "request_id": "d7a2f5c8-1e39-4b60-a4c2-9f8e1d7b3a06",
+  "visibility": "room"
+}
+```
+
+- execution-service compares the `session_id` with the session that ran it. A different session, or a session that is no longer in the room, gets `403 NOT_RUNNER`. A `request_id` it does not know, or no longer holds, gets `404 RUN_NOT_FOUND`.
+- If the result is already `room`, the answer is `200` and nothing is sent again.
+- Otherwise `visibility` becomes `room`, and execution-service sends to the whole room, in this order, the `run-result` (with `visibility: "room"`) and every `analysis-result` already produced for that run (NFR9). Nobody else has to approve (FR27). Sharing does not run the code again.
+- Analysis messages produced after the share go to the room, because they follow the run's current audience (CR08).
+- execution-service keeps each run's result and analysis messages while the run record exists (FR29, FR32; retention is FR15, still Provisional) so that a share can be sent.
+
+## V2.11 Permission lookup (decision 11) — Proposed
+
+On every run request, analysis request and share request (a removed person must not be able to share, FR9.6), execution-service asks sync-service who the caller is and what the caller may do. execution-service keeps no permission state, and it never caches an answer, because a cached answer could keep a revoked right alive (FR41.4).
+
+```
+GET {SYNC_SERVICE_INTERNAL_URL}/internal/rooms/{room_id}/sessions/{session_id}
+X-Internal-Token: <INTERNAL_API_TOKEN>
+```
+
+Response `200`:
+
+| Field | Type | Notes |
+|---|---|---|
+| `member_id`, `display_name` | string | Fill `runner` (V2.9) and the other `member_id`s in a result. See difference 2. |
+| `role` | `"host"` \| `"participant"` \| `"observer"` | V2.4. |
+| `mode` | `"pair"` \| `"open"` | Needed to check the `source` kind (V2.8). |
+| `language` | string \| `null` | The workspace language in Open mode; `null` in Pair mode. |
+| `can_run` | boolean | `false` for an Observer, for a person the Host has taken Run from (FR41.2) and for everyone but the Host while Host-only running is on (FR41.3). |
+| `run_denied_reason` | `"observer"` \| `"run_revoked"` \| `"host_only"` \| `null` | `null` when `can_run` is `true`. Becomes `error.reason` of `RUN_NOT_ALLOWED` (V2.12). |
+| `ai_enabled` | boolean | The room's AI switch (FR35.1). Steps that send code to an external AI service run only when it is `true` (FR35.3). |
+
+```json
+{
+  "member_id": "m_4b19d2",
+  "display_name": "Lin",
+  "role": "participant",
+  "mode": "open",
+  "language": "python",
+  "can_run": true,
+  "run_denied_reason": null,
+  "ai_enabled": false
+}
+```
+
+An Observer in a Pair room:
+
+```json
+{
+  "member_id": "m_4b19d2",
+  "display_name": "Lin",
+  "role": "observer",
+  "mode": "pair",
+  "language": null,
+  "can_run": false,
+  "run_denied_reason": "observer",
+  "ai_enabled": false
+}
+```
+
+Errors (the envelope of section 7, `request_id` `null`): `401 UNAUTHORIZED` for a missing or wrong token, `404 ROOM_NOT_FOUND`, `404 SESSION_NOT_FOUND` when that session has not joined this room or was removed from it (FR9.6).
+
+If the lookup cannot be answered (sync-service unreachable, a timeout or a 5xx), execution-service **refuses the run** and answers `503 ROOM_SERVICE_UNAVAILABLE`, with `request_id` echoed, message `Room service is unavailable, so the run was not started. Try again.` and `retry_after_seconds` `null`. It does not run the code without a permission answer and does not retry on its own.
+
+## V2.12 Permission errors and codes (decision 12) — Decided (behaviour), Proposed (code names)
+
+All use the error envelope of section 7. For module calls on sync-service, `request_id` is `null`, because those calls carry none.
+
+### Codes added in version 2
+
+| `error.code` | HTTP | Raised by | When |
+|---|---|---|---|
+| `RUN_NOT_ALLOWED` | 403 | execution-service | The caller may not run (FR41.4). `error.reason` says why (below). |
+| `NOT_OWNER` | 403 | sync-service | An action only the Host may do, without a valid owner token. Same envelope as the owner check (section 8). |
+| `NOT_MODULE_OWNER` | 403 | sync-service | The caller is not the module's owner (rename, delete, transfer, set runnable; FR21.4), or neither its owner nor the Host (grant or revoke write access; FR22.1). |
+| `NOT_RUNNER` | 403 | execution-service | Share by a session that did not run it (V2.10). |
+| `MODULE_NOT_FOUND` | 404 | sync-service, execution-service | The module id does not exist in this room. |
+| `ROOM_NOT_FOUND` | 404 | sync-service, execution-service | The room does not exist. Also the answer of the owner check for an unknown room; this replaces the v1 rule (section 8) that treated an unknown room like a wrong token (difference 5). |
+| `MODULE_NOT_RUNNABLE` | 422 | execution-service | `target: "module"` on a module that is not marked runnable (FR20.2, FR25.2). |
+| `NO_ENTRY_FILE` | 422 | execution-service | `target: "entry"` while no entry file is set (FR25.3). |
+| `NAME_TAKEN` | 409 | sync-service | A module name that is already used in the workspace (V2.6, DR4). Not the display-name case of `join-refused` (V2.3), which is a socket message and not an HTTP error. |
+| `LIMIT_REACHED` | 409 | sync-service | A limit on the number of modules or the size of a module (NFR15). The message names the limit and the value comes from configuration (DR3). The limit on people is `join-refused` with `ROOM_FULL`. |
+| `RUN_NOT_FOUND` | 404 | execution-service | Share of a run that is unknown or no longer held (V2.10). Added, difference 3. |
+| `SESSION_NOT_FOUND` | 404 | sync-service | The session has not joined this room or was removed. Used by the lookup (V2.11) and by module calls (V2.6). Added, difference 3. |
+| `ROOM_SERVICE_UNAVAILABLE` | 503 | execution-service | Lookup or snapshot read could not be answered (V2.8, V2.11). Added, difference 3. |
+
+### `error.reason`
+
+The envelope gets one optional field, `error.reason`. It is present only on `RUN_NOT_ALLOWED` and left out everywhere else, so no existing response changes.
+
+| `reason` | Meaning | `error.message` |
+|---|---|---|
+| `observer` | The caller is an Observer (FR9.4, FR41.1). | `Observers cannot run code.` |
+| `run_revoked` | The Host has taken Run from this person (FR41.2). | `The Host has turned off running for you.` |
+| `host_only` | Host-only running is on (FR41.3). | `Only the Host can run code in this room right now.` |
+| `not_in_room` | The session has not joined the room or was removed. Added, difference 3. | `You are not in this room.` |
+
+```json
+{
+  "request_id": "0b9d2f3e-7a41-4c58-9e1b-5d3c8a6f2e10",
+  "error": {
+    "code": "RUN_NOT_ALLOWED",
+    "message": "Observers cannot run code.",
+    "reason": "observer",
+    "retry_after_seconds": null
+  }
+}
+```
+
+```json
+{
+  "request_id": "c41e7b09-5d62-4a83-8f17-2b9a6e0d3c54",
+  "error": {
+    "code": "MODULE_NOT_RUNNABLE",
+    "message": "Module 'main.py' is not marked runnable.",
+    "retry_after_seconds": null
+  }
+}
+```
+
+### Order of checks on `POST /v1/runs`
+
+The first failing check decides the answer.
+
+1. The body: size (`REQUEST_TOO_LARGE`), JSON and fields (`INVALID_REQUEST`), language (`UNSUPPORTED_LANGUAGE`).
+2. The permission lookup (V2.11): `ROOM_NOT_FOUND`, `RUN_NOT_ALLOWED`, `ROOM_SERVICE_UNAVAILABLE`.
+3. The source against the room (V2.8): `INVALID_REQUEST` for a mismatched kind or language, then the snapshot read: `MODULE_NOT_FOUND`, `MODULE_NOT_RUNNABLE`, `NO_ENTRY_FILE`, `ROOM_SERVICE_UNAVAILABLE`.
+4. The queue (FR16): `QUEUE_FULL`.
+5. The run. From here on every outcome is a run result (section 4.2) or one of the infrastructure errors of section 8.
+
+### A refused edit is never an HTTP error
+
+The relay drops the frame and sends the control message `edit-rejected` (control socket, V2.5) to the session that sent it. The frame is not forwarded.
+
+| `reason` | When |
+|---|---|
+| `no_edit_access` | Pair mode: the sender has no edit access (FR18, FR19.1). |
+| `not_module_writer` | Open mode: the sender is not the module's owner or a writer (FR22.2). |
+| `observer` | Either mode: the sender is an Observer (FR9.4). |
+
+```json
+{
+  "type": "edit-rejected",
+  "doc_id": "main",
+  "reason": "no_edit_access"
+}
+```
+
+```json
+{
+  "type": "edit-rejected",
+  "doc_id": "mod_9Qx7mBvA2nR0",
+  "reason": "not_module_writer"
+}
+```
+
+The relay decides from the **first two bytes** of a binary frame and never parses its content (CR13, NFR13). It uses a cached lookup of the connection's write access for that document, updated whenever a role or permission changes.
+
+| First two bytes | Meaning | Forwarded |
+|---|---|---|
+| `0 0` | Sync step 1 (a request for state) | Always. |
+| `1 …` | Awareness (cursor, name) | Always. Awareness can be forged, which is why roles come from `roster` (V2.4). |
+| `3` (one byte) and any other first byte | Query awareness (v0 §3.5, rule 6) and other non-document frames | Always, as in v0. |
+| `0 1`, `0 2` | Sync step 2 and update, which carry changes | Only from a connection with write access to that document. Otherwise dropped, and `edit-rejected` is sent. |
+
+### Close codes
+
+| Code | Meaning | Defined in |
+|---|---|---|
+| `4400` | Malformed room id, or `session_id` missing or not a UUID | v0 §3.6 |
+| `4403` | A removed session that is already connected | v0 §3.6, V2.3 |
+| `4404` | Room not found | V2.2 |
+| `4405` | Unknown `doc_id` or `module_id` | V2.5 |
+| `4406` | Document socket opened before `join` | V2.5 |
+| `4410` | Room closed (FR31.2, FR32) | V2.5 |
+| `1009` | Binary frame larger than 1 MiB | v0 §3.6 |
+
+### All HTTP error codes in one place
+
+| Code | HTTP | Service | Defined in |
+|---|---|---|---|
+| `QUEUE_FULL` | 503 | execution-service | §7.1 |
+| `UNSUPPORTED_LANGUAGE` | 422 | execution-service, sync-service (room creation) | §7.1, V2.1 |
+| `INVALID_REQUEST` | 422 | both | §7.1, V2.1, V2.6, V2.8 |
+| `REQUEST_TOO_LARGE` | 413 | execution-service | §7.1 |
+| `RUNNER_UNAVAILABLE` | 503 | execution-service | v1 addition at the end of this file |
+| `RESULT_DELIVERY_FAILED` | 503 | execution-service | §8 |
+| `RUN_NOT_ALLOWED` | 403 | execution-service | V2.12 |
+| `NOT_RUNNER` | 403 | execution-service | V2.10 |
+| `RUN_NOT_FOUND` | 404 | execution-service | V2.10 |
+| `ROOM_SERVICE_UNAVAILABLE` | 503 | execution-service | V2.11 |
+| `MODULE_NOT_RUNNABLE` | 422 | execution-service | V2.8 |
+| `NO_ENTRY_FILE` | 422 | execution-service | V2.8 |
+| `MODULE_NOT_FOUND` | 404 | both | V2.6, V2.8 |
+| `ROOM_NOT_FOUND` | 404 | both | V2.12 |
+| `NOT_OWNER` | 403 | sync-service | §8, V2.6 |
+| `NOT_MODULE_OWNER` | 403 | sync-service | V2.6 |
+| `NAME_TAKEN` | 409 | sync-service | V2.6 |
+| `LIMIT_REACHED` | 409 | sync-service | V2.6 |
+| `SESSION_NOT_FOUND` | 404 | sync-service | V2.6, V2.11 |
+| `INVALID_MESSAGE` | 400 | sync-service, internal | §7.2, V2.14 |
+| `UNAUTHORIZED` | 401 | sync-service, internal | §7.2, V2.11 |
+
+## V2.13 Legacy message types (decision 13) — Decided (removal), Proposed (new name)
+
+`anomaly-warning` and `ai-explanation` are **removed**. The requirements behind them, FR8 and FR13, were removed in Requirements v2 (section 7.5). This replaces the "Reserved for Sprint 3" paragraph in section 3.6, step 4 of section 6 and open item 8 in section 9. One generic message replaces both, and `run-result` stays:
+
+```json
+{
+  "type": "analysis-result",
+  "request_id": "d7a2f5c8-1e39-4b60-a4c2-9f8e1d7b3a06",
+  "room_id": "k3Yc1t9Qx7mBvA2nR0sLpQ"
+}
+```
+
+- `request_id` is the id of the run the analysis belongs to. `room_id` echoes the room.
+- T-17 fixes only the name and the rules here. The other fields are defined in T-18, from `docs/ai-ml-contract.md`, and agreed with its owners (Prince, Chandan, Digvijay).
+- It has the same audience as the run result it belongs to (NFR9, CR08, V2.10): the room for a `room` run, the runner's connections for a `private` run, and the room after a share.
+- It arrives after the run result as a separate message, never inside it (NFR9; section 6 is unchanged).
+
+## V2.14 Error codes of the internal endpoint (decision 14) — Proposed
+
+Section 7.2 already names the target codes: `INVALID_MESSAGE` (400) and `UNAUTHORIZED` (401). `sync-service` in `main` (`InternalMessageController`) still answers with other names, so the contract is the target and `main` is what changes, in T-20:
+
+| Today in `main` | HTTP | Becomes |
+|---|---|---|
+| `INVALID_BODY` (no `type`, or `type` not a non-empty string) | 400 | `INVALID_MESSAGE`, message `Message body is not valid: field 'type' is missing.` |
+| `INVALID_JSON` | 400 | `INVALID_MESSAGE`, message `Message body is not valid: not JSON.` |
+| `PAYLOAD_TOO_LARGE` | 400 | `INVALID_MESSAGE`, message `Message body is not valid: larger than 4 MiB.` |
+| `UNAUTHORIZED`, message `Missing or invalid X-Internal-Token` | 401 | Same code, message `Missing or invalid internal token.` (section 7.2) |
+| `request_id` always `null` | | Taken from the body when it has one, otherwise `null` (section 7.2) |
+
+A malformed `audience` (V2.10) is also `INVALID_MESSAGE`. The new internal calls of version 2, the lookup (V2.11) and the snapshot read (V2.8), use the same `401 UNAUTHORIZED` and the same envelope.
+
+## V2.15 Items carried from T-06 (decision 15) — Proposed
+
+| # | T-06 open item (section 9) | Outcome |
+|---|---|---|
+| 1 | Error shapes (section 7) | Done in PR2 (Femina). Extended by V2.12: new codes and the optional `error.reason`. |
+| 2 | Owner-token section (section 8) | Written as the v1 proposal and kept by V2.1. Only the answer for an unknown room changes (V2.12). |
+| 3 | An empty room keeps no document | Unchanged. Revisited with the storage decision for FR15 (retention, Provisional) and CR11. Not decided in version 2. |
+| 4 | Room creation | Closed by decisions 1 to 3 (V2.1, V2.2). |
+| 5 | Does `execution_time_ms` include the compile stage | Closed by decision 9: no, it is the run stage only; `compile_time_ms` is separate (V2.9). |
+| 6 | Is the output cap per stream or combined | Closed by decision 9: combined (V2.9). |
+| 7 | Read-only guest enforcement on Run | Closed by decisions 11 and 12 (`RUN_NOT_ALLOWED` with `reason: observer`). |
+| 8 | Fields of `anomaly-warning` and `ai-explanation` | Closed by decision 13: both removed, one `analysis-result`, fields in T-18. |
+| 9 | Page route `/room/{room_id}` and client variable names | Open until confirmed in the real client during review. Checked against `main`: the route pattern in `client/src/roomId.ts` and the two variables in `client/src/config.ts` match sections 1 and 3.2. Het, Chandan and Niranjan still confirm. |
+
+**Not decided in version 2.** These are listed so that nobody assumes they are covered:
+
+- Host controls other than modules have no message or endpoint yet: edit access and requests in Pair mode (FR19.1, FR19.3), removing a user (FR9.2), making an Observer (FR9.4), join approval (FR9.3), restricting Run (FR41.2, FR41.3), the AI switch (FR35.1), transferring the Host role (FR31.1), the audit log (FR34), export (FR33) and deleting a room (FR32). They need a contract entry before the stories that build them.
+- What a run does with a module that has never been saved (FR24.1, FR25.1).
+- A joiner syncs from a connected writer: a read-only peer's sync step 2 is dropped (V2.12). If no writer is connected, a late joiner receives nothing. To be checked when the relay is built.
+- More than one file in a Pair mode `inline` source. Version 2 allows exactly one (FR18).
+
+## V2.16 Review confirmations for decisions 8–15
+
+Each person confirms their own section in a PR comment: "I can implement my part from Version 2 (decisions 8–15) alone."
+
+- [ ] **Het (A):** what the client sends (V2.8), the result fields and the share button (V2.9, V2.10), the error and `edit-rejected` handling (V2.12), `analysis-result` (V2.13).
+- [ ] **Jay (B):** V2.8 to V2.12, execution-service side (request, result, share, lookup, snapshot, codes).
+- [ ] **Prince (C):** V2.13, and that the result fields still pass through to ai-ml-service as in `docs/ai-ml-contract.md`.
+- [ ] **Yash and Femina (D):** `audience` (V2.10), lookup and snapshot, sync-service side (V2.11, V2.12), close codes and V2.14.
+
+When V2.7 and this list are ticked: tick the v1 confirmations in section 10, close T-06 (#9) with a comment listing the items carried forward (V2.15), and announce it in Slack #dev.
 
 ---
 
@@ -839,6 +1457,7 @@ Decisions 8–15 and their confirmations (Jay, Prince) are in the companion PR `
 | v2 (decisions 1–7) | 31 Oct 2026 | Version 2 scaffold + decisions 1–7 added (T-17, #61, `docs/T-17-contracts-v2-rooms`): room creation (`POST /v1/rooms`), server-generated room id, `4404`/`4410` close codes, join/roster and roles, control + document sockets, module addressing and `module-updated`. No v0/v1 field renamed in place. Names Proposed until confirmed. Decisions 8–15 follow in the companion PR. |
 | v2 (1–7, review) | 1 Nov 2026 | Review fixes (#79): 22-char room id + base64url-without-padding note; `joined`/`roster` `can_edit` clarified as Pair-only (per-module in Open, FR22.2); full module REST operations table, module object, and `writers`/`deleted` on `module-updated`; join-flow details (reconnect ≠ `NAME_TAKEN`, invalid owner_token, `APPROVAL_PENDING` → `join-approved`/`join-declined`, `session_id` echo, `USER_BLOCKED` vs `4403`); document socket join-first + close code `4405`; §8 unowned-room sentence withdrawn; `GET /v1/rooms/{id}/owner` retained; v2 example files added under `docs/examples/`. |
 | v2 (1–7, review 2) | 1 Nov 2026 | Second review pass (#79): public **`member_id`** added for `roster`, module `owner_member_id`/`writers` and all REST targets, with `session_id` kept **private to the browser** (closes the impersonation hole); module permissions corrected to Requirements v2 — rename/delete/transfer **owner only** (FR21.4), grant/revoke write **owner or Host** (FR22.1), set entry file **Host only** (FR20.3), `approve` sets the owner (FR21.2), create is always a pending request (FR21.1); REST **caller identity** via `X-Session-Id` (+ `X-Owner-Token` for Host) and **CORS** for `CLIENT_ORIGIN`; `PATCH` single-field rule; socket closed after `join-refused` (except `APPROVAL_PENDING`); full control-socket message list; `4406` not-joined close code; `can_edit` omitted in Open mode. |
+| v2 (decisions 8–15) | 1 Nov 2026 | Decisions 8–15 added (T-17, #61, `docs/T-17-contracts-v2-runs-errors`): run `source` object and snapshot read (V2.8), run result fields (V2.9), visibility, `audience` and share (V2.10), permission lookup (V2.11), permission errors, `edit-rejected` and every error and close code in one table (V2.12), `analysis-result` replacing `anomaly-warning` and `ai-explanation` (V2.13), internal endpoint codes (V2.14), carried T-06 items (V2.15). Differences from Backlog v2 §6.1 are listed before V2.8. Corrections in decisions 1–7: example tokens match the example files; caller identity limited to module operations; `pending` added to the `module-updated` example; stable `member_id` stated; owner optional on approve; `analysis-result` added to the control-socket list; owner check answers an unknown room with 404. No v0/v1 text edited. |
 
 ### Runner infrastructure error (v1 proposal addition)
 

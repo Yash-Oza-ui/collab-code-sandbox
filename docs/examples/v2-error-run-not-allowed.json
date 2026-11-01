@@ -1,0 +1,9 @@
+{
+  "request_id": "0b9d2f3e-7a41-4c58-9e1b-5d3c8a6f2e10",
+  "error": {
+    "code": "RUN_NOT_ALLOWED",
+    "message": "Observers cannot run code.",
+    "reason": "observer",
+    "retry_after_seconds": null
+  }
+}
