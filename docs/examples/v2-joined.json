@@ -1,0 +1,11 @@
+{
+  "type": "joined",
+  "member_id": "m_7a3c9f",
+  "role": "host",
+  "mode": "pair",
+  "preset": "teach_interview",
+  "permissions": {
+    "can_edit": true,
+    "can_run": true
+  }
+}
