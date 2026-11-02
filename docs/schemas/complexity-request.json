@@ -1,0 +1,47 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ComplexityAnalysisRequest",
+  "type": "object",
+  "properties": {
+    "request_id": { "type": "string" },
+    "room_id": { "type": "string" },
+    "analysis_id": { "type": "string" },
+    "request_type": { "type": "string", "enum": ["complexity"] },
+    "language": { "type": "string", "enum": ["cpp", "python", "c", "java", "javascript"] },
+    "consent": { "type": "boolean" },
+    "ai_enabled": { "type": "boolean" },
+    "code": { "type": "string" },
+    "measurements": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "input_size": { "type": "integer" },
+          "runtimes_ms": {
+            "type": "array",
+            "items": { "type": "number" }
+          }
+        },
+        "required": ["input_size", "runtimes_ms"],
+        "additionalProperties": false
+      }
+    },
+    "suggested_patch": { "type": ["string", "null"] },
+    "suggested_patch_runtimes_ms": {
+      "type": ["array", "null"],
+      "items": { "type": "number" }
+    }
+  },
+  "required": [
+    "request_id",
+    "room_id",
+    "analysis_id",
+    "request_type",
+    "language",
+    "consent",
+    "ai_enabled",
+    "code",
+    "measurements"
+  ],
+  "additionalProperties": false
+}

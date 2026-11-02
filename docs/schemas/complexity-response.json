@@ -1,0 +1,63 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ComplexityAnalysisResponse",
+  "type": "object",
+  "properties": {
+    "request_id": { "type": "string" },
+    "analysis_id": { "type": "string" },
+    "task": { "type": "string", "enum": ["complexity"] },
+    "growth_rate": { "type": "number" },
+    "estimated_complexity": { "type": "string" },
+    "r2_score": { "type": "number" },
+    "projected_timeout_input_size": { "type": "integer" },
+    "slow_patterns": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "pattern": { "type": "string" },
+          "line": { "type": "integer" },
+          "message": { "type": "string" }
+        },
+        "required": ["pattern", "line", "message"],
+        "additionalProperties": false
+      }
+    },
+    "ai_step": {
+      "type": "object",
+      "properties": {
+        "status": { "type": "string", "enum": ["ok", "skipped"] },
+        "error_code": {
+          "type": ["string", "null"],
+          "enum": [
+            "CONSENT_MISSING",
+            "AI_DISABLED",
+            "COST_CAP_REACHED",
+            "ROOM_RATE_LIMITED",
+            "RATE_LIMITED_PROVIDER",
+            "PROVIDER_ERROR",
+            "PROVIDER_TIMEOUT",
+            null
+          ]
+        },
+        "suggested_fix": { "type": ["string", "null"] },
+        "verified": { "type": "boolean" },
+        "verified_speedup_pct": { "type": ["number", "null"] }
+      },
+      "required": ["status", "error_code", "suggested_fix", "verified", "verified_speedup_pct"],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "request_id",
+    "analysis_id",
+    "task",
+    "growth_rate",
+    "estimated_complexity",
+    "r2_score",
+    "projected_timeout_input_size",
+    "slow_patterns",
+    "ai_step"
+  ],
+  "additionalProperties": false
+}
