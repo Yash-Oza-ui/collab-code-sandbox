@@ -44,8 +44,7 @@ export default function RoomPage(props: RoomPageProps = {}) {
   // One Y.Doc is created inside effect setup and destroyed in its cleanup (T-01).
   const { docRef } = useRoomDoc(roomId, { docRef: externalDocRef })
 
-  const internalAwarenessRef = useRef<Awareness | null>(null)
-  const awarenessRef = externalAwarenessRef ?? internalAwarenessRef
+  const awarenessInstanceRef = useRef<Awareness | null>(null)
 
   // Manage Awareness instance lifecycle tied to the active Y.Doc
   useEffect(() => {
@@ -53,7 +52,10 @@ export default function RoomPage(props: RoomPageProps = {}) {
     if (!doc) return
 
     const awareness = createAwareness(doc)
-    awarenessRef.current = awareness
+    awarenessInstanceRef.current = awareness
+    if (externalAwarenessRef) {
+      externalAwarenessRef.current = awareness
+    }
 
     // Expose awareness on window for browser console inspection (US-05 DoD #5)
     if (typeof window !== 'undefined') {
@@ -62,8 +64,11 @@ export default function RoomPage(props: RoomPageProps = {}) {
 
     return () => {
       awareness.destroy()
-      if (awarenessRef.current === awareness) {
-        awarenessRef.current = null
+      if (awarenessInstanceRef.current === awareness) {
+        awarenessInstanceRef.current = null
+      }
+      if (externalAwarenessRef && externalAwarenessRef.current === awareness) {
+        externalAwarenessRef.current = null
       }
       if (
         typeof window !== 'undefined' &&
@@ -72,18 +77,18 @@ export default function RoomPage(props: RoomPageProps = {}) {
         delete (window as unknown as { awareness?: Awareness }).awareness
       }
     }
-  }, [roomId, docRef, awarenessRef])
+  }, [roomId, docRef, externalAwarenessRef])
 
   // Keep presence updated in awareness whenever displayName and userColor are set or change
   useEffect(() => {
-    const awareness = awarenessRef.current
+    const awareness = awarenessInstanceRef.current
     if (awareness && displayName && userColor) {
       setUserAwareness(awareness, { name: displayName, color: userColor })
     }
-  }, [displayName, userColor, awarenessRef])
+  }, [displayName, userColor])
 
   function handleDisplayNameAccepted(name: string) {
-    const awareness = awarenessRef.current
+    const awareness = awarenessInstanceRef.current
     const existingColors = awareness ? getExistingUserColors(awareness) : []
     const fallbackIndex = docRef.current?.clientID ?? 0
     const color = pickUserColor(existingColors, fallbackIndex)
