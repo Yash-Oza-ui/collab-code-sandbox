@@ -73,7 +73,7 @@ CR05 is satisfied: import never runs in the execution sandbox, and sandbox conta
 
 | State | Requirements | Why `sync-service` | Status |
 |---|---|---|---|
-| **Room mode** (`pair` or `open`, plus preset and language, fixed at creation) | FR17, US-34 | Set by `POST /v1/rooms`, which `sync-service` already owns (T-17, decision 1). | Firm |
+| **Room mode** (`pair` or `open`, plus preset and language, fixed at creation) | FR17, US-34 | Set by `POST /v1/rooms`, which `sync-service` owns (T-17, decision 1; built in T-20). | Firm |
 | **Modules** (per-module id, name, owner, write access; Open mode) | FR20–FR22 | Each module is a Yjs document relayed here; ownership is enforced where connections are accepted. | Firm (names Proposed) |
 | **Saved versions** of each module | FR24–FR26 | Runs come from saved versions; execution-service reads them from `sync-service` and stores none itself. | Firm (names Proposed) |
 | **Audit log** of room actions (role, edit-access, write-access and run-permission changes) | FR34 | The actions happen on `sync-service`'s control path, so it is where they can be recorded. | Provisional |

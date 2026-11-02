@@ -18,7 +18,7 @@ Version 1 described a single kind of room: one shared file that everyone in the 
 - **E4** — co-editing one file undermines modularity: different functions belong in separate modules, so a failure can be pinned to one module and one person.
 - **E5** — the expected room size must be stated.
 
-CHG-01 weighed four options (section 2) and chose **Option D: two room modes**, fixed when the room is created:
+CHG-01 weighed four options (section 3) and chose **Option D: two room modes**, fixed when the room is created:
 
 - **Pair mode** keeps the controlled single file, for the teaching, interview and pair-debugging sessions where one person drives and others watch — the clear use case E1 was missing. A preset, Teach/Interview or Debug together, sets who may edit by default (FR19.2); both presets are Pair mode, not a separate mode.
 - **Open mode** adds a workspace of modules with per-module owners and saved-version runs, for modular programs — what E4 asks for. A run executes the last saved version so a half-typed line cannot break it (E2), and the runner chooses whether to share the output.
@@ -42,18 +42,17 @@ From CHG-01 section 3. The criteria were: does it answer the concerns (E1–E5),
 
 ### Pair mode
 
-- One shared document, `main` (T-17, decision 6). No modules.
+- One shared document, `main`, and no modules (FR18; T-17, decision 6).
 - A **preset** is chosen at creation: `teach_interview` or `debug_together` (Pair only).
-- The Host controls who may edit the shared file; a guest can be made an **Observer**, who reads, sees cursors and shared results, but cannot edit or run (US-27, FR9.4). Edit permission is enforced on the server (T-20), not by hiding a button.
+- The Host gives and takes back edit access to the shared file (FR19.1); a guest can be made an **Observer**, who reads, sees cursors and shared results, but cannot edit or run (US-27, FR9.4). Edit permission is enforced on the server — the relay checks every edit (FR18), not a hidden button (T-20).
 - Runs are sent inline: the run request carries the file content directly (T-17, decision 8, `kind: "inline"`).
 
 ### Open mode
 
-- A **workspace of modules**. Each module has exactly one owner, a server-generated opaque `module_id` that survives rename and transfer, and a `name` that is the file name with the language extension, unique in the workspace (T-17, decision 7).
-- One language is fixed for the whole workspace at creation (Open only).
+- A **workspace of modules**, using one language fixed for the whole workspace at creation (FR20.1). Each module has exactly one owner (FR21.3), a server-generated opaque `module_id` that survives rename and transfer, and a `name` that is the file name with the language extension, unique in the workspace (T-17, decision 7).
 - Each module is its own Yjs document; its `doc_id` is the `module_id` (T-17, decision 6).
-- **Runs come from saved versions, never from live buffers.** execution-service reads the saved versions from sync-service and runs all modules of one run together as one snapshot; the result lists exactly that snapshot (T-17, decisions 8 and 9).
-- Results are **private to the runner** by default and are shared with the room only when the runner shares them (T-17, decision 10).
+- **Runs come from saved versions, never from live buffers** (FR25.1). execution-service reads the saved versions from sync-service and runs all modules of one run together as one snapshot; the result lists exactly that snapshot (T-17, decisions 8 and 9).
+- Results are **private to the runner** by default and are shared with the room only when the runner shares them (FR27; T-17, decision 10).
 
 ### Roles (both modes)
 
@@ -65,7 +64,7 @@ Written service by service, so each team knows what it owns.
 
 - **sync-service** holds all room, role and module state: the room record (mode, preset, language, owner token), roles and roster, the modules and their owners, the saved versions, the audit log, the Host AI switch and the run records. It applies the edit-permission check (T-20). This state is recorded in the extension section of [`platform-home.md`](platform-home.md).
 - **execution-service** reads saved versions from sync-service and keeps **no** permission state. On every run it asks sync-service for the caller's role, run permission and the room's AI switch (T-17, decisions 8 and 11). It never stores who may do what.
-- **ai-ml-service** keeps only hash-keyed measurements; it never holds room, role or module state (T-18).
+- **ai-ml-service** keeps only hash-keyed measurements and its own AI consent and cost-cap tracking (platform-home section 3), and never holds room, role or module state (T-18).
 - **client** renders two different workspaces from the same server contract: Pair mode shows one file and Host controls; Open mode shows a module list with per-module ownership. Both read roles from `roster`.
 - Because the mode is immutable, no story has to handle a mid-session mode switch, and each UI can assume its shape for the life of the room.
 
@@ -81,4 +80,4 @@ Reviewed by Yash Oza (D). One person each from Category A, B and C confirms that
 
 - [ ] **Het (A, client):** the two workspaces (Pair: one file + Host controls; Open: module list with per-module ownership) and that roles/labels come from `roster`.
 - [ ] **Jay (B, execution):** Open-mode runs use saved versions read as one snapshot, and execution-service keeps no permission state.
-- [ ] **Prince (C, AI/ML):** ai-ml-service keeps only hash-keyed measurements and holds no room, role or module state.
+- [ ] **Prince (C, AI/ML):** ai-ml-service keeps only hash-keyed measurements and its own AI consent and cost-cap tracking (platform-home section 3), and never holds room, role or module state.
