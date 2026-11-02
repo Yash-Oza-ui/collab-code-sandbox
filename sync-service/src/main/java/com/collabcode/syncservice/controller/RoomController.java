@@ -68,8 +68,11 @@ public class RoomController {
                 return invalid("preset"); // preset is Pair-only
             }
             language = body.language();
-            if (language == null || !LANGUAGES.contains(language)) {
-                return invalid("language");
+            if (language == null) {
+                return invalid("language"); // required field missing
+            }
+            if (!LANGUAGES.contains(language)) {
+                return unsupportedLanguage(language); // present but not one of the five (DR1)
             }
         }
 
@@ -87,9 +90,22 @@ public class RoomController {
      * creation carries no {@code request_id}, so it is {@code null}.
      */
     private ResponseEntity<Map<String, Object>> invalid(String field) {
+        return envelope("INVALID_REQUEST", "Field '" + field + "' is missing or invalid.");
+    }
+
+    /**
+     * {@code 422 UNSUPPORTED_LANGUAGE} (§7.1, V2.1/V2.12): a {@code language}
+     * value that is present but not one of the five DR1 ids.
+     */
+    private ResponseEntity<Map<String, Object>> unsupportedLanguage(String language) {
+        return envelope("UNSUPPORTED_LANGUAGE",
+                "Language '" + language + "' is not supported. Use one of: cpp, python, c, java, javascript.");
+    }
+
+    private ResponseEntity<Map<String, Object>> envelope(String code, String message) {
         Map<String, Object> error = new LinkedHashMap<>();
-        error.put("code", "INVALID_REQUEST");
-        error.put("message", "Field '" + field + "' is missing or invalid.");
+        error.put("code", code);
+        error.put("message", message);
         error.put("retry_after_seconds", null);
 
         Map<String, Object> body = new LinkedHashMap<>();

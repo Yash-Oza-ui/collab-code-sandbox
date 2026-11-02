@@ -112,7 +112,31 @@ class RoomControllerTest {
         ResponseEntity<String> response = create("{\"mode\":\"open\",\"language\":\"rust\"}");
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.UNPROCESSABLE_ENTITY);
+        JsonNode error = body(response).get("error");
+        assertThat(error.get("code").asText()).isEqualTo("UNSUPPORTED_LANGUAGE");
+        assertThat(error.get("message").asText())
+                .isEqualTo("Language 'rust' is not supported. Use one of: cpp, python, c, java, javascript.");
+    }
+
+    @Test
+    void missingLanguageInOpenMode_isInvalidRequest() throws Exception {
+        ResponseEntity<String> response = create("{\"mode\":\"open\"}");
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.UNPROCESSABLE_ENTITY);
         assertThat(body(response).get("error").get("code").asText()).isEqualTo("INVALID_REQUEST");
+    }
+
+    @Test
+    void aiSwitch_defaultsPerPreset() throws Exception {
+        // Teach/Interview → AI off by default (FR35.2)
+        String teachId = body(create("{\"mode\":\"pair\",\"preset\":\"teach_interview\"}"))
+                .get("room_id").asText();
+        assertThat(store.get(teachId).isAiEnabled()).isFalse();
+
+        // Any other room → AI on by default
+        String openId = body(create("{\"mode\":\"open\",\"language\":\"python\"}"))
+                .get("room_id").asText();
+        assertThat(store.get(openId).isAiEnabled()).isTrue();
     }
 
     @Test

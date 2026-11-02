@@ -21,6 +21,13 @@ public class Room {
     private final String language;   // Open only; null in Pair
     private final String ownerTokenHash;
 
+    /**
+     * The room's AI switch default (FR35.2): off in a Teach/Interview room, on
+     * in every other room. The Host can toggle it later (FR35.1); the session
+     * lookup (V2.11) reads this value.
+     */
+    private final boolean aiEnabled;
+
     /** memberId -&gt; Member. Filled by join (V2.3); empty at creation. */
     private final Map<String, Member> members = new ConcurrentHashMap<>();
 
@@ -30,6 +37,7 @@ public class Room {
         this.preset = preset;
         this.language = language;
         this.ownerTokenHash = ownerTokenHash;
+        this.aiEnabled = !"teach_interview".equals(preset); // FR35.2
     }
 
     public String getRoomId() { return roomId; }
@@ -37,5 +45,6 @@ public class Room {
     public String getPreset() { return preset; }
     public String getLanguage() { return language; }
     public String getOwnerTokenHash() { return ownerTokenHash; }
+    public boolean isAiEnabled() { return aiEnabled; }
     public Map<String, Member> getMembers() { return members; }
 }

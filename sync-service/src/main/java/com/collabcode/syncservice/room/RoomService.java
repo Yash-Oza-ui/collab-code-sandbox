@@ -65,6 +65,19 @@ public class RoomService {
         return new ArrayList<>(room.getMembers().values());
     }
 
+    /**
+     * Resolve a member by its private session id (null if the room or session
+     * is unknown). Used by the edit-permission check (Bhavya) and the internal
+     * session-lookup endpoint (Jay), so it is public.
+     */
+    public Member findMemberBySession(String roomId, String sessionId) {
+        Room room = store.get(roomId);
+        if (room == null) {
+            return null;
+        }
+        return findBySession(room, sessionId);
+    }
+
     // ----- helpers -----
 
     private boolean isOwner(Room room, String ownerToken) {
@@ -79,6 +92,9 @@ public class RoomService {
      * join/roster message omits {@code can_edit} (see {@link RoomMessages}).
      */
     private boolean computeCanEdit(Room room, Role role) {
+        if (role == Role.OBSERVER) {
+            return false; // an Observer never edits, in either mode (FR9.4)
+        }
         if (room.getMode() != RoomMode.PAIR) {
             return false; // Open: per-module; value is not sent
         }
