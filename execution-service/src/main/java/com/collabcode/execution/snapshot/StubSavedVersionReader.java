@@ -87,10 +87,12 @@ public class StubSavedVersionReader implements SavedVersionReader {
             for (Object id : list) {
                 if ("mod_5Lm8Np2Qr4St".equals(id)) {
                     modules.add(helperMod);
+                } else if ("mod_9Qx7mBvA2nR0".equals(id)) {
+                    modules.add(mainMod);
                 } else {
                     modules.add(new SnapshotModule(
                             String.valueOf(id),
-                            "main.py",
+                            "module_" + id + ".py",
                             "print(\"hello from \" + '" + id + "')\n",
                             1,
                             ada,
@@ -101,6 +103,12 @@ public class StubSavedVersionReader implements SavedVersionReader {
             }
         } else {
             modules.add(mainMod);
+        }
+
+        // T-17 V2.8 invariant: the entry file (main.py) must always be included in the returned snapshot
+        boolean hasEntry = modules.stream().anyMatch(m -> "main.py".equalsIgnoreCase(m.getName()));
+        if (!hasEntry) {
+            modules.add(0, mainMod);
         }
 
         return new SnapshotResult(roomId, "main.py", modules);

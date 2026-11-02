@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Integration test for T-19 run specification endpoint (Jay Limbasiya).
-# Verifies that POST /v1/runs accepts the run spec object and rejects legacy code bodies.
+# Integration test for T-19 run specification endpoint (Jay Limbasiya & Yash Oza).
+# Verifies that POST /v1/runs accepts the run spec object, rejects legacy code bodies,
+# supports Open mode snapshots, and enforces Decision 9 OOM kill semantics.
 set -uo pipefail
 dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$dir/lib.sh"
@@ -94,5 +95,59 @@ else
   exit 1
 fi
 
-exit 0
+# 4. Open mode saved module run (T-17 V2.8, Decision 8 & 9)
+resp_open="$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST "$endpoint" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "request_id": "0b9d2f3e-7a41-4c58-9e1b-5d3c8a6f2e11",
+    "room_id": "room-open-01",
+    "session_id": "7c1e4a52-3b0d-4f6a-9a2e-8d5f1b6c3e90",
+    "language": "python",
+    "source": {
+      "kind": "saved",
+      "target": "module",
+      "module_id": "mod_9Qx7mBvA2nR0"
+    }
+  }')"
 
+status_open="$(echo "$resp_open" | grep "HTTP_STATUS" | cut -d':' -f2)"
+body_open="$(echo "$resp_open" | grep -v "HTTP_STATUS")"
+
+if [ "$status_open" = "200" ] && echo "$body_open" | grep -q "private"; then
+  pass "open-mode-saved" "Open mode saved module run -> 200 with visibility: private"
+else
+  fail "open-mode-saved" "expected 200 with private visibility, got $status_open: $body_open"
+  exit 1
+fi
+
+# 5. Out-of-memory run: failure_kind 'non_zero_exit' and oom_killed true (Decision 9)
+resp_oom="$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST "$endpoint" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "request_id": "0b9d2f3e-7a41-4c58-9e1b-5d3c8a6f2e12",
+    "room_id": "integration-test-room",
+    "session_id": "7c1e4a52-3b0d-4f6a-9a2e-8d5f1b6c3e90",
+    "language": "python",
+    "source": {
+      "kind": "inline",
+      "files": [
+        {
+          "name": "main.py",
+          "content": "allocate_oom_trigger()\n"
+        }
+      ],
+      "entry": "main.py"
+    }
+  }')"
+
+status_oom="$(echo "$resp_oom" | grep "HTTP_STATUS" | cut -d':' -f2)"
+body_oom="$(echo "$resp_oom" | grep -v "HTTP_STATUS")"
+
+if [ "$status_oom" = "200" ] && echo "$body_oom" | grep -q '"oom_killed":true' && echo "$body_oom" | grep -q '"failure_kind":"non_zero_exit"'; then
+  pass "oom-killed-rule" "OOM kill reports failure_kind: non_zero_exit and oom_killed: true"
+else
+  fail "oom-killed-rule" "expected 200 with oom_killed true and non_zero_exit, got $status_oom: $body_oom"
+  exit 1
+fi
+
+exit 0

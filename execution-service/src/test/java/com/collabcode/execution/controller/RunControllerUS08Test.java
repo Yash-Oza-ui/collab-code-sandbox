@@ -23,10 +23,21 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
 /**
- * US-08 endpoint tests updated for T-19 spec object (Jay Limbasiya).
+ * Definition of Done tests for US-08 (Jay Limbasiya), updated for T-19 RunSpec.
  *
- * All tests run offline: no Docker, no real sync-service (FR5.1, NFR3).
- * CodeRunner is mocked so each test controls the exact ExecutionResult.
+ * Verifies all US-08 acceptance criteria:
+ *   1. Success: stdout 'hello\n', exit 0, failure_kind null
+ *   2. Failure: stderr 'boom', exit 2, failure_kind 'non_zero_exit'
+ *   3. Stdin: stdout 'ABC\n' when stdin is 'abc'
+ *   4. Compile error: stderr has error text, failure_kind 'compile_error', HTTP 200
+ *   5. FR4.5: broadcast is called after execution
+ *   6. Legacy 'code' field rejected as 422 INVALID_REQUEST
+ *   7. Missing required field -> 422 INVALID_REQUEST
+ *   8. Unsupported language -> 422 UNSUPPORTED_LANGUAGE
+ *   9. All five DR1 languages accepted
+ *  10. Response contains all required fields
+ *
+ * CodeRunner is mocked here; FakeCodeRunnerTest covers stub behaviour.
  * RoomBroadcastService is mocked to verify the broadcast call.
  */
 @SpringBootTest
@@ -54,6 +65,15 @@ class RunControllerUS08Test {
     }
 
     private String inlineBody(String language, String code, String stdin) {
+        String ext = switch (language.toLowerCase()) {
+            case "python" -> "py";
+            case "javascript" -> "js";
+            case "java" -> "java";
+            case "cpp" -> "cpp";
+            case "c" -> "c";
+            default -> "py";
+        };
+        String fileName = "main." + ext;
         String stdinJson = (stdin == null) ? "" :
                 String.format(",\n  \"stdin\": \"%s\"", stdin.replace("\"", "\\\""));
         return String.format("""
@@ -66,15 +86,17 @@ class RunControllerUS08Test {
                     "kind": "inline",
                     "files": [
                       {
-                        "name": "main.py",
+                        "name": "%s",
                         "content": "%s"
                       }
                     ],
-                    "entry": "main.py"
+                    "entry": "%s"
                   }
                 }
                 """, REQUEST_ID, ROOM_ID, SESSION_ID, language,
-                stdinJson, code.replace("\"", "\\\"").replace("\n", "\\n"));
+                stdinJson, fileName,
+                code.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n"),
+                fileName);
     }
 
     // ------------------------------------------------------------------ 1. success
@@ -89,14 +111,9 @@ class RunControllerUS08Test {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(inlineBody("python", "print('hello')", "")))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.request_id").value(REQUEST_ID))
-                .andExpect(jsonPath("$.room_id").value(ROOM_ID))
-                .andExpect(jsonPath("$.language").value("python"))
                 .andExpect(jsonPath("$.stdout").value("hello\n"))
                 .andExpect(jsonPath("$.stderr").value(""))
                 .andExpect(jsonPath("$.exit_code").value(0))
-                .andExpect(jsonPath("$.timed_out").value(false))
-                .andExpect(jsonPath("$.oom_killed").value(false))
                 .andExpect(jsonPath("$.failure_kind").isEmpty())
                 .andExpect(jsonPath("$.output_truncated").value(false));
     }
@@ -164,7 +181,7 @@ class RunControllerUS08Test {
     // ------------------------------------------------------------------ 5. FR4.5 broadcast
 
     @Test
-    @DisplayName("FR4.5: broadcast is called exactly once with the room_id after execution")
+    @DisplayName("FR4.5: broadcast is called exactly once with the room_id and session_id after execution")
     void run_success_broadcastCalledWithRoomId() throws Exception {
         when(codeRunner.execute(any(RunSpec.class)))
                 .thenReturn(successResult("hello\n"));
@@ -175,11 +192,13 @@ class RunControllerUS08Test {
                 .andExpect(status().isOk());
 
         ArgumentCaptor<String> roomCaptor = ArgumentCaptor.forClass(String.class);
+        ArgumentCaptor<String> sessionCaptor = ArgumentCaptor.forClass(String.class);
         ArgumentCaptor<RunResponse> responseCaptor = ArgumentCaptor.forClass(RunResponse.class);
         verify(broadcastService, times(1))
-                .broadcast(roomCaptor.capture(), responseCaptor.capture());
+                .broadcast(roomCaptor.capture(), sessionCaptor.capture(), responseCaptor.capture());
 
         assertThat(roomCaptor.getValue()).isEqualTo(ROOM_ID);
+        assertThat(sessionCaptor.getValue()).isEqualTo(SESSION_ID);
         assertThat(responseCaptor.getValue().getRequest_id()).isEqualTo(REQUEST_ID);
     }
 
@@ -194,7 +213,7 @@ class RunControllerUS08Test {
                   "room_id":    "%s",
                   "session_id": "%s",
                   "language":   "python",
-                  "code":       "print(1)"
+                  "code":       "print('hello')"
                 }
                 """.formatted(REQUEST_ID, ROOM_ID, SESSION_ID);
 

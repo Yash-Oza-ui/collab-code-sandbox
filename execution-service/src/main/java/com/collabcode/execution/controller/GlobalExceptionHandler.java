@@ -44,11 +44,13 @@ public class GlobalExceptionHandler {
         String fieldName = (fe != null) ? fe.getField() : "unknown";
 
         String requestId = null;
-        Object target = ex.getBindingResult().getTarget();
-        if (target instanceof RunRequest req) {
-            requestId = req.getRequest_id();
-            if (requestId != null && requestId.isBlank()) {
-                requestId = null;
+        if (!"request_id".equals(fieldName)) {
+            Object target = ex.getBindingResult().getTarget();
+            if (target instanceof RunRequest req) {
+                String candidate = req.getRequest_id();
+                if (candidate != null && !candidate.isBlank() && candidate.matches(RunRequest.UUID_V4_REGEX)) {
+                    requestId = candidate;
+                }
             }
         }
 

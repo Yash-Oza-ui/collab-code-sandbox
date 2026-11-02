@@ -1,7 +1,8 @@
 package com.collabcode.execution.controller;
 
 import com.collabcode.execution.broadcast.RoomBroadcastService;
-import com.collabcode.execution.exception.RoomServiceUnavailableException;
+import com.collabcode.execution.model.RunFile;
+import com.collabcode.execution.model.RunResponse;
 import com.collabcode.execution.model.RunSpec;
 import com.collabcode.execution.model.SavedSource;
 import com.collabcode.execution.permission.PermissionLookupResult;
@@ -12,6 +13,7 @@ import com.collabcode.execution.snapshot.MemberInfo;
 import com.collabcode.execution.snapshot.SnapshotModule;
 import com.collabcode.execution.snapshot.SnapshotResult;
 import com.collabcode.execution.snapshot.StubSavedVersionReader;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -26,31 +28,39 @@ import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 
 import java.util.List;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.*;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
 /**
- * Acceptance and unit tests for T-19 spec object and saved module snapshot reader (Jay Limbasiya).
+ * Acceptance and unit tests for T-19 spec object and saved module snapshot reader (Jay Limbasiya & Yash Oza).
  *
- * Covers all criteria from issue #64:
+ * Covers all criteria from issue #64 and T-17 contract review:
  *   1. Valid inline source in Pair mode
  *   2. Rejection of legacy 'code' field as 422 INVALID_REQUEST
  *   3. Source validation: invalid kind, invalid target, missing module_id, invalid module_ids
  *   4. Validation of entry file presence and plain file names (no '/', '\', '..')
- *   5. Validation of single file in Pair mode
- *   6. Saved source with stub snapshot reader (module and entry targets)
- *   7. One-call snapshot rule verification
- *   8. Negative test for snapshot rule: multiple calls for modules fails
- *   9. Snapshot reader failure -> 503 ROOM_SERVICE_UNAVAILABLE
- *  10. Permission lookup failure -> 503 ROOM_SERVICE_UNAVAILABLE
- *  11. Permission denied (observer, run_revoked, host_only) -> 403 RUN_NOT_ALLOWED
- *  12. Mode mismatches (inline in open, saved in pair) -> 422 INVALID_REQUEST
- *  13. Language mismatch in open mode -> 422 INVALID_REQUEST
+ *   5. Validation of language-specific file extensions
+ *   6. Rejection of explicit null file content
+ *   7. Validation of request_id and session_id as UUID v4
+ *   8. Validation of single file in Pair mode
+ *   9. Saved source with stub snapshot reader (module and entry targets)
+ *  10. One-call snapshot rule verification (consistent snapshot)
+ *  11. Entry module guaranteed in snapshot
+ *  12. Snapshot reader failure -> 503 ROOM_SERVICE_UNAVAILABLE (request_id preserved)
+ *  13. Permission lookup failure -> 503 ROOM_SERVICE_UNAVAILABLE (request_id preserved)
+ *  14. Incomplete PermissionLookupResult validation -> 503 ROOM_SERVICE_UNAVAILABLE
+ *  15. Permission denied (observer, run_revoked, host_only) -> 403 RUN_NOT_ALLOWED (request_id preserved)
+ *  16. Mode mismatches (inline in open, saved in pair) -> 422 INVALID_REQUEST
+ *  17. Language mismatch in open mode -> 422 INVALID_REQUEST
+ *  18. Decision 9 result fields (runner, ran_at with exact millisecond precision, visibility, saved_versions, failure, compile_time_ms)
+ *  19. OOM kill rule: non_zero_exit with oom_killed: true, never "oom"
+ *  20. Broadcast audience targeting (room for Pair, session list for Open)
+ *  21. Output cap enforcement across combined stdout + stderr
  */
 @SpringBootTest
 @AutoConfigureMockMvc
@@ -58,6 +68,9 @@ class RunControllerT19Test {
 
     @Autowired
     private MockMvc mockMvc;
+
+    @Autowired
+    private ObjectMapper objectMapper;
 
     @MockBean
     private CodeRunner codeRunner;
@@ -149,6 +162,7 @@ class RunControllerT19Test {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(body))
                 .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.request_id").value(REQUEST_ID))
                 .andExpect(jsonPath("$.error.code").value("INVALID_REQUEST"))
                 .andExpect(jsonPath("$.error.message").value("Field 'code' is no longer accepted. Use 'source'."));
     }
@@ -174,6 +188,7 @@ class RunControllerT19Test {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(body))
                 .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.request_id").value(REQUEST_ID))
                 .andExpect(jsonPath("$.error.code").value("INVALID_REQUEST"))
                 .andExpect(jsonPath("$.error.message").value("Source kind 'custom_kind' is invalid."));
     }
@@ -206,6 +221,7 @@ class RunControllerT19Test {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(body))
                 .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.request_id").value(REQUEST_ID))
                 .andExpect(jsonPath("$.error.code").value("INVALID_REQUEST"))
                 .andExpect(jsonPath("$.error.message").value("Entry file 'main.py' must match one of the files."));
     }
@@ -239,13 +255,133 @@ class RunControllerT19Test {
                             .contentType(MediaType.APPLICATION_JSON)
                             .content(body))
                     .andExpect(status().isUnprocessableEntity())
+                    .andExpect(jsonPath("$.request_id").value(REQUEST_ID))
                     .andExpect(jsonPath("$.error.code").value("INVALID_REQUEST"))
                     .andExpect(jsonPath("$.error.message").value(
                             org.hamcrest.Matchers.containsString("is invalid. Plain file name with language extension required.")));
         }
     }
 
-    // ------------------------------------------------------------------ 6. multiple files in pair mode
+    // ------------------------------------------------------------------ 6. file extension validation
+
+    @Test
+    @DisplayName("File extension not matching language returns 422 INVALID_REQUEST")
+    void run_invalidFileExtension_returns422() throws Exception {
+        String body = """
+                {
+                  "request_id": "%s",
+                  "room_id":    "%s",
+                  "session_id": "%s",
+                  "language":   "python",
+                  "source": {
+                    "kind": "inline",
+                    "files": [
+                      {
+                        "name": "main.java",
+                        "content": "print(1)"
+                      }
+                    ],
+                    "entry": "main.java"
+                  }
+                }
+                """.formatted(REQUEST_ID, ROOM_ID, SESSION_ID);
+
+        mockMvc.perform(post("/v1/runs")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.request_id").value(REQUEST_ID))
+                .andExpect(jsonPath("$.error.code").value("INVALID_REQUEST"))
+                .andExpect(jsonPath("$.error.message").value("File name 'main.java' does not match language 'python'."));
+    }
+
+    // ------------------------------------------------------------------ 7. explicit null file content
+
+    @Test
+    @DisplayName("Explicit null file content in RunFile is rejected with 422 INVALID_REQUEST")
+    void run_explicitNullFileContent_returns422() throws Exception {
+        String body = """
+                {
+                  "request_id": "%s",
+                  "room_id":    "%s",
+                  "session_id": "%s",
+                  "language":   "python",
+                  "source": {
+                    "kind": "inline",
+                    "files": [
+                      {
+                        "name": "main.py",
+                        "content": null
+                      }
+                    ],
+                    "entry": "main.py"
+                  }
+                }
+                """.formatted(REQUEST_ID, ROOM_ID, SESSION_ID);
+
+        mockMvc.perform(post("/v1/runs")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.request_id").value(REQUEST_ID))
+                .andExpect(jsonPath("$.error.code").value("INVALID_REQUEST"))
+                .andExpect(jsonPath("$.error.message").value("File content must not be null."));
+    }
+
+    // ------------------------------------------------------------------ 8. UUID v4 validation
+
+    @Test
+    @DisplayName("Invalid request_id (not UUID v4) returns 422 with request_id null in error envelope")
+    void run_invalidRequestId_returns422WithNullRequestId() throws Exception {
+        String body = """
+                {
+                  "request_id": "not-a-uuid-v4",
+                  "room_id":    "%s",
+                  "session_id": "%s",
+                  "language":   "python",
+                  "source": {
+                    "kind": "inline",
+                    "files": [{ "name": "main.py", "content": "print(1)" }],
+                    "entry": "main.py"
+                  }
+                }
+                """.formatted(ROOM_ID, SESSION_ID);
+
+        mockMvc.perform(post("/v1/runs")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.request_id").doesNotExist())
+                .andExpect(jsonPath("$.error.code").value("INVALID_REQUEST"));
+    }
+
+    @Test
+    @DisplayName("Invalid session_id (not UUID v4) returns 422 and preserves valid request_id")
+    void run_invalidSessionId_returns422WithPreservedRequestId() throws Exception {
+        String body = """
+                {
+                  "request_id": "%s",
+                  "room_id":    "%s",
+                  "session_id": "not-a-valid-session-uuid",
+                  "language":   "python",
+                  "source": {
+                    "kind": "inline",
+                    "files": [{ "name": "main.py", "content": "print(1)" }],
+                    "entry": "main.py"
+                  }
+                }
+                """.formatted(REQUEST_ID, ROOM_ID);
+
+        mockMvc.perform(post("/v1/runs")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.request_id").value(REQUEST_ID))
+                .andExpect(jsonPath("$.error.code").value("INVALID_REQUEST"))
+                .andExpect(jsonPath("$.error.message").value("Field 'session_id' is missing or invalid."));
+    }
+
+    // ------------------------------------------------------------------ 9. multiple files in pair mode
 
     @Test
     @DisplayName("Inline source with multiple files in Pair mode returns 422 INVALID_REQUEST (FR18)")
@@ -271,11 +407,12 @@ class RunControllerT19Test {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(body))
                 .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.request_id").value(REQUEST_ID))
                 .andExpect(jsonPath("$.error.code").value("INVALID_REQUEST"))
                 .andExpect(jsonPath("$.error.message").value("Pair mode requires exactly one file in 'files'."));
     }
 
-    // ------------------------------------------------------------------ 7. saved source target: module
+    // ------------------------------------------------------------------ 10. saved source targets
 
     @Test
     @DisplayName("Saved source with target 'module' in Open room executes through snapshot reader")
@@ -304,8 +441,6 @@ class RunControllerT19Test {
         verify(codeRunner).execute(any(RunSpec.class));
     }
 
-    // ------------------------------------------------------------------ 8. saved source target: entry "all"
-
     @Test
     @DisplayName("Saved source with target 'entry' and module_ids 'all' executes in Open room")
     void run_savedSourceTargetEntryAll_success() throws Exception {
@@ -331,8 +466,6 @@ class RunControllerT19Test {
 
         verify(savedVersionReader, times(1)).readSnapshot(eq(openRoom), any(SavedSource.class));
     }
-
-    // ------------------------------------------------------------------ 9. saved source target: entry list
 
     @Test
     @DisplayName("Saved source with target 'entry' and array of module_ids executes in Open room")
@@ -360,7 +493,7 @@ class RunControllerT19Test {
         verify(savedVersionReader, times(1)).readSnapshot(eq(openRoom), any(SavedSource.class));
     }
 
-    // ------------------------------------------------------------------ 10. snapshot rule: exactly one call
+    // ------------------------------------------------------------------ 11. snapshot rule & entry invariant
 
     @Test
     @DisplayName("Snapshot rule: multiple modules are read in exactly ONE snapshot call (FR25.1)")
@@ -389,41 +522,39 @@ class RunControllerT19Test {
         verify(savedVersionReader, times(1)).readSnapshot(eq(openRoom), any(SavedSource.class));
     }
 
-    // ------------------------------------------------------------------ 11. snapshot rule: separate calls fail test
-
     @Test
-    @DisplayName("Snapshot rule negative test: reading module list in separate calls violates snapshot invariant")
-    void snapshotRule_separateCalls_failsInvariant() {
-        // Enforce the requirement: "A saved source whose module list is read in two separate calls fails a test"
-        StubSavedVersionReader reader = new StubSavedVersionReader();
-        SavedSource multiModuleSource = new SavedSource("entry", List.of("mod_1", "mod_2"), null);
+    @DisplayName("Snapshot invariant: entry module (main.py) is always present even if omitted from module_ids (T-17 V2.8)")
+    void snapshotRule_singleConsistentRead_entryIncluded() throws Exception {
+        String openRoom = "room-open-01";
+        String body = """
+                {
+                  "request_id": "%s",
+                  "room_id":    "%s",
+                  "session_id": "%s",
+                  "language":   "python",
+                  "source": {
+                    "kind": "saved",
+                    "target": "entry",
+                    "module_ids": ["mod_5Lm8Np2Qr4St"]
+                  }
+                }
+                """.formatted(REQUEST_ID, openRoom, SESSION_ID);
 
-        // A single snapshot read for the entire source succeeds
-        SnapshotResult snapshot = reader.readSnapshot("room-open-01", multiModuleSource);
-        assertThat(snapshot.getModules()).isNotEmpty();
+        mockMvc.perform(post("/v1/runs")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.saved_versions").isArray())
+                .andExpect(jsonPath("$.saved_versions[0].name").value("main.py"));
 
-        // Any custom workflow attempting to read per-module individually violates one-call rule
-        int calls = 0;
-        for (String modId : List.of("mod_1", "mod_2")) {
-            reader.readSnapshot("room-open-01", new SavedSource("module", modId));
-            calls++;
-        }
-
-        // Verifying that doing multiple calls violates the single snapshot expectation
-        final int totalCalls = calls;
-        assertThatThrownBy(() -> {
-            if (totalCalls > 1) {
-                throw new AssertionError("Snapshot violation: multiple calls (" + totalCalls + ") detected instead of 1 consistent snapshot read.");
-            }
-        }).isInstanceOf(AssertionError.class)
-          .hasMessageContaining("Snapshot violation");
+        verify(savedVersionReader, times(1)).readSnapshot(eq(openRoom), any(SavedSource.class));
     }
 
-    // ------------------------------------------------------------------ 12. snapshot failure → 503
+    // ------------------------------------------------------------------ 12. snapshot failure preserves request_id
 
     @Test
-    @DisplayName("Snapshot reader failure returns 503 ROOM_SERVICE_UNAVAILABLE (T-17 V2.11)")
-    void run_snapshotServiceUnavailable_returns503() throws Exception {
+    @DisplayName("Snapshot reader failure returns 503 ROOM_SERVICE_UNAVAILABLE and preserves request_id")
+    void run_snapshotServiceUnavailable_preservesRequestId_returns503() throws Exception {
         savedVersionReader.setAvailable(false);
         String openRoom = "room-open-01";
         String body = """
@@ -444,15 +575,16 @@ class RunControllerT19Test {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(body))
                 .andExpect(status().isServiceUnavailable())
+                .andExpect(jsonPath("$.request_id").value(REQUEST_ID))
                 .andExpect(jsonPath("$.error.code").value("ROOM_SERVICE_UNAVAILABLE"))
                 .andExpect(jsonPath("$.error.message").value("Room service is unavailable, so the run was not started. Try again."));
     }
 
-    // ------------------------------------------------------------------ 13. permission lookup failure → 503
+    // ------------------------------------------------------------------ 13. permission lookup failure preserves request_id
 
     @Test
-    @DisplayName("Permission lookup failure returns 503 ROOM_SERVICE_UNAVAILABLE (T-17 V2.11)")
-    void run_permissionLookupUnavailable_returns503() throws Exception {
+    @DisplayName("Permission lookup failure returns 503 ROOM_SERVICE_UNAVAILABLE and preserves request_id")
+    void run_permissionLookupUnavailable_preservesRequestId_returns503() throws Exception {
         permissionLookupService.setAvailable(false);
         String body = """
                 {
@@ -472,19 +604,49 @@ class RunControllerT19Test {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(body))
                 .andExpect(status().isServiceUnavailable())
+                .andExpect(jsonPath("$.request_id").value(REQUEST_ID))
                 .andExpect(jsonPath("$.error.code").value("ROOM_SERVICE_UNAVAILABLE"));
     }
 
-    // ------------------------------------------------------------------ 14. observer role → 403
+    @Test
+    @DisplayName("Incomplete PermissionLookupResult (missing fields) returns 503 instead of invented defaults")
+    void run_incompletePermissionLookup_returns503() throws Exception {
+        permissionLookupService.setCustomLookup(new PermissionLookupResult(
+                null, null, "participant", null, null, true, null, false
+        ));
+
+        String body = """
+                {
+                  "request_id": "%s",
+                  "room_id":    "%s",
+                  "session_id": "%s",
+                  "language":   "python",
+                  "source": {
+                    "kind": "inline",
+                    "files": [{ "name": "main.py", "content": "print(1)" }],
+                    "entry": "main.py"
+                  }
+                }
+                """.formatted(REQUEST_ID, ROOM_ID, SESSION_ID);
+
+        mockMvc.perform(post("/v1/runs")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isServiceUnavailable())
+                .andExpect(jsonPath("$.request_id").value(REQUEST_ID))
+                .andExpect(jsonPath("$.error.code").value("ROOM_SERVICE_UNAVAILABLE"));
+    }
+
+    // ------------------------------------------------------------------ 14. permission denied preserves request_id
 
     @Test
-    @DisplayName("Observer role returns 403 RUN_NOT_ALLOWED with reason 'observer' (FR9.4, FR41.1)")
+    @DisplayName("Observer role returns 403 RUN_NOT_ALLOWED with reason 'observer' and preserves request_id")
     void run_observerRole_returns403() throws Exception {
         String body = """
                 {
                   "request_id": "%s",
                   "room_id":    "%s",
-                  "session_id": "observer-session-id",
+                  "session_id": "%s",
                   "language":   "python",
                   "source": {
                     "kind": "inline",
@@ -492,27 +654,26 @@ class RunControllerT19Test {
                     "entry": "main.py"
                   }
                 }
-                """.formatted(REQUEST_ID, ROOM_ID);
+                """.formatted(REQUEST_ID, ROOM_ID, StubPermissionLookupService.OBSERVER_SESSION_ID);
 
         mockMvc.perform(post("/v1/runs")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(body))
                 .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.request_id").value(REQUEST_ID))
                 .andExpect(jsonPath("$.error.code").value("RUN_NOT_ALLOWED"))
                 .andExpect(jsonPath("$.error.reason").value("observer"))
                 .andExpect(jsonPath("$.error.message").value("Observers cannot run code."));
     }
 
-    // ------------------------------------------------------------------ 15. run revoked → 403
-
     @Test
-    @DisplayName("Run revoked returns 403 RUN_NOT_ALLOWED with reason 'run_revoked' (FR41.2)")
+    @DisplayName("Run revoked returns 403 RUN_NOT_ALLOWED with reason 'run_revoked' and preserves request_id")
     void run_runRevoked_returns403() throws Exception {
         String body = """
                 {
                   "request_id": "%s",
                   "room_id":    "%s",
-                  "session_id": "revoked-session-id",
+                  "session_id": "%s",
                   "language":   "python",
                   "source": {
                     "kind": "inline",
@@ -520,27 +681,26 @@ class RunControllerT19Test {
                     "entry": "main.py"
                   }
                 }
-                """.formatted(REQUEST_ID, ROOM_ID);
+                """.formatted(REQUEST_ID, ROOM_ID, StubPermissionLookupService.REVOKED_SESSION_ID);
 
         mockMvc.perform(post("/v1/runs")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(body))
                 .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.request_id").value(REQUEST_ID))
                 .andExpect(jsonPath("$.error.code").value("RUN_NOT_ALLOWED"))
                 .andExpect(jsonPath("$.error.reason").value("run_revoked"))
                 .andExpect(jsonPath("$.error.message").value("The Host has turned off running for you."));
     }
 
-    // ------------------------------------------------------------------ 16. host only running → 403
-
     @Test
-    @DisplayName("Host-only running returns 403 RUN_NOT_ALLOWED with reason 'host_only' (FR41.3)")
+    @DisplayName("Host-only running returns 403 RUN_NOT_ALLOWED with reason 'host_only' and preserves request_id")
     void run_hostOnly_returns403() throws Exception {
         String body = """
                 {
                   "request_id": "%s",
                   "room_id":    "%s",
-                  "session_id": "host_only-session-id",
+                  "session_id": "%s",
                   "language":   "python",
                   "source": {
                     "kind": "inline",
@@ -548,18 +708,19 @@ class RunControllerT19Test {
                     "entry": "main.py"
                   }
                 }
-                """.formatted(REQUEST_ID, ROOM_ID);
+                """.formatted(REQUEST_ID, ROOM_ID, StubPermissionLookupService.HOST_ONLY_SESSION_ID);
 
         mockMvc.perform(post("/v1/runs")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(body))
                 .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.request_id").value(REQUEST_ID))
                 .andExpect(jsonPath("$.error.code").value("RUN_NOT_ALLOWED"))
                 .andExpect(jsonPath("$.error.reason").value("host_only"))
                 .andExpect(jsonPath("$.error.message").value("Only the Host can run code in this room right now."));
     }
 
-    // ------------------------------------------------------------------ 17. mode mismatch
+    // ------------------------------------------------------------------ 15. mode mismatches
 
     @Test
     @DisplayName("Inline source in Open mode returns 422 INVALID_REQUEST")
@@ -583,6 +744,7 @@ class RunControllerT19Test {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(body))
                 .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.request_id").value(REQUEST_ID))
                 .andExpect(jsonPath("$.error.code").value("INVALID_REQUEST"))
                 .andExpect(jsonPath("$.error.message").value("Source kind 'inline' is not allowed in an open room."));
     }
@@ -608,11 +770,12 @@ class RunControllerT19Test {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(body))
                 .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.request_id").value(REQUEST_ID))
                 .andExpect(jsonPath("$.error.code").value("INVALID_REQUEST"))
                 .andExpect(jsonPath("$.error.message").value("Source kind 'saved' is not allowed in a pair room."));
     }
 
-    // ------------------------------------------------------------------ 18. language mismatch in open mode
+    // ------------------------------------------------------------------ 16. language mismatch in open mode
 
     @Test
     @DisplayName("Language in Open room differing from workspace language returns 422 INVALID_REQUEST (FR20.1)")
@@ -636,15 +799,16 @@ class RunControllerT19Test {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(body))
                 .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.request_id").value(REQUEST_ID))
                 .andExpect(jsonPath("$.error.code").value("INVALID_REQUEST"))
                 .andExpect(jsonPath("$.error.message").value(
                         "Language 'javascript' does not match workspace language 'python'."));
     }
 
-    // ------------------------------------------------------------------ 19. Decision 9: runner & ran_at
+    // ------------------------------------------------------------------ 17. Decision 9: runner & ran_at precision
 
     @Test
-    @DisplayName("Response carries runner (member_id, display_name) and ISO ran_at timestamp (Decision 9)")
+    @DisplayName("Response carries runner and ran_at with exact millisecond precision (uuuu-MM-dd'T'HH:mm:ss.SSS'Z')")
     void run_decision9_runnerAndRanAt() throws Exception {
         String body = """
                 {
@@ -668,10 +832,10 @@ class RunControllerT19Test {
                 .andExpect(jsonPath("$.runner.member_id").value("m_7a3c9f"))
                 .andExpect(jsonPath("$.runner.display_name").value("Ada"))
                 .andExpect(jsonPath("$.ran_at").isString())
-                .andExpect(jsonPath("$.ran_at").value(org.hamcrest.Matchers.matchesPattern("^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}.*Z$")));
+                .andExpect(jsonPath("$.ran_at").value(org.hamcrest.Matchers.matchesPattern("^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$")));
     }
 
-    // ------------------------------------------------------------------ 20. Decision 9: visibility & saved_versions
+    // ------------------------------------------------------------------ 18. Decision 9: visibility & saved_versions
 
     @Test
     @DisplayName("Pair mode returns visibility 'room' and empty saved_versions array [] (Decision 9 & 10)")
@@ -732,7 +896,7 @@ class RunControllerT19Test {
                 .andExpect(jsonPath("$.saved_versions[0].saved_at").value("2026-11-01T10:12:04.118Z"));
     }
 
-    // ------------------------------------------------------------------ 21. Decision 9: failure info
+    // ------------------------------------------------------------------ 19. Decision 9: failure info
 
     @Test
     @DisplayName("Open mode failure pinned to module populates failure object (Decision 9)")
@@ -767,7 +931,7 @@ class RunControllerT19Test {
                 .andExpect(jsonPath("$.failure.last_saved_by.member_id").value("m_7a3c9f"));
     }
 
-    // ------------------------------------------------------------------ 22. Decision 9: OOM kill rule
+    // ------------------------------------------------------------------ 20. Decision 9: OOM kill rule
 
     @Test
     @DisplayName("OOM kill in response has failure_kind 'non_zero_exit' and oom_killed true, never 'oom' (Decision 9)")
@@ -800,7 +964,7 @@ class RunControllerT19Test {
                 .andExpect(jsonPath("$.exit_code").value(137));
     }
 
-    // ------------------------------------------------------------------ 23. Decision 9: compile_time_ms
+    // ------------------------------------------------------------------ 21. Decision 9: compile_time_ms
 
     @Test
     @DisplayName("compile_time_ms is present when returned by CodeRunner, null for interpreted (Decision 9)")
@@ -831,5 +995,69 @@ class RunControllerT19Test {
                 .andExpect(jsonPath("$.compile_time_ms").value(15.5))
                 .andExpect(jsonPath("$.execution_time_ms").value(10.0));
     }
-}
 
+    // ------------------------------------------------------------------ 22. Audience payloads (T-17 V2.10)
+
+    @Test
+    @DisplayName("Broadcast payload includes audience {'kind':'room'} in Pair mode")
+    void broadcast_pairMode_payloadCarriesRoomAudience() {
+        RoomBroadcastService service = new RoomBroadcastService(objectMapper);
+        RunResponse resp = new RunResponse();
+        resp.setVisibility("room");
+        resp.setRequest_id(REQUEST_ID);
+
+        Map<String, Object> payload = service.buildPayload(resp, SESSION_ID);
+        assertThat(payload).containsKey("audience");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> aud = (Map<String, Object>) payload.get("audience");
+        assertThat(aud.get("kind")).isEqualTo("room");
+    }
+
+    @Test
+    @DisplayName("Broadcast payload includes audience {'kind':'sessions','session_ids':[...]} in Open mode")
+    void broadcast_openMode_payloadCarriesSessionAudience() {
+        RoomBroadcastService service = new RoomBroadcastService(objectMapper);
+        RunResponse resp = new RunResponse();
+        resp.setVisibility("private");
+        resp.setRequest_id(REQUEST_ID);
+
+        Map<String, Object> payload = service.buildPayload(resp, SESSION_ID);
+        assertThat(payload).containsKey("audience");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> aud = (Map<String, Object>) payload.get("audience");
+        assertThat(aud.get("kind")).isEqualTo("sessions");
+        assertThat(aud.get("session_ids")).isEqualTo(List.of(SESSION_ID));
+    }
+
+    // ------------------------------------------------------------------ 23. Output cap enforcement
+
+    @Test
+    @DisplayName("Output exceeding configured cap is truncated with output_truncated: true")
+    void run_outputCap_truncatesOutput() throws Exception {
+        String longStdout = "A".repeat(2_000_000); // 2 MB > 1 MB cap
+        when(codeRunner.execute(any(RunSpec.class))).thenReturn(new ExecutionResult(
+                longStdout, "", 0, 15.0, 4.2,
+                false, false, null, false, null
+        ));
+
+        String body = """
+                {
+                  "request_id": "%s",
+                  "room_id":    "%s",
+                  "session_id": "%s",
+                  "language":   "python",
+                  "source": {
+                    "kind": "inline",
+                    "files": [{ "name": "main.py", "content": "print('long')" }],
+                    "entry": "main.py"
+                  }
+                }
+                """.formatted(REQUEST_ID, ROOM_ID, SESSION_ID);
+
+        mockMvc.perform(post("/v1/runs")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.output_truncated").value(true));
+    }
+}

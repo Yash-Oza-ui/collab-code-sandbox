@@ -110,24 +110,33 @@ class RunControllerTest {
                 .thenReturn(okResult());
 
         for (String lang : new String[]{"cpp", "python", "c", "java", "javascript"}) {
+            String ext = switch (lang) {
+                case "python" -> "py";
+                case "javascript" -> "js";
+                case "java" -> "java";
+                case "cpp" -> "cpp";
+                case "c" -> "c";
+                default -> "txt";
+            };
+            String fileName = "main." + ext;
             String body = String.format("""
                     {
-                      "request_id": "aaaaaaaa-bbbb-4ccc-dddd-eeeeeeeeeeee",
+                      "request_id": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
                       "room_id":    "room-test",
-                      "session_id": "ffffffff-0000-4111-aaaa-bbbbbbbbbbbb",
+                      "session_id": "ffffffff-0000-4111-8aaa-bbbbbbbbbbbb",
                       "language":   "%s",
                       "source": {
                         "kind": "inline",
                         "files": [
                           {
-                            "name": "main.txt",
+                            "name": "%s",
                             "content": "// test"
                           }
                         ],
-                        "entry": "main.txt"
+                        "entry": "%s"
                       }
                     }
-                    """, lang);
+                    """, lang, fileName, fileName);
 
             mockMvc.perform(post("/v1/runs")
                             .contentType(MediaType.APPLICATION_JSON)

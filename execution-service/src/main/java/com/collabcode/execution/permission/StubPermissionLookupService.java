@@ -13,6 +13,11 @@ import org.springframework.stereotype.Component;
 @Component
 public class StubPermissionLookupService implements PermissionLookupService {
 
+    public static final String OBSERVER_SESSION_ID    = "00000000-0000-4000-8000-000000000001";
+    public static final String REVOKED_SESSION_ID     = "00000000-0000-4000-8000-000000000002";
+    public static final String HOST_ONLY_SESSION_ID   = "00000000-0000-4000-8000-000000000003";
+    public static final String NOT_IN_ROOM_SESSION_ID = "00000000-0000-4000-8000-000000000004";
+
     private volatile boolean available = true;
     private volatile PermissionLookupResult customLookup = null;
 
@@ -39,7 +44,8 @@ public class StubPermissionLookupService implements PermissionLookupService {
             return customLookup;
         }
 
-        if (sessionId != null && sessionId.toLowerCase().contains("not_in_room")) {
+        if (NOT_IN_ROOM_SESSION_ID.equalsIgnoreCase(sessionId)
+                || (sessionId != null && sessionId.toLowerCase().contains("not_in_room"))) {
             throw new RunNotAllowedException(null, "not_in_room");
         }
 
@@ -47,19 +53,22 @@ public class StubPermissionLookupService implements PermissionLookupService {
                 ? "open" : "pair";
         String language = "open".equals(mode) ? "python" : null;
 
-        if (sessionId != null && sessionId.toLowerCase().contains("observer")) {
+        if (OBSERVER_SESSION_ID.equalsIgnoreCase(sessionId)
+                || (sessionId != null && sessionId.toLowerCase().contains("observer"))) {
             return new PermissionLookupResult(
                     "m_4b19d2", "Lin", "observer", mode, language, false, "observer", false
             );
         }
 
-        if (sessionId != null && sessionId.toLowerCase().contains("revoked")) {
+        if (REVOKED_SESSION_ID.equalsIgnoreCase(sessionId)
+                || (sessionId != null && sessionId.toLowerCase().contains("revoked"))) {
             return new PermissionLookupResult(
                     "m_4b19d2", "Lin", "participant", mode, language, false, "run_revoked", false
             );
         }
 
-        if (sessionId != null && sessionId.toLowerCase().contains("host_only")) {
+        if (HOST_ONLY_SESSION_ID.equalsIgnoreCase(sessionId)
+                || (sessionId != null && sessionId.toLowerCase().contains("host_only"))) {
             return new PermissionLookupResult(
                     "m_4b19d2", "Lin", "participant", mode, language, false, "host_only", false
             );

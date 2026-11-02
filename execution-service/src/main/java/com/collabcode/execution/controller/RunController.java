@@ -1,10 +1,12 @@
 package com.collabcode.execution.controller;
 
 import com.collabcode.execution.broadcast.RoomBroadcastService;
+import com.collabcode.execution.config.ExecutionLimitsProperties;
 import com.collabcode.execution.exception.*;
 import com.collabcode.execution.model.*;
 import com.collabcode.execution.permission.PermissionLookupResult;
 import com.collabcode.execution.permission.PermissionLookupService;
+import com.collabcode.execution.queue.RunQueueGate;
 import com.collabcode.execution.runner.CodeRunner;
 import com.collabcode.execution.runner.ExecutionResult;
 import com.collabcode.execution.snapshot.MemberInfo;
@@ -15,7 +17,9 @@ import jakarta.validation.Valid;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.Collections;
 import java.util.HashSet;
@@ -23,15 +27,15 @@ import java.util.List;
 import java.util.Set;
 
 /**
- * Run endpoint – T-17 V2.8 to V2.12 (Decisions 8 and 9, T-19).
+ * Run endpoint – T-17 V2.8 to V2.12 (Decisions 8 and 9, T-19) & US-11 (FR16).
  *
  * POST /v1/runs
- *   1. Validates request body, rejects legacy 'code' field, and checks language.
+ *   1. Validates request body, rejects legacy 'code' field, and checks language and file extensions.
  *   2. Checks caller permissions with sync-service via PermissionLookupService (V2.11).
  *   3. Validates source kind against room mode, language, and reads saved module snapshot (V2.8).
- *   4. Runs user code via CodeRunner with the run spec object (RunSpec).
+ *   4. Runs user code via CodeRunner with the run spec object (RunSpec) through the queue gate (RunQueueGate, FR16).
  *   5. Populates Decision 9 result fields (runner, ran_at, visibility, saved_versions, failure, compile_time_ms).
- *   6. Broadcasts the result to the room / audience through sync-service (FR4.5, V2.10).
+ *   6. Broadcasts the result to the room / targeted session through sync-service (FR4.5, V2.10).
  *   7. Returns HTTP 200 with the full run-result body.
  */
 @RestController
@@ -41,20 +45,30 @@ public class RunController {
     private static final Set<String> SUPPORTED_LANGUAGES =
             Set.of("cpp", "python", "c", "java", "javascript");
 
+    private static final DateTimeFormatter RAN_AT_FORMATTER =
+            DateTimeFormatter.ofPattern("uuuu-MM-dd'T'HH:mm:ss.SSS'Z'").withZone(ZoneOffset.UTC);
+
     private final CodeRunner codeRunner;
     private final RoomBroadcastService broadcastService;
+    private final RunQueueGate runQueueGate;
     private final PermissionLookupService permissionLookupService;
     private final SavedVersionReader savedVersionReader;
+    private final ExecutionLimitsProperties limitsProperties;
 
+    @org.springframework.beans.factory.annotation.Autowired
     public RunController(
             CodeRunner codeRunner,
             RoomBroadcastService broadcastService,
+            RunQueueGate runQueueGate,
             PermissionLookupService permissionLookupService,
-            SavedVersionReader savedVersionReader) {
+            SavedVersionReader savedVersionReader,
+            ExecutionLimitsProperties limitsProperties) {
         this.codeRunner = codeRunner;
         this.broadcastService = broadcastService;
+        this.runQueueGate = runQueueGate;
         this.permissionLookupService = permissionLookupService;
         this.savedVersionReader = savedVersionReader;
+        this.limitsProperties = limitsProperties;
     }
 
     @PostMapping("/runs")
@@ -79,17 +93,38 @@ public class RunController {
             throw new InvalidRequestException(req.getRequest_id(), "Field 'source' is missing or invalid.");
         }
 
-        // Validate source structure
-        validateSourceStructure(req.getRequest_id(), source);
+        // Validate source structure and file extensions (DR4)
+        validateSourceStructure(req.getRequest_id(), req.getLanguage(), source);
 
         // Check 4: Permission lookup (T-17 V2.11, V2.12)
-        PermissionLookupResult lookup = permissionLookupService.lookup(req.getRoom_id(), req.getSession_id());
+        PermissionLookupResult lookup;
+        try {
+            lookup = permissionLookupService.lookup(req.getRoom_id(), req.getSession_id());
+        } catch (RoomServiceUnavailableException e) {
+            throw new RoomServiceUnavailableException(req.getRequest_id(), e.getMessage());
+        } catch (RoomNotFoundException e) {
+            throw new RoomNotFoundException(req.getRequest_id(), e.getMessage());
+        } catch (RunNotAllowedException e) {
+            throw new RunNotAllowedException(req.getRequest_id(), e.getReason(), e.getMessage());
+        }
+
+        // Validate lookup completeness (no invented fallback defaults)
+        if (lookup == null
+                || lookup.getMember_id() == null || lookup.getMember_id().isBlank()
+                || lookup.getDisplay_name() == null || lookup.getDisplay_name().isBlank()
+                || lookup.getMode() == null || lookup.getMode().isBlank()) {
+            throw new RoomServiceUnavailableException(
+                    req.getRequest_id(),
+                    "Room service is unavailable, so the run was not started. Try again."
+            );
+        }
+
         if (!lookup.isCan_run()) {
             throw new RunNotAllowedException(req.getRequest_id(), lookup.getRun_denied_reason());
         }
 
         // Check 5: Source kind against room mode (T-17 V2.8 Rule 1)
-        String roomMode = lookup.getMode() != null ? lookup.getMode().toLowerCase() : "pair";
+        String roomMode = lookup.getMode().toLowerCase();
         if (source instanceof InlineSource && !"pair".equals(roomMode)) {
             throw new InvalidRequestException(
                     req.getRequest_id(),
@@ -112,9 +147,6 @@ public class RunController {
             );
         }
 
-        // Capture start timestamp (Decision 9, FR26)
-        String ranAt = DateTimeFormatter.ISO_INSTANT.format(Instant.now());
-
         // Check 6: Build the RunSpec object (inline or one-call snapshot read)
         RunSpec runSpec;
         SnapshotResult snapshot = null;
@@ -123,7 +155,18 @@ public class RunController {
         } else {
             SavedSource saved = (SavedSource) source;
             // One-call snapshot rule (T-17 V2.8)
-            snapshot = savedVersionReader.readSnapshot(req.getRoom_id(), saved);
+            try {
+                snapshot = savedVersionReader.readSnapshot(req.getRoom_id(), saved);
+            } catch (RoomServiceUnavailableException e) {
+                throw new RoomServiceUnavailableException(req.getRequest_id(), e.getMessage());
+            } catch (ModuleNotFoundException e) {
+                throw new ModuleNotFoundException(req.getRequest_id(), e.getMessage());
+            } catch (ModuleNotRunnableException e) {
+                throw new ModuleNotRunnableException(req.getRequest_id(), e.getMessage());
+            } catch (NoEntryFileException e) {
+                throw new NoEntryFileException(req.getRequest_id(), e.getMessage());
+            }
+
             if (snapshot == null || snapshot.getModules() == null || snapshot.getModules().isEmpty()) {
                 throw new ModuleNotFoundException(req.getRequest_id(), "No modules returned in snapshot.");
             }
@@ -133,22 +176,30 @@ public class RunController {
             runSpec = new RunSpec(req.getLanguage(), files, snapshot.getEntry(), req.getStdin());
         }
 
-        // --- Execute code with spec object ---
-        ExecutionResult result = codeRunner.execute(runSpec);
+        // Capture start timestamp immediately before code execution (exact millisecond precision, FR26)
+        String ranAt = RAN_AT_FORMATTER.format(Instant.now());
 
-        // --- Build response with Decision 9 fields ---
+        // --- Execute code through queue gate (FR16 / US-11) ---
+        ExecutionResult result = runQueueGate.run(req.getRequest_id(), () ->
+                codeRunner.execute(runSpec)
+        );
+
+        // --- Build response with Decision 9 fields & output cap enforcement ---
         RunResponse response = buildResponse(req, result, lookup, snapshot, ranAt);
 
-        // --- Broadcast to room / audience (FR4.5, V2.10) ---
-        broadcastService.broadcast(req.getRoom_id(), response);
+        // --- Broadcast to room or targeted session through sync-service (FR4.5, V2.10) ---
+        broadcastService.broadcast(req.getRoom_id(), req.getSession_id(), response);
 
         return ResponseEntity.ok(response);
     }
 
-    private void validateSourceStructure(String requestId, RunSource source) {
+    private void validateSourceStructure(String requestId, String language, RunSource source) {
         if (source instanceof UnknownSource || source.getKind() == null
                 || (!"inline".equals(source.getKind()) && !"saved".equals(source.getKind()))) {
-            throw new InvalidRequestException(requestId, "Source kind '" + source.getKind() + "' is invalid.");
+            throw new InvalidRequestException(
+                    requestId,
+                    "Source kind '" + (source != null ? source.getKind() : "null") + "' is invalid."
+            );
         }
 
         if (source instanceof InlineSource inline) {
@@ -165,6 +216,12 @@ public class RunController {
                     throw new InvalidRequestException(
                             requestId,
                             "File name '" + name + "' is invalid. Plain file name with language extension required."
+                    );
+                }
+                if (!hasValidExtension(name, language)) {
+                    throw new InvalidRequestException(
+                            requestId,
+                            "File name '" + name + "' does not match language '" + language + "'."
                     );
                 }
                 if (file.getContent() == null) {
@@ -218,6 +275,19 @@ public class RunController {
         }
     }
 
+    private static boolean hasValidExtension(String fileName, String language) {
+        if (fileName == null || language == null) return false;
+        String lower = fileName.toLowerCase();
+        return switch (language.toLowerCase()) {
+            case "python" -> lower.endsWith(".py");
+            case "javascript" -> lower.endsWith(".js");
+            case "java" -> lower.endsWith(".java");
+            case "cpp" -> lower.endsWith(".cpp") || lower.endsWith(".cc") || lower.endsWith(".cxx");
+            case "c" -> lower.endsWith(".c");
+            default -> false;
+        };
+    }
+
     private RunResponse buildResponse(
             RunRequest req,
             ExecutionResult result,
@@ -230,9 +300,33 @@ public class RunController {
         r.setRoom_id(req.getRoom_id());
         r.setLanguage(req.getLanguage());
 
-        // Process outputs
-        r.setStdout(result.getStdout());
-        r.setStderr(result.getStderr());
+        // Output limits (NFR4.4, Decision 9, T-17 V2.9)
+        long configuredCap = (limitsProperties != null && limitsProperties.getMaxOutputBytes() > 0)
+                ? limitsProperties.getMaxOutputBytes()
+                : 1_048_576L; // 1 MiB default
+        long outputCap = Math.min(configuredCap, 4 * 1024 * 1024L - 65536L);
+
+        String stdout = result.getStdout() != null ? result.getStdout() : "";
+        String stderr = result.getStderr() != null ? result.getStderr() : "";
+        boolean truncated = result.isOutputTruncated();
+
+        byte[] stdoutBytes = stdout.getBytes(StandardCharsets.UTF_8);
+        byte[] stderrBytes = stderr.getBytes(StandardCharsets.UTF_8);
+        long combined = (long) stdoutBytes.length + stderrBytes.length;
+
+        if (combined > outputCap) {
+            truncated = true;
+            if (stdoutBytes.length >= outputCap) {
+                stdout = new String(stdoutBytes, 0, (int) outputCap, StandardCharsets.UTF_8);
+                stderr = "";
+            } else {
+                int allowedStderr = (int) (outputCap - stdoutBytes.length);
+                stderr = new String(stderrBytes, 0, allowedStderr, StandardCharsets.UTF_8);
+            }
+        }
+
+        r.setStdout(stdout);
+        r.setStderr(stderr);
         r.setExit_code(result.getExitCode());
         r.setExecution_time_ms(result.getExecutionTimeMs());
         r.setPeak_memory_mb(result.getPeakMemoryMb());
@@ -247,22 +341,20 @@ public class RunController {
             r.setFailure_kind(result.getFailureKind());
         }
 
-        r.setOutput_truncated(result.isOutputTruncated());
+        r.setOutput_truncated(truncated);
         r.setMessage(result.getMessage());
 
         // Decision 9: compile_time_ms (null for languages with no compile stage)
         r.setCompile_time_ms(result.getCompileTimeMs());
 
-        // Decision 9: runner (from permission lookup: member_id, display_name)
-        String memberId = lookup.getMember_id() != null ? lookup.getMember_id() : "m_unknown";
-        String displayName = lookup.getDisplay_name() != null ? lookup.getDisplay_name() : "Anonymous";
-        r.setRunner(new MemberInfo(memberId, displayName));
+        // Decision 9: runner (from validated permission lookup)
+        r.setRunner(new MemberInfo(lookup.getMember_id(), lookup.getDisplay_name()));
 
-        // Decision 9: ran_at (ISO 8601 UTC with milliseconds and Z)
+        // Decision 9: ran_at (ISO 8601 UTC with exact millisecond precision and Z)
         r.setRan_at(ranAt);
 
         // Decision 10: visibility ("room" for Pair, "private" for Open)
-        String mode = lookup.getMode() != null ? lookup.getMode().toLowerCase() : "pair";
+        String mode = lookup.getMode().toLowerCase();
         String visibility = "open".equals(mode) ? "private" : "room";
         r.setVisibility(visibility);
 
