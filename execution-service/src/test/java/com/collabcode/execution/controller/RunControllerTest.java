@@ -1,6 +1,7 @@
 package com.collabcode.execution.controller;
 
 import com.collabcode.execution.broadcast.RoomBroadcastService;
+import com.collabcode.execution.model.RunSpec;
 import com.collabcode.execution.runner.CodeRunner;
 import com.collabcode.execution.runner.ExecutionResult;
 import org.junit.jupiter.api.DisplayName;
@@ -12,28 +13,23 @@ import org.springframework.boot.test.mock.mockito.MockBean;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 
-import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
 /**
- * T-03 acceptance tests – Bhavya Vekariya (feature/T-03-execution-scaffold-limits-health).
- *
- * These were the original scaffold tests. They are preserved unchanged in
- * purpose but updated in US-08 (Jay) to mock CodeRunner and RoomBroadcastService
- * so they still pass after the stub factory was replaced with real execution.
+ * RunController tests updated for T-19 spec object (Jay Limbasiya).
  *
  * Covers:
- *   1. Health endpoint returns 200               (T-03 AC5, T-06 section 1)
- *   2. Valid request returns 200 with            (T-03 AC3)
- *      stdout, stderr and all result fields
- *   3. Missing 'code' field returns 422          (T-03 AC4, T-06 section 7.1)
- *   4. Missing 'language' returns 422            (T-03 AC4, T-06 section 7.1)
- *   5. Unsupported language returns 422          (T-03 AC4, DR1, T-06 section 7.1)
- *
- * No Docker calls are made. All tests run offline.
+ *   1. Health endpoint returns 200
+ *   2. Valid inline request returns 200 with stdout, stderr and all result fields
+ *   3. Legacy 'code' field is rejected with 422 INVALID_REQUEST
+ *   4. Missing 'source' returns 422 INVALID_REQUEST
+ *   5. Missing 'language' returns 422 INVALID_REQUEST
+ *   6. Unsupported language returns 422 UNSUPPORTED_LANGUAGE
+ *   7. All five DR1 languages are accepted
  */
 @SpringBootTest
 @AutoConfigureMockMvc
@@ -65,9 +61,9 @@ class RunControllerTest {
     // ------------------------------------------------------------------ valid request
 
     @Test
-    @DisplayName("Valid request returns 200 with stdout and stderr present (T-03 AC3, FR4.2)")
+    @DisplayName("Valid inline request returns 200 with stdout and stderr present (T-19, FR4.2)")
     void run_validRequest_returns200WithStdoutAndStderr() throws Exception {
-        when(codeRunner.execute(anyString(), anyString(), anyString()))
+        when(codeRunner.execute(any(RunSpec.class)))
                 .thenReturn(okResult());
 
         String body = """
@@ -76,8 +72,17 @@ class RunControllerTest {
                   "room_id":    "room-demo-01",
                   "session_id": "7c1e4a52-3b0d-4f6a-9a2e-8d5f1b6c3e90",
                   "language":   "python",
-                  "code":       "print('hello')",
-                  "stdin":      ""
+                  "stdin":      "",
+                  "source": {
+                    "kind": "inline",
+                    "files": [
+                      {
+                        "name": "main.py",
+                        "content": "print('hello')"
+                      }
+                    ],
+                    "entry": "main.py"
+                  }
                 }
                 """;
 
@@ -88,10 +93,8 @@ class RunControllerTest {
                 .andExpect(jsonPath("$.request_id").value("0b9d2f3e-7a41-4c58-9e1b-5d3c8a6f2e10"))
                 .andExpect(jsonPath("$.room_id").value("room-demo-01"))
                 .andExpect(jsonPath("$.language").value("python"))
-                // FR4.2: stdout and stderr must always be present
                 .andExpect(jsonPath("$.stdout").exists())
                 .andExpect(jsonPath("$.stderr").exists())
-                // Other required result fields (T-06 section 4.2)
                 .andExpect(jsonPath("$.exit_code").exists())
                 .andExpect(jsonPath("$.execution_time_ms").exists())
                 .andExpect(jsonPath("$.peak_memory_mb").exists())
@@ -101,9 +104,9 @@ class RunControllerTest {
     }
 
     @Test
-    @DisplayName("All five DR1 languages are accepted")
+    @DisplayName("All five DR1 languages are accepted with inline source")
     void run_allSupportedLanguages_return200() throws Exception {
-        when(codeRunner.execute(anyString(), anyString(), anyString()))
+        when(codeRunner.execute(any(RunSpec.class)))
                 .thenReturn(okResult());
 
         for (String lang : new String[]{"cpp", "python", "c", "java", "javascript"}) {
@@ -113,7 +116,16 @@ class RunControllerTest {
                       "room_id":    "room-test",
                       "session_id": "ffffffff-0000-4111-aaaa-bbbbbbbbbbbb",
                       "language":   "%s",
-                      "code":       "// test"
+                      "source": {
+                        "kind": "inline",
+                        "files": [
+                          {
+                            "name": "main.txt",
+                            "content": "// test"
+                          }
+                        ],
+                        "entry": "main.txt"
+                      }
                     }
                     """, lang);
 
@@ -124,11 +136,35 @@ class RunControllerTest {
         }
     }
 
+    // ------------------------------------------------------------------ legacy code rejected
+
+    @Test
+    @DisplayName("Legacy 'code' field returns 422 INVALID_REQUEST (T-19 AC4)")
+    void run_bodyWithLegacyCode_returns422() throws Exception {
+        String body = """
+                {
+                  "request_id": "0b9d2f3e-7a41-4c58-9e1b-5d3c8a6f2e10",
+                  "room_id":    "room-demo-01",
+                  "session_id": "7c1e4a52-3b0d-4f6a-9a2e-8d5f1b6c3e90",
+                  "language":   "python",
+                  "code":       "print('hello')"
+                }
+                """;
+
+        mockMvc.perform(post("/v1/runs")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.request_id").value("0b9d2f3e-7a41-4c58-9e1b-5d3c8a6f2e10"))
+                .andExpect(jsonPath("$.error.code").value("INVALID_REQUEST"))
+                .andExpect(jsonPath("$.error.message").value("Field 'code' is no longer accepted. Use 'source'."));
+    }
+
     // ------------------------------------------------------------------ missing fields → 422 INVALID_REQUEST
 
     @Test
-    @DisplayName("Missing 'code' returns 422 with clear message (T-03 AC4, T-06 section 7.1)")
-    void run_missingCode_returns422() throws Exception {
+    @DisplayName("Missing 'source' returns 422 with clear message (T-19, T-06 section 7.1)")
+    void run_missingSource_returns422() throws Exception {
         String body = """
                 {
                   "request_id": "0b9d2f3e-7a41-4c58-9e1b-5d3c8a6f2e10",
@@ -144,7 +180,7 @@ class RunControllerTest {
                 .andExpect(status().isUnprocessableEntity())
                 .andExpect(jsonPath("$.request_id").value("0b9d2f3e-7a41-4c58-9e1b-5d3c8a6f2e10"))
                 .andExpect(jsonPath("$.error.code").value("INVALID_REQUEST"))
-                .andExpect(jsonPath("$.error.message").value("Field 'code' is missing or invalid."));
+                .andExpect(jsonPath("$.error.message").value("Field 'source' is missing or invalid."));
     }
 
     @Test
@@ -155,7 +191,16 @@ class RunControllerTest {
                   "request_id": "0b9d2f3e-7a41-4c58-9e1b-5d3c8a6f2e10",
                   "room_id":    "room-demo-01",
                   "session_id": "7c1e4a52-3b0d-4f6a-9a2e-8d5f1b6c3e90",
-                  "code":       "print('hi')"
+                  "source": {
+                    "kind": "inline",
+                    "files": [
+                      {
+                        "name": "main.py",
+                        "content": "print('hi')"
+                      }
+                    ],
+                    "entry": "main.py"
+                  }
                 }
                 """;
 
@@ -179,7 +224,16 @@ class RunControllerTest {
                   "room_id":    "room-demo-01",
                   "session_id": "7c1e4a52-3b0d-4f6a-9a2e-8d5f1b6c3e90",
                   "language":   "ruby",
-                  "code":       "puts 'hi'"
+                  "source": {
+                    "kind": "inline",
+                    "files": [
+                      {
+                        "name": "main.rb",
+                        "content": "puts 'hi'"
+                      }
+                    ],
+                    "entry": "main.rb"
+                  }
                 }
                 """;
 

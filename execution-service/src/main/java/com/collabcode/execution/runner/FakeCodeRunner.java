@@ -1,37 +1,42 @@
 package com.collabcode.execution.runner;
 
+import com.collabcode.execution.model.RunFile;
+import com.collabcode.execution.model.RunSpec;
 import org.springframework.context.annotation.Primary;
 import org.springframework.stereotype.Component;
 
 /**
  * Deterministic in-memory stub for CodeRunner.
  *
- * Used in Sprint 1 while US-09 (DockerCodeRunner) is not yet merged.
+ * Updated in T-19 (Jay) to execute the run spec object (RunSpec).
  * It never starts a process or touches Docker (FR5.1, NFR3).
  *
  * Behaviour (agreed with Quincy so the interface is stable):
- *  1. If stdin is non-empty, echoes its UPPER-CASE version to stdout.
- *  2. If code contains "stderr" (case-insensitive), writes "boom" to stderr
- *     and exits 2 — simulating a runtime failure.
- *  3. If code contains "syntax_error" (case-insensitive), writes a compiler
+ *  1. If any file contains "syntax_error" (case-insensitive), writes a compiler
  *     error to stderr, exit 1, failure_kind "compile_error".
+ *  2. If any file contains "stderr" (case-insensitive), writes "boom\n" to stderr
+ *     and exits 2 — simulating a runtime failure ("non_zero_exit").
+ *  3. If stdin is non-empty, echoes its UPPER-CASE version to stdout.
  *  4. Otherwise, returns "Hello from <language>!\n" in stdout, exit 0.
  *
- * Quincy's PR (feature/US-08-run-code-runner-hookup) replaces this bean
- * with DockerCodeRunner. Spring will use DockerCodeRunner when it is on the
- * classpath; the @Primary annotation here is removed in that PR.
- *
- * PLACEHOLDER – replaced by US-09 (DockerCodeRunner).
+ * Quincy's PR replaces this bean with DockerCodeRunner once merged.
  */
 @Primary
 @Component
 public class FakeCodeRunner implements CodeRunner {
 
     @Override
-    public ExecutionResult execute(String language, String code, String stdin) {
+    public ExecutionResult execute(RunSpec spec) {
+        String language = spec.getLanguage();
+        String stdin = spec.getStdin();
 
-        // Case 3: simulate a compile error
-        if (code != null && code.toLowerCase().contains("syntax_error")) {
+        // Case 1: simulate a compile error
+        boolean hasSyntaxError = spec.getFiles() != null && spec.getFiles().stream()
+                .map(RunFile::getContent)
+                .filter(c -> c != null)
+                .anyMatch(c -> c.toLowerCase().contains("syntax_error"));
+
+        if (hasSyntaxError) {
             return new ExecutionResult(
                     /* stdout          */ "",
                     /* stderr          */ language + ": SyntaxError: unexpected token near line 1\n",
@@ -47,7 +52,12 @@ public class FakeCodeRunner implements CodeRunner {
         }
 
         // Case 2: simulate a stderr / runtime failure
-        if (code != null && code.toLowerCase().contains("stderr")) {
+        boolean hasStderr = spec.getFiles() != null && spec.getFiles().stream()
+                .map(RunFile::getContent)
+                .filter(c -> c != null)
+                .anyMatch(c -> c.toLowerCase().contains("stderr"));
+
+        if (hasStderr) {
             return new ExecutionResult(
                     /* stdout          */ "",
                     /* stderr          */ "boom\n",
@@ -62,7 +72,7 @@ public class FakeCodeRunner implements CodeRunner {
             );
         }
 
-        // Case 1: stdin echoing
+        // Case 3: stdin echoing
         if (stdin != null && !stdin.isEmpty()) {
             return new ExecutionResult(
                     /* stdout          */ stdin.toUpperCase() + "\n",

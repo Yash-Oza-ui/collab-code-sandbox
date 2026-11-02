@@ -3,12 +3,13 @@ package com.collabcode.execution.model;
 import jakarta.validation.constraints.NotBlank;
 
 /**
- * Run request body – T-06 section 4.1.
+ * Run request body – T-17 V2.8 (Decision 8).
  *
- * Required fields: request_id, room_id, session_id, language, code.
+ * Required fields: request_id, room_id, session_id, language, source.
  * Optional field:  stdin (defaults to "" when absent).
  *
- * Supported language values (DR1): cpp, python, c, java, javascript.
+ * The legacy 'code' field is no longer accepted: any request body with 'code'
+ * is rejected as INVALID_REQUEST (HTTP 422).
  */
 public class RunRequest {
 
@@ -16,11 +17,11 @@ public class RunRequest {
     @NotBlank(message = "request_id is required")
     private String request_id;
 
-    /** The room the result is delivered to (T-06 section 3.2). */
+    /** The room the result is delivered to. */
     @NotBlank(message = "room_id is required")
     private String room_id;
 
-    /** Stable per-browser session id (T-06 section 3.3). */
+    /** Stable per-browser session id. Caller's private credential. */
     @NotBlank(message = "session_id is required")
     private String session_id;
 
@@ -31,14 +32,20 @@ public class RunRequest {
     @NotBlank(message = "language is required")
     private String language;
 
-    /** Source code to run (FR4.1). */
-    @NotBlank(message = "code is required")
-    private String code;
-
-    /** Standard input; defaults to "" (FR4.1). */
+    /** Standard input; defaults to "". */
     private String stdin = "";
 
-    // ----- getters and setters (plain JavaBean style) -----
+    /**
+     * Exactly one source object: inline or saved (T-17 V2.8).
+     */
+    private RunSource source;
+
+    /**
+     * Legacy v0 field. If present in request body, rejected with 422 INVALID_REQUEST.
+     */
+    private String code;
+
+    // ----- getters and setters -----
 
     public String getRequest_id() { return request_id; }
     public void setRequest_id(String request_id) { this.request_id = request_id; }
@@ -52,9 +59,12 @@ public class RunRequest {
     public String getLanguage() { return language; }
     public void setLanguage(String language) { this.language = language; }
 
-    public String getCode() { return code; }
-    public void setCode(String code) { this.code = code; }
-
     public String getStdin() { return stdin; }
     public void setStdin(String stdin) { this.stdin = (stdin != null) ? stdin : ""; }
+
+    public RunSource getSource() { return source; }
+    public void setSource(RunSource source) { this.source = source; }
+
+    public String getCode() { return code; }
+    public void setCode(String code) { this.code = code; }
 }

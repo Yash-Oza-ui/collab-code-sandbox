@@ -1,99 +1,218 @@
 package com.collabcode.execution.controller;
 
 import com.collabcode.execution.broadcast.RoomBroadcastService;
-import com.collabcode.execution.model.RunRequest;
-import com.collabcode.execution.model.RunResponse;
+import com.collabcode.execution.exception.*;
+import com.collabcode.execution.model.*;
+import com.collabcode.execution.permission.PermissionLookupResult;
+import com.collabcode.execution.permission.PermissionLookupService;
 import com.collabcode.execution.runner.CodeRunner;
 import com.collabcode.execution.runner.ExecutionResult;
+import com.collabcode.execution.snapshot.SavedVersionReader;
+import com.collabcode.execution.snapshot.SnapshotResult;
 import jakarta.validation.Valid;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 
 /**
- * Run endpoint – T-06 section 4.
+ * Run endpoint – T-17 V2.8, V2.11, V2.12 (Decision 8 & Decision 11).
  *
  * POST /v1/runs
- *   1. Validates the request (Bean Validation + language check).
- *   2. Runs the code via CodeRunner (FakeCodeRunner in Sprint 1; swapped for
- *      DockerCodeRunner by Quincy in feature/US-08-run-code-runner-hookup).
- *   3. Broadcasts the result to the room through sync-service (T-06 §5, FR4.5).
- *   4. Returns HTTP 200 with the full run-result body (T-06 §4.2).
- *
- * Ordering (NFR9): broadcast happens before the HTTP return so that other
- * participants start seeing the result at the same moment the caller does.
- * The ai-ml-service call (Sprint 2) happens AFTER the HTTP response is sent
- * and must never be added here in a way that delays the response.
- *
- * FR5.1 / NFR3: code is never executed on the host. CodeRunner enforces this.
+ *   1. Validates request body, legacy code field rejection, and language.
+ *   2. Checks caller permissions with sync-service via PermissionLookupService (V2.11).
+ *   3. Validates source kind against room mode, language, and reads saved module snapshot (V2.8).
+ *   4. Runs user code via CodeRunner with the run spec object (RunSpec).
+ *   5. Broadcasts the result to the room through sync-service (FR4.5).
+ *   6. Returns HTTP 200 with the full run-result body.
  */
 @RestController
 @RequestMapping("/v1")
 public class RunController {
 
-    /**
-     * DR1: the five supported language identifiers (T-06 section 2).
-     * Values are the same as in docs/ai-ml-contract.md (T-07).
-     */
     private static final Set<String> SUPPORTED_LANGUAGES =
             Set.of("cpp", "python", "c", "java", "javascript");
 
-    private final CodeRunner            codeRunner;
-    private final RoomBroadcastService  broadcastService;
+    private final CodeRunner codeRunner;
+    private final RoomBroadcastService broadcastService;
+    private final PermissionLookupService permissionLookupService;
+    private final SavedVersionReader savedVersionReader;
 
-    public RunController(CodeRunner codeRunner, RoomBroadcastService broadcastService) {
-        this.codeRunner       = codeRunner;
+    public RunController(
+            CodeRunner codeRunner,
+            RoomBroadcastService broadcastService,
+            PermissionLookupService permissionLookupService,
+            SavedVersionReader savedVersionReader) {
+        this.codeRunner = codeRunner;
         this.broadcastService = broadcastService;
+        this.permissionLookupService = permissionLookupService;
+        this.savedVersionReader = savedVersionReader;
     }
 
-    /**
-     * POST /v1/runs
-     *
-     * Bean Validation (@Valid) rejects missing or blank required fields with
-     * 422 INVALID_REQUEST before this method is reached (see GlobalExceptionHandler).
-     *
-     * Language is checked here because it is a semantic rule ("must be one
-     * of five values"), not just a format constraint.
-     */
     @PostMapping("/runs")
     public ResponseEntity<RunResponse> run(@Valid @RequestBody RunRequest req) {
 
-        // Semantic language check (complement to @NotBlank from Bean Validation)
+        // Check 1: Reject legacy 'code' field (T-17 V2.8, T-19 AC4)
+        if (req.getCode() != null) {
+            throw new InvalidRequestException(
+                    req.getRequest_id(),
+                    "Field 'code' is no longer accepted. Use 'source'."
+            );
+        }
+
+        // Check 2: Semantic language check (DR1)
         if (!SUPPORTED_LANGUAGES.contains(req.getLanguage())) {
             throw new UnsupportedLanguageException(req.getLanguage(), req.getRequest_id());
         }
 
-        // --- Execute the code ---
-        // FakeCodeRunner is used until US-09 (DockerCodeRunner) merges.
-        ExecutionResult result = codeRunner.execute(
-                req.getLanguage(),
-                req.getCode(),
-                req.getStdin()
-        );
+        // Check 3: Exactly one source object is required
+        RunSource source = req.getSource();
+        if (source == null) {
+            throw new InvalidRequestException(req.getRequest_id(), "Field 'source' is missing or invalid.");
+        }
 
-        // --- Build the response (T-06 §4.2) ---
+        // Validate source structure
+        validateSourceStructure(req.getRequest_id(), source);
+
+        // Check 4: Permission lookup (T-17 V2.11, V2.12)
+        PermissionLookupResult lookup = permissionLookupService.lookup(req.getRoom_id(), req.getSession_id());
+        if (!lookup.isCan_run()) {
+            throw new RunNotAllowedException(req.getRequest_id(), lookup.getRun_denied_reason());
+        }
+
+        // Check 5: Source kind against room mode (T-17 V2.8 Rule 1)
+        String roomMode = lookup.getMode() != null ? lookup.getMode().toLowerCase() : "pair";
+        if (source instanceof InlineSource && !"pair".equals(roomMode)) {
+            throw new InvalidRequestException(
+                    req.getRequest_id(),
+                    "Source kind 'inline' is not allowed in an open room."
+            );
+        }
+        if (source instanceof SavedSource && !"open".equals(roomMode)) {
+            throw new InvalidRequestException(
+                    req.getRequest_id(),
+                    "Source kind 'saved' is not allowed in a pair room."
+            );
+        }
+
+        // Workspace language check in Open mode (FR20.1)
+        if ("open".equals(roomMode) && lookup.getLanguage() != null
+                && !lookup.getLanguage().equalsIgnoreCase(req.getLanguage())) {
+            throw new InvalidRequestException(
+                    req.getRequest_id(),
+                    "Language '" + req.getLanguage() + "' does not match workspace language '" + lookup.getLanguage() + "'."
+            );
+        }
+
+        // Check 6: Build the RunSpec object (inline or one-call snapshot read)
+        RunSpec runSpec;
+        if (source instanceof InlineSource inline) {
+            runSpec = new RunSpec(req.getLanguage(), inline.getFiles(), inline.getEntry(), req.getStdin());
+        } else {
+            SavedSource saved = (SavedSource) source;
+            // One-call snapshot rule (T-17 V2.8)
+            SnapshotResult snapshot = savedVersionReader.readSnapshot(req.getRoom_id(), saved);
+            if (snapshot == null || snapshot.getModules() == null || snapshot.getModules().isEmpty()) {
+                throw new ModuleNotFoundException(req.getRequest_id(), "No modules returned in snapshot.");
+            }
+            List<RunFile> files = snapshot.getModules().stream()
+                    .map(m -> new RunFile(m.getName(), m.getContent()))
+                    .toList();
+            runSpec = new RunSpec(req.getLanguage(), files, snapshot.getEntry(), req.getStdin());
+        }
+
+        // --- Execute code with spec object ---
+        ExecutionResult result = codeRunner.execute(runSpec);
+
+        // --- Build response ---
         RunResponse response = buildResponse(req, result);
 
-        // --- Broadcast to room (T-06 §5, FR4.5) ---
-        // Best-effort: RoomBroadcastService swallows its own errors (see its class).
-        // This happens before return so other participants see the result at the
-        // same moment the caller receives the HTTP response.
+        // --- Broadcast to room (FR4.5) ---
         broadcastService.broadcast(req.getRoom_id(), response);
 
         return ResponseEntity.ok(response);
     }
 
-    // ----- private helpers -----
+    private void validateSourceStructure(String requestId, RunSource source) {
+        if (source instanceof UnknownSource || source.getKind() == null
+                || (!"inline".equals(source.getKind()) && !"saved".equals(source.getKind()))) {
+            throw new InvalidRequestException(requestId, "Source kind '" + source.getKind() + "' is invalid.");
+        }
 
-    /** Maps RunRequest + ExecutionResult → RunResponse (T-06 §4.2). */
+        if (source instanceof InlineSource inline) {
+            List<RunFile> files = inline.getFiles();
+            if (files == null || files.isEmpty()) {
+                throw new InvalidRequestException(requestId, "Field 'files' must not be empty.");
+            }
+            if (files.size() != 1) {
+                throw new InvalidRequestException(requestId, "Pair mode requires exactly one file in 'files'.");
+            }
+            for (RunFile file : files) {
+                String name = file.getName();
+                if (name == null || name.isBlank() || name.contains("/") || name.contains("\\") || name.contains("..")) {
+                    throw new InvalidRequestException(
+                            requestId,
+                            "File name '" + name + "' is invalid. Plain file name with language extension required."
+                    );
+                }
+                if (file.getContent() == null) {
+                    throw new InvalidRequestException(requestId, "File content must not be null.");
+                }
+            }
+            String entry = inline.getEntry();
+            if (entry == null || entry.isBlank()) {
+                throw new InvalidRequestException(requestId, "Field 'entry' is required.");
+            }
+            boolean entryFound = files.stream().anyMatch(f -> entry.equals(f.getName()));
+            if (!entryFound) {
+                throw new InvalidRequestException(requestId, "Entry file '" + entry + "' must match one of the files.");
+            }
+        } else if (source instanceof SavedSource saved) {
+            String target = saved.getTarget();
+            if (target == null || (!"module".equals(target) && !"entry".equals(target))) {
+                throw new InvalidRequestException(requestId, "Target '" + target + "' is invalid. Must be 'module' or 'entry'.");
+            }
+            if ("module".equals(target)) {
+                if (saved.getModule_id() == null || saved.getModule_id().isBlank()) {
+                    throw new InvalidRequestException(requestId, "Field 'module_id' is required when target is 'module'.");
+                }
+            } else {
+                Object moduleIds = saved.getModule_ids();
+                if (moduleIds == null) {
+                    throw new InvalidRequestException(requestId, "Field 'module_ids' is required when target is 'entry'.");
+                }
+                if ("all".equals(moduleIds)) {
+                    // valid
+                } else if (moduleIds instanceof List<?> list) {
+                    if (list.isEmpty()) {
+                        throw new InvalidRequestException(requestId, "Field 'module_ids' array must not be empty.");
+                    }
+                    for (Object item : list) {
+                        if (!(item instanceof String s) || s.isBlank()) {
+                            throw new InvalidRequestException(requestId, "Field 'module_ids' must contain non-blank strings.");
+                        }
+                    }
+                    Set<Object> distinct = new HashSet<>(list);
+                    if (distinct.size() != list.size()) {
+                        throw new InvalidRequestException(requestId, "Field 'module_ids' must contain distinct module ids.");
+                    }
+                } else {
+                    throw new InvalidRequestException(
+                            requestId,
+                            "Field 'module_ids' must be 'all' or a non-empty array of distinct module IDs."
+                    );
+                }
+            }
+        }
+    }
+
     private RunResponse buildResponse(RunRequest req, ExecutionResult result) {
         RunResponse r = new RunResponse();
-        // Echo request identifiers
         r.setRequest_id(req.getRequest_id());
         r.setRoom_id(req.getRoom_id());
         r.setLanguage(req.getLanguage());
-        // Execution output
         r.setStdout(result.getStdout());
         r.setStderr(result.getStderr());
         r.setExit_code(result.getExitCode());
@@ -107,9 +226,6 @@ public class RunController {
         return r;
     }
 
-    // ----- inner exception class (keeps it co-located with the rule) -----
-
-    /** Thrown when the requested language is not in SUPPORTED_LANGUAGES (T-06 section 7.1). */
     public static class UnsupportedLanguageException extends RuntimeException {
         private final String language;
         private final String requestId;
