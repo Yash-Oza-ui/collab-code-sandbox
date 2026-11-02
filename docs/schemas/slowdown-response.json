@@ -1,0 +1,71 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SlowdownAnalysisResponse",
+  "type": "object",
+  "properties": {
+    "request_id": { "type": "string" },
+    "analysis_id": { "type": "string" },
+    "task": { "type": "string", "enum": ["slowdown"] },
+    "input_hash": { "type": "string" },
+    "is_slowdown": { "type": "boolean" },
+    "slowdown_factor": { "type": "number" },
+    "baseline": {
+      "type": "object",
+      "properties": {
+        "median_ms": { "type": "number" },
+        "mad_ms": { "type": "number" },
+        "sample_count": { "type": "integer" }
+      },
+      "required": ["median_ms", "mad_ms", "sample_count"],
+      "additionalProperties": false
+    },
+    "changed_lines": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "line": { "type": "integer" },
+          "content": { "type": "string" }
+        },
+        "required": ["line", "content"],
+        "additionalProperties": false
+      }
+    },
+    "message": { "type": "string" },
+    "ai_step": {
+      "type": "object",
+      "properties": {
+        "status": { "type": "string", "enum": ["ok", "skipped"] },
+        "error_code": {
+          "type": ["string", "null"],
+          "enum": [
+            "CONSENT_MISSING",
+            "AI_DISABLED",
+            "COST_CAP_REACHED",
+            "ROOM_RATE_LIMITED",
+            "RATE_LIMITED_PROVIDER",
+            "PROVIDER_ERROR",
+            "PROVIDER_TIMEOUT",
+            null
+          ]
+        },
+        "explanation": { "type": ["string", "null"] }
+      },
+      "required": ["status", "error_code", "explanation"],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "request_id",
+    "analysis_id",
+    "task",
+    "input_hash",
+    "is_slowdown",
+    "slowdown_factor",
+    "baseline",
+    "changed_lines",
+    "message",
+    "ai_step"
+  ],
+  "additionalProperties": false
+}

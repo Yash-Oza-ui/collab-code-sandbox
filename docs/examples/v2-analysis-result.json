@@ -1,5 +1,29 @@
 {
   "type": "analysis-result",
-  "request_id": "d7a2f5c8-1e39-4b60-a4c2-9f8e1d7b3a06",
-  "room_id": "k3Yc1t9Qx7mBvA2nR0sLpQ"
+  "request_id": "7a3e2b10-6c5d-4f8a-9e12-3456789abcde",
+  "analysis_id": "8b4f3c21-7d6e-4a9b-0f23-456789abcdef",
+  "room_id": "k3Yc1t9Qx7mBvA2nR0sLpQ",
+  "task": "complexity",
+  "status": "ok",
+  "ai_step": {
+    "status": "ok",
+    "error_code": null
+  },
+  "result": {
+    "growth_rate": 1.99,
+    "estimated_complexity": "O(n^2)",
+    "r2_score": 0.999,
+    "projected_timeout_input_size": 6700,
+    "slow_patterns": [
+      {
+        "pattern": "nested_loops",
+        "line": 4,
+        "message": "Nested loop detected at line 4: potential polynomial time complexity O(n^2)."
+      }
+    ],
+    "suggested_fix": "Use a hash set to track seen elements in a single pass O(n).",
+    "verified": true,
+    "verified_speedup_pct": 89.8
+  },
+  "message": "Time complexity estimated as O(n^2) with verified 89.8% optimization."
 }
