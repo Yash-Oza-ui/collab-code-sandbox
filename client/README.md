@@ -2,13 +2,13 @@
 
 **IT-314 Software Engineering | Group 32**  
 **Task:** T-01 · Frontend Client Scaffold  
-**Traceability:** FR1, FR2, FR3, FR14 · EPIC 1 · Sprint 1  
+**Traceability:** FR1, FR2, FR3, FR14 · EPIC 1 · Sprint 1 / Sprint 2  
 
 ---
 
 ## 1. Overview & Technology Choices
 
-The `client/` package is the web frontend for **Collab Code Sandbox**, providing the collaborative Monaco editor interface and room management. It serves as the baseline on which **US-01** (create room & share link), **US-02** (merge simultaneous edits), **US-05** (display name), and **T-11** (run panel) are built.
+The `client/` package is the web frontend for **Collab Code Sandbox**, providing the collaborative Monaco editor interface and room management. It serves as the baseline on which **US-01** (create room & share link), **US-02** (merge simultaneous edits), **US-05** (display name & colour presence), and **T-11** (run panel) are built.
 
 ### Stack Selection
 - **Framework & Bundler:** **Vite** + **React 19** + **TypeScript**
@@ -16,8 +16,8 @@ The `client/` package is the web frontend for **Collab Code Sandbox**, providing
 - **Code Editor:** **Monaco Editor** (`@monaco-editor/react` & `monaco-editor`)
   - *Rationale:* Industry-standard browser editor powering VS Code, supporting syntax highlighting, keybindings, multi-cursor, and high-performance editing for C++, Python, C, Java, and JavaScript.
   - *Note on CDN Dependency:* `@monaco-editor/react` currently fetches the Monaco Editor bundle from CDN (`cdn.jsdelivr.net`) at runtime in the browser. An active internet connection is required when loading the editor.
-- **Collaborative State (CRDT):** **Yjs** (`yjs`)
-  - *Rationale:* High-performance Conflict-free Replicated Data Type (CRDT) document model providing conflict-free simultaneous edit merging without central coordinator locking.
+- **Collaborative State (CRDT) & Awareness:** **Yjs** (`yjs`) & **y-protocols** (`y-protocols/awareness`)
+  - *Rationale:* High-performance Conflict-free Replicated Data Type (CRDT) document model providing conflict-free simultaneous edit merging and decentralised participant awareness presence without central coordinator locking.
 - **Testing & Tooling:** **Vitest** with `happy-dom` for DOM-aware tests, and **ESLint** for code quality.
 - **Intended Browser Compatibility Target (NFR12):** Current desktop versions of **Chrome**, **Edge**, and **Firefox**. Standard web APIs are used, avoiding browser-specific extensions. Formal multi-browser test verification is scheduled for **Sprint 2**.
 
@@ -119,6 +119,11 @@ npm test
 Test suites cover:
 - `src/roomId.test.ts`: URL room ID validation and parsing rules (T-06 §3.2).
 - `src/config.test.ts`: Environment configuration parsing and fallback to T-06 service contract defaults.
+- `src/displayName.test.ts`: Display name validation (whitespace trimming, non-empty, max 32 chars).
+- `src/userColor.test.ts`: User colour palette modulo indexing, non-colliding participant colour selection, and fallback logic (US-05).
+- `src/awareness.test.ts`: Yjs awareness presence initialization and peer colour aggregation (US-05).
+- `src/DisplayNamePrompt.test.tsx`: Display name input modal and error message handling.
+- `src/RoomPage.displayName.test.tsx`: Display name gating, room header colour badge rendering, and awareness state exposure.
 - `src/roomDoc.test.tsx`:
   - `createRoomDoc` unit tests (instantiation, shared text mutations, clean destruction).
   - `useRoomDoc` StrictMode regression test (verifies that during React StrictMode effect replay, each replaced document is destroyed, the document after effect replay is live, and the document is destroyed on final unmount).
@@ -144,7 +149,29 @@ In T-01:
 
 ---
 
-## 9. Fresh-Clone Verification Procedure (For Reviewers / Teammates)
+## 9. Display Name, Colour Assignment & Presence Awareness (US-05 / FR14)
+
+**US-05** allows guests joining a room without GitHub authentication to enter a display name and automatically receive a distinct presence colour:
+1. **Name Prompt & Validation (`src/displayName.ts`, `src/DisplayNamePrompt.tsx`):**
+   - Prompted before entering the room editor.
+   - Validated: trimmed, non-empty, and limited to 32 characters.
+2. **Colour Picker (`src/userColor.ts`):**
+   - High-contrast, accessible 10-colour palette sized for room capacity (NFR2).
+   - Pure function `pickUserColor(existingColors, fallbackIndex)` finds an unused colour among active participants in the room, falling back deterministically when all palette colours are taken.
+3. **Yjs Awareness Presence (`src/awareness.ts`):**
+   - Stores user presence in Yjs awareness state under `awareness.setLocalStateField('user', { name, color })`.
+   - Ready for live cursors (US-03) without rework.
+4. **Browser Console Inspection (DoD #5):**
+   - The active awareness instance is exposed at `window.awareness`.
+   - Reviewers and developers can inspect the active participants and local presence in DevTools console:
+     ```javascript
+     window.awareness.getStates()
+     // Map(1) { [clientID] => { user: { name: 'Alice', color: '#e11d48' } } }
+     ```
+
+---
+
+## 10. Fresh-Clone Verification Procedure (For Reviewers / Teammates)
 
 The following steps are provided for another team member or reviewer to verify the client scaffold on a fresh clone:
 
@@ -167,5 +194,8 @@ npm run lint
 # 6. Start the local dev server
 npm run dev
 # -> Open http://localhost:3000/room/test-room in a browser with internet access
-# -> Confirm the header displays "Room: test-room" and the Monaco editor renders
+# -> Confirm the display name prompt appears
+# -> Enter a name (e.g. "Alice") and click "Join room"
+# -> Confirm the header displays "Room: test-room · You: Alice" with a colour badge
+# -> In DevTools console, type `window.awareness.getStates()` to inspect presence
 ```
