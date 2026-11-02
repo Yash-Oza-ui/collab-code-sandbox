@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError, HTTPException
 
 from app.config import settings
+from app.llm.client import ConsentMissingError
 from app.routers import explain
 
 app = FastAPI(
@@ -32,6 +33,22 @@ async def log_requests(request: Request, call_next):
         f"| Room: {getattr(request.state, 'room_id', 'unknown')}"
     )
     return response
+
+
+@app.exception_handler(ConsentMissingError)
+async def consent_missing_exception_handler(request: Request, exc: ConsentMissingError):
+    """Format consent missing errors into contract envelope (FR12.2, contract §5)."""
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "request_id": getattr(request.state, "request_id", None),
+            "error": {
+                "code": exc.code,
+                "message": exc.message,
+                "retry_after_seconds": exc.retry_after_seconds,
+            },
+        },
+    )
 
 
 @app.exception_handler(HTTPException)

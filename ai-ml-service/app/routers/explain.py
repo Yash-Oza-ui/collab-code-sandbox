@@ -1,7 +1,7 @@
 """Execution failure explainer router.
 
 Implements T-16 (FR13.1, EPIC 3) failure explanation prototype behind T-07 contract.
-Conforms to docs/ai-ml-contract.md §4.3 and §5.
+Conforms to docs/ai-ml-contract.md §4.3, §5 and US-17 consent gating.
 """
 
 import logging
@@ -9,7 +9,8 @@ from typing import Literal, Optional
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
-from app.llm.explainer import (
+from app.llm import (
+    ConsentMissingError,
     LLMProviderError,
     LLMTimeoutError,
     generate_explanation,
@@ -27,7 +28,10 @@ class ExplainRequest(BaseModel):
     room_id: str
     request_type: Literal["explanation"] = "explanation"
     language: Literal["cpp", "python", "c", "java", "javascript"]
-    consent: bool = Field(..., description="User consent boolean (FR12)")
+    consent: Optional[bool] = Field(
+        default=None,
+        description="User consent boolean (FR12). When missing or false, external AI is not called.",
+    )
     code: str
     stderr: str = ""
     exit_code: int
@@ -47,24 +51,15 @@ class ExplainResponse(BaseModel):
 
 @router.post("/explain", response_model=ExplainResponse)
 async def explain_failure(payload: ExplainRequest, request: Request) -> ExplainResponse:
-    """Explain a failed run in plain prose using LLM API (FR13.1, T-16)."""
+    """Explain a failed run in plain prose using LLM API (FR13.1, T-16, US-17)."""
     # Track request_id for consistent error envelope responses
     request.state.request_id = payload.request_id
 
-    # Enforce privacy consent gate (FR12.2, contract §5)
-    if not payload.consent:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail={
-                "code": "CONSENT_MISSING",
-                "message": "User consent is required before code or execution context can be sent to external AI.",
-                "retry_after_seconds": None,
-            },
-        )
-
     try:
+        # All LLM calls pass through the single universal consent gate in generate_explanation
         explanation = await generate_explanation(
             language=payload.language,
+            consent=payload.consent,
             failure_kind=payload.failure_kind,
             exit_code=payload.exit_code,
             stderr=payload.stderr,
@@ -78,6 +73,16 @@ async def explain_failure(payload: ExplainRequest, request: Request) -> ExplainR
             request_id=payload.request_id,
             explanation=explanation,
         )
+
+    except ConsentMissingError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={
+                "code": exc.code,
+                "message": exc.message,
+                "retry_after_seconds": exc.retry_after_seconds,
+            },
+        ) from exc
 
     except LLMTimeoutError as exc:
         raise HTTPException(
