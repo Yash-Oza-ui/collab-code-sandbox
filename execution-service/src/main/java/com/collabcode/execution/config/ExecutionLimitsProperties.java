@@ -31,6 +31,12 @@ public class ExecutionLimitsProperties {
     /** Maximum size of a single run request body, in bytes (T-06 section 2). */
     private long maxRequestBodyBytes;
 
+    /** FR16 – runs waiting or running at once; a new run beyond this is refused (US-11). */
+    private int maxQueueLength;
+
+    /** FR16 – seconds the client is told to wait after a QUEUE_FULL refusal (T-06 section 7.1). */
+    private int queueRetryAfterSeconds;
+
     // ----- getters and setters -----
 
     public int getWallTimeSeconds()            { return wallTimeSeconds; }
@@ -47,4 +53,10 @@ public class ExecutionLimitsProperties {
 
     public long getMaxRequestBodyBytes()       { return maxRequestBodyBytes; }
     public void setMaxRequestBodyBytes(long v) { this.maxRequestBodyBytes = v; }
+
+    public int getMaxQueueLength()             { return maxQueueLength; }
+    public void setMaxQueueLength(int v)       { this.maxQueueLength = v; }
+
+    public int getQueueRetryAfterSeconds()     { return queueRetryAfterSeconds; }
+    public void setQueueRetryAfterSeconds(int v) { this.queueRetryAfterSeconds = v; }
 }
