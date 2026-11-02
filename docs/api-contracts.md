@@ -577,11 +577,11 @@ success when the relay is unavailable.
 
 Each person confirms their own section in a PR comment: "I can implement my part from this document alone."
 
-- [ ] **Het (A):** section 3 (connection, frames, session id, route), the client variables in section 1, and the client side of sections 4 and 5.
-- [ ] **Chandan (A, US-01):** the page route in section 3.2.
-- [ ] **Jay (B):** section 4 (run request and result) and the execution side of section 5.
-- [ ] **Prince (C):** sections 2 and 6, and that the result fields match `docs/ai-ml-contract.md`.
-- [ ] **Yash and Femina (D):** sections 1, 5, 7 and 8.
+- [x] **Het (A):** section 3 (connection, frames, session id, route), the client variables in section 1, and the client side of sections 4 and 5.
+- [x] **Chandan (A, US-01):** the page route in section 3.2.
+- [x] **Jay (B):** section 4 (run request and result) and the execution side of section 5.
+- [x] **Prince (C):** sections 2 and 6, and that the result fields match `docs/ai-ml-contract.md`.
+- [x] **Yash and Femina (D):** sections 1, 5, 7 and 8.
 
 ---
 
@@ -829,8 +829,8 @@ When a module is deleted, `deleted` is `true` and only `module_id` is guaranteed
 
 Each person confirms their own section in a PR comment: "I can implement my part from Version 2 (decisions 1–7) alone."
 
-- [ ] **Het (A):** V2.3 join, V2.4 roster, V2.5 sockets (client side).
-- [ ] **Yash and Femina (D):** V2.1–V2.2 room creation, V2.5–V2.6 sockets and modules (server).
+- [x] **Het (A):** V2.3 join, V2.4 roster, V2.5 sockets (client side).
+- [x] **Yash and Femina (D):** V2.1–V2.2 room creation, V2.5–V2.6 sockets and modules (server).
 
 Decisions 8–15 are in V2.8 to V2.15, and their confirmations (Jay, Prince, and Het and Yash and Femina for their parts) are in V2.16. When the full Version 2 is merged and confirmed, close T-06 (#9) with a comment listing the items carried forward (V2.15).
 
@@ -1439,11 +1439,11 @@ A malformed `audience` (V2.10) is also `INVALID_MESSAGE`. The new internal calls
 
 Each person confirms their own section in a PR comment: "I can implement my part from Version 2 (decisions 8–15) alone."
 
-- [ ] **Het (A):** what the client sends (V2.8), the result fields and the share button (V2.9, V2.10), the error and `edit-rejected` handling (V2.12), `analysis-result` (V2.13).
-- [ ] **Jay (B):** V2.8 to V2.12, execution-service side (request, result, share, lookup, snapshot, codes).
-- [ ] **Prince (C):** V2.13, and that the result fields still pass through to ai-ml-service as in `docs/ai-ml-contract.md`.
-- [ ] **Yash and Femina (D):** `audience` (V2.10), lookup and snapshot, sync-service side (V2.11, V2.12), close codes, V2.14 and the role change (V2.17).
-- [ ] **Het (A):** also the Host control and the `roster` update in V2.17.
+- [x] **Het (A):** what the client sends (V2.8), the result fields and the share button (V2.9, V2.10), the error and `edit-rejected` handling (V2.12), `analysis-result` (V2.13).
+- [x] **Jay (B):** V2.8 to V2.12, execution-service side (request, result, share, lookup, snapshot, codes).
+- [x] **Prince (C):** V2.13, and that the result fields still pass through to ai-ml-service as in `docs/ai-ml-contract.md`.
+- [x] **Yash and Femina (D):** `audience` (V2.10), lookup and snapshot, sync-service side (V2.11, V2.12), close codes, V2.14 and the role change (V2.17).
+- [x] **Het (A):** also the Host control and the `roster` update in V2.17.
 
 When V2.7 and this list are ticked: tick the v1 confirmations in section 10, close T-06 (#9) with a comment listing the items carried forward (V2.15), and announce it in Slack #dev.
 
