@@ -74,10 +74,10 @@ CR05 is satisfied: import never runs in the execution sandbox, and sandbox conta
 | State | Requirements | Why `sync-service` | Status |
 |---|---|---|---|
 | **Room mode** (`pair` or `open`, plus preset and language, fixed at creation) | FR17, US-34 | Set by `POST /v1/rooms`, which `sync-service` already owns (T-17, decision 1). | Firm |
-| **Modules** (per-module id, name, owner, write access; Open mode) | FR19, FR20 to FR28 | Each module is a Yjs document relayed here; ownership is enforced where connections are accepted. | Firm (names Proposed) |
-| **Saved versions** of each module | FR20 to FR28 | Runs come from saved versions; execution-service reads them from `sync-service` and stores none itself. | Firm (names Proposed) |
-| **Audit log** of room actions (role changes, approvals, removals) | FR9, FR41.4, NFR13 | The actions happen on `sync-service`'s control path, so it is where they can be recorded. | Provisional |
-| **Host AI switch** (room-level on/off for AI features) | FR12 | Read by execution-service on each run via the session lookup; the switch itself lives with room state. Consent and cost-cap tracking stay in `ai-ml-service` (section 3). | Firm (names Proposed) |
-| **Run records** (what ran, by whom, visibility, result metadata) | FR15 | Every run result already passes through `sync-service` on its way to the room (T-06 section 5); FR15 retention is still Provisional. | Provisional |
+| **Modules** (per-module id, name, owner, write access; Open mode) | FR20–FR22 | Each module is a Yjs document relayed here; ownership is enforced where connections are accepted. | Firm (names Proposed) |
+| **Saved versions** of each module | FR24–FR26 | Runs come from saved versions; execution-service reads them from `sync-service` and stores none itself. | Firm (names Proposed) |
+| **Audit log** of room actions (role, edit-access, write-access and run-permission changes) | FR34 | The actions happen on `sync-service`'s control path, so it is where they can be recorded. | Provisional |
+| **Host AI switch** (room-level on/off for AI features) | FR35.1 | Read by execution-service on each run via the session lookup; the switch itself lives with room state. Consent and cost-cap tracking stay in `ai-ml-service` (section 3). | Firm (names Proposed) |
+| **Run records** (runner, time, language, files, saved versions, measured time and memory) | FR29, FR32 | Every run result already passes through `sync-service` on its way to the room (T-06 section 5); the record is deleted with the room (FR32). Keeping run history beyond the room's life (FR15) stays Provisional. | Provisional |
 
 Storage is unchanged from section 5: this state is held in memory behind an interface for now, and a durable store must be chosen in its own decision record before any of it has to survive a restart or before FR15 is built.

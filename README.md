@@ -63,7 +63,7 @@ flowchart TD
 | `.pre-commit-config.yaml` | Shared pre-commit hook configuration |
 | `.gitignore` | Files excluded from version control |
 
-The service folders are scaffold locations; their presence does not mean the services are implemented.   Platform features (room and owner state, removed-user block list, GitHub login and import, history retention) live in `sync-service/`; AI consent and cost cap stay in `ai-ml-service/`. See [docs/decisions/platform-home.md](docs/decisions/platform-home.md) and the [two room modes](docs/decisions/two-room-modes.md) decision record.
+The service folders are scaffold locations; their presence does not mean the services are implemented.   Platform features (room and owner state, removed-user block list, GitHub login and import, history retention) live in `sync-service/`; AI consent and cost cap stay in `ai-ml-service/`. See [docs/decisions/platform-home.md](docs/decisions/platform-home.md).
 
 ---
 
@@ -87,6 +87,7 @@ The version 2 requirement and backlog documents and their source documents. Vers
 | Record | Status |
 |---|---|
 | [Where platform features live (T-05)](docs/decisions/platform-home.md) | Accepted |
+| [Two room modes (T-23)](docs/decisions/two-room-modes.md) | Proposed |
 
 ---
 
