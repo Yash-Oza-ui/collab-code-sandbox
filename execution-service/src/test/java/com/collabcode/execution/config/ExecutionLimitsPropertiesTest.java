@@ -59,4 +59,11 @@ class ExecutionLimitsPropertiesTest {
     void maxRequestBodyBytes_hasPlaceholderValue() {
         assertThat(limits.getMaxRequestBodyBytes()).isGreaterThan(0);
     }
+
+    @Test
+    @DisplayName("max-queue-length is at least 1 and queue-retry-after-seconds > 0 (FR16, US-11)")
+    void queueLimits_haveValues() {
+        assertThat(limits.getMaxQueueLength()).isGreaterThanOrEqualTo(1);
+        assertThat(limits.getQueueRetryAfterSeconds()).isGreaterThan(0);
+    }
 }
