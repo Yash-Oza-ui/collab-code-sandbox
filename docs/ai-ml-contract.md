@@ -743,7 +743,8 @@ Data minimization rule: Every call sends only the relevant code section or funct
 
 **Traceability:** FR36.1 to FR36.4, NFR4.1, NFR14, CR02, CR06, CR10, US-65 to US-67  
 **Endpoint:** `POST /v1/analyses/complexity`  
-**`request_type`:** `"complexity"`
+**`request_type`:** `"complexity"`  
+**Schema & Examples:** Schema: `docs/schemas/complexity-request.json`, `docs/schemas/complexity-response.json`. Examples: `docs/examples/v2-analysis-complexity-request.json`, `docs/examples/v2-analysis-complexity-response.json`.
 
 #### Purpose & Behaviour
 
@@ -959,7 +960,8 @@ Data minimization rule: Every call sends only the relevant code section or funct
 
 **Traceability:** FR29, FR32, FR37.1 to FR37.4, CR11, DR3, US-56, US-68, US-69  
 **Endpoint:** `POST /v1/analyses/slowdown`  
-**`request_type`:** `"slowdown"`
+**`request_type`:** `"slowdown"`  
+**Schema & Examples:** Schema: `docs/schemas/slowdown-request.json`, `docs/schemas/slowdown-response.json`. Examples: `docs/examples/v2-analysis-slowdown-request.json`, `docs/examples/v2-analysis-slowdown-response.json`.
 
 #### Purpose & Behaviour
 
@@ -1262,7 +1264,8 @@ Called by `execution-service` when a room is closed or deleted (FR32, US-56). Cl
 **Traceability:** NFR9, CR08, T-17 Decision 10 & Decision 13  
 **Sender:** `execution-service`  
 **Endpoint:** `POST http://sync-service:8081/internal/rooms/{room_id}/messages`  
-**Channel:** Relay control WebSocket (`/ws/rooms/{room_id}`)
+**Channel:** Relay control WebSocket (`/ws/rooms/{room_id}`)  
+**Schema & Example:** Schema: `docs/schemas/analysis-result.json`. Example: `docs/examples/v2-analysis-result.json`.
 
 ### 17.1 Audience Rules (CR08, T-17 Decision 10)
 - **Pair mode:** `audience: {"kind": "room"}`. Analysis messages go to all participants, matching run visibility.
@@ -1444,7 +1447,7 @@ Each assignee confirms their respective interface boundaries in the PR review:
 
 - [ ] **Jay (execution-service):** Confirms execution-side fields for `POST /v1/analyses/complexity`, `POST /v1/analyses/slowdown`, and `POST /internal/runs` (`purpose: "measurement"`).
 - [ ] **Het (client-facing):** Confirms `analysis-result` WebSocket message payload formats for complexity and slowdown detection.
-- [ ] **Prince (Task 1 & 2 author):** Confirms regression fitting, Big-O mapping, sandbox patch verification, Median/MAD statistics, diff highlighting, and full JSON examples.
+- [x] **Prince (Task 1 & 2 author):** Confirms regression fitting, Big-O mapping, sandbox patch verification, Median/MAD statistics, diff highlighting, and full JSON examples.
 - [ ] **Chandan (Task 3 & consent):** Confirms alignment on `consent` and `ai_enabled` gating flags and common error codes.
 - [ ] **Digvijay (assembly & Tasks 4/5):** Confirms integration with assembly sections, retirement decisions, and telemetry.
 

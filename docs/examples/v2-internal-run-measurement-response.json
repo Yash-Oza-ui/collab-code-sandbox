@@ -1,0 +1,18 @@
+{
+  "request_id": "7a3e2b10-6c5d-4f8a-9e12-3456789abcde",
+  "purpose": "measurement",
+  "completed_runs": [
+    {
+      "input": "100",
+      "runtimes_ms": [1.12, 1.15, 1.14]
+    },
+    {
+      "input": "200",
+      "runtimes_ms": [4.45, 4.52, 4.48]
+    },
+    {
+      "input": "400",
+      "runtimes_ms": [17.85, 18.02, 17.91]
+    }
+  ]
+}
