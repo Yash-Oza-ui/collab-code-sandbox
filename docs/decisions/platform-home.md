@@ -4,7 +4,7 @@
 **Branch:** `feature/T-05-platform-decision`
 **Author:** Yash Oza (Category D)
 **Date:** 12 October 2026
-**Status:** Proposed. Becomes Accepted when the reviewers below approve the PR.
+**Status:** Accepted. The decision PR ([docs(T-05): record platform home decision](https://github.com/Yash-Oza-ui/collab-code-sandbox/pull/39) #39) is merged and issue [T-05](https://github.com/Yash-Oza-ui/collab-code-sandbox/issues/8) #8 is closed.
 **Reviewers:** Femina Rathod (D), Het Kapadiya (A), Jay Limbasiya (B). FYI: Prince Gadara (C), because section 3 touches ai-ml-service.
 
 ## 1. Context
