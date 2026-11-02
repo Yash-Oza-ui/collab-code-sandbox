@@ -3,6 +3,7 @@ package com.collabcode.execution.controller;
 import com.collabcode.execution.broadcast.RoomBroadcastService;
 import com.collabcode.execution.model.RunRequest;
 import com.collabcode.execution.model.RunResponse;
+import com.collabcode.execution.queue.RunQueueGate;
 import com.collabcode.execution.runner.CodeRunner;
 import com.collabcode.execution.runner.ExecutionResult;
 import jakarta.validation.Valid;
@@ -17,7 +18,10 @@ import java.util.Set;
  * POST /v1/runs
  *   1. Validates the request (Bean Validation + language check).
  *   2. Runs the code via CodeRunner (FakeCodeRunner in Sprint 1; swapped for
- *      DockerCodeRunner by Quincy in feature/US-08-run-code-runner-hookup).
+ *      DockerCodeRunner by Quincy in feature/US-08-run-code-runner-hookup),
+ *      through the one queue gate (RunQueueGate, FR16, US-11): when the queue
+ *      is full the run is refused at once with 503 QUEUE_FULL and the runner
+ *      is not called.
  *   3. Broadcasts the result to the room through sync-service (T-06 §5, FR4.5).
  *   4. Returns HTTP 200 with the full run-result body (T-06 §4.2).
  *
@@ -41,10 +45,14 @@ public class RunController {
 
     private final CodeRunner            codeRunner;
     private final RoomBroadcastService  broadcastService;
+    private final RunQueueGate          runQueueGate;
 
-    public RunController(CodeRunner codeRunner, RoomBroadcastService broadcastService) {
+    public RunController(CodeRunner codeRunner,
+                         RoomBroadcastService broadcastService,
+                         RunQueueGate runQueueGate) {
         this.codeRunner       = codeRunner;
         this.broadcastService = broadcastService;
+        this.runQueueGate     = runQueueGate;
     }
 
     /**
@@ -64,13 +72,15 @@ public class RunController {
             throw new UnsupportedLanguageException(req.getLanguage(), req.getRequest_id());
         }
 
-        // --- Execute the code ---
-        // FakeCodeRunner is used until US-09 (DockerCodeRunner) merges.
-        ExecutionResult result = codeRunner.execute(
-                req.getLanguage(),
-                req.getCode(),
-                req.getStdin()
-        );
+        // --- Execute the code through the ONE queue gate (FR16, US-11) ---
+        // If the queue is full this throws QueueFullException (503 QUEUE_FULL) at once
+        // and the runner is never called. FakeCodeRunner is used until US-09 merges.
+        ExecutionResult result = runQueueGate.run(req.getRequest_id(), () ->
+                codeRunner.execute(
+                        req.getLanguage(),
+                        req.getCode(),
+                        req.getStdin()
+                ));
 
         // --- Build the response (T-06 §4.2) ---
         RunResponse response = buildResponse(req, result);
