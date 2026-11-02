@@ -640,5 +640,196 @@ class RunControllerT19Test {
                 .andExpect(jsonPath("$.error.message").value(
                         "Language 'javascript' does not match workspace language 'python'."));
     }
+
+    // ------------------------------------------------------------------ 19. Decision 9: runner & ran_at
+
+    @Test
+    @DisplayName("Response carries runner (member_id, display_name) and ISO ran_at timestamp (Decision 9)")
+    void run_decision9_runnerAndRanAt() throws Exception {
+        String body = """
+                {
+                  "request_id": "%s",
+                  "room_id":    "%s",
+                  "session_id": "%s",
+                  "language":   "python",
+                  "stdin":      "",
+                  "source": {
+                    "kind": "inline",
+                    "files": [{ "name": "main.py", "content": "print('hello')" }],
+                    "entry": "main.py"
+                  }
+                }
+                """.formatted(REQUEST_ID, ROOM_ID, SESSION_ID);
+
+        mockMvc.perform(post("/v1/runs")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.runner.member_id").value("m_7a3c9f"))
+                .andExpect(jsonPath("$.runner.display_name").value("Ada"))
+                .andExpect(jsonPath("$.ran_at").isString())
+                .andExpect(jsonPath("$.ran_at").value(org.hamcrest.Matchers.matchesPattern("^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}.*Z$")));
+    }
+
+    // ------------------------------------------------------------------ 20. Decision 9: visibility & saved_versions
+
+    @Test
+    @DisplayName("Pair mode returns visibility 'room' and empty saved_versions array [] (Decision 9 & 10)")
+    void run_decision9_pairMode_visibilityAndSavedVersions() throws Exception {
+        String body = """
+                {
+                  "request_id": "%s",
+                  "room_id":    "%s",
+                  "session_id": "%s",
+                  "language":   "python",
+                  "source": {
+                    "kind": "inline",
+                    "files": [{ "name": "main.py", "content": "print('hello')" }],
+                    "entry": "main.py"
+                  }
+                }
+                """.formatted(REQUEST_ID, ROOM_ID, SESSION_ID);
+
+        mockMvc.perform(post("/v1/runs")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.visibility").value("room"))
+                .andExpect(jsonPath("$.saved_versions").isArray())
+                .andExpect(jsonPath("$.saved_versions").isEmpty())
+                .andExpect(jsonPath("$.failure").doesNotExist());
+    }
+
+    @Test
+    @DisplayName("Open mode returns visibility 'private' and populated saved_versions list (Decision 9 & 10)")
+    void run_decision9_openMode_visibilityAndSavedVersions() throws Exception {
+        String openRoom = "room-open-01";
+        String body = """
+                {
+                  "request_id": "%s",
+                  "room_id":    "%s",
+                  "session_id": "%s",
+                  "language":   "python",
+                  "source": {
+                    "kind": "saved",
+                    "target": "module",
+                    "module_id": "mod_9Qx7mBvA2nR0"
+                  }
+                }
+                """.formatted(REQUEST_ID, openRoom, SESSION_ID);
+
+        mockMvc.perform(post("/v1/runs")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.visibility").value("private"))
+                .andExpect(jsonPath("$.saved_versions").isArray())
+                .andExpect(jsonPath("$.saved_versions[0].module_id").value("mod_9Qx7mBvA2nR0"))
+                .andExpect(jsonPath("$.saved_versions[0].name").value("main.py"))
+                .andExpect(jsonPath("$.saved_versions[0].version").value(1))
+                .andExpect(jsonPath("$.saved_versions[0].saved_by.member_id").value("m_7a3c9f"))
+                .andExpect(jsonPath("$.saved_versions[0].saved_by.display_name").value("Ada"))
+                .andExpect(jsonPath("$.saved_versions[0].saved_at").value("2026-11-01T10:12:04.118Z"));
+    }
+
+    // ------------------------------------------------------------------ 21. Decision 9: failure info
+
+    @Test
+    @DisplayName("Open mode failure pinned to module populates failure object (Decision 9)")
+    void run_decision9_openMode_failurePinnedToModule() throws Exception {
+        String openRoom = "room-open-01";
+        when(codeRunner.execute(any(RunSpec.class))).thenReturn(new ExecutionResult(
+                "", "SyntaxError in main.py\n", 1, 0.0, 0.0,
+                false, false, "compile_error", false, null, null, "main.py"
+        ));
+
+        String body = """
+                {
+                  "request_id": "%s",
+                  "room_id":    "%s",
+                  "session_id": "%s",
+                  "language":   "python",
+                  "source": {
+                    "kind": "saved",
+                    "target": "module",
+                    "module_id": "mod_9Qx7mBvA2nR0"
+                  }
+                }
+                """.formatted(REQUEST_ID, openRoom, SESSION_ID);
+
+        mockMvc.perform(post("/v1/runs")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.failure.module_id").value("mod_9Qx7mBvA2nR0"))
+                .andExpect(jsonPath("$.failure.name").value("main.py"))
+                .andExpect(jsonPath("$.failure.owner.member_id").value("m_7a3c9f"))
+                .andExpect(jsonPath("$.failure.last_saved_by.member_id").value("m_7a3c9f"));
+    }
+
+    // ------------------------------------------------------------------ 22. Decision 9: OOM kill rule
+
+    @Test
+    @DisplayName("OOM kill in response has failure_kind 'non_zero_exit' and oom_killed true, never 'oom' (Decision 9)")
+    void run_decision9_oomKillRule() throws Exception {
+        when(codeRunner.execute(any(RunSpec.class))).thenReturn(new ExecutionResult(
+                "", "Killed: Out of memory\n", 137, 25.0, 64.0,
+                false, true, "oom", false, "Memory limit exceeded", null, null
+        ));
+
+        String body = """
+                {
+                  "request_id": "%s",
+                  "room_id":    "%s",
+                  "session_id": "%s",
+                  "language":   "python",
+                  "source": {
+                    "kind": "inline",
+                    "files": [{ "name": "main.py", "content": "alloc_oom()" }],
+                    "entry": "main.py"
+                  }
+                }
+                """.formatted(REQUEST_ID, ROOM_ID, SESSION_ID);
+
+        mockMvc.perform(post("/v1/runs")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.oom_killed").value(true))
+                .andExpect(jsonPath("$.failure_kind").value("non_zero_exit"))
+                .andExpect(jsonPath("$.exit_code").value(137));
+    }
+
+    // ------------------------------------------------------------------ 23. Decision 9: compile_time_ms
+
+    @Test
+    @DisplayName("compile_time_ms is present when returned by CodeRunner, null for interpreted (Decision 9)")
+    void run_decision9_compileTimeMs() throws Exception {
+        when(codeRunner.execute(any(RunSpec.class))).thenReturn(new ExecutionResult(
+                "hello cpp\n", "", 0, 10.0, 4.0,
+                false, false, null, false, null, 15.5, null
+        ));
+
+        String body = """
+                {
+                  "request_id": "%s",
+                  "room_id":    "%s",
+                  "session_id": "%s",
+                  "language":   "cpp",
+                  "source": {
+                    "kind": "inline",
+                    "files": [{ "name": "main.cpp", "content": "int main() {}" }],
+                    "entry": "main.cpp"
+                  }
+                }
+                """.formatted(REQUEST_ID, ROOM_ID, SESSION_ID);
+
+        mockMvc.perform(post("/v1/runs")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.compile_time_ms").value(15.5))
+                .andExpect(jsonPath("$.execution_time_ms").value(10.0));
+    }
 }
 

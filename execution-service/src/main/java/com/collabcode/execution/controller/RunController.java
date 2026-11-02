@@ -7,26 +7,32 @@ import com.collabcode.execution.permission.PermissionLookupResult;
 import com.collabcode.execution.permission.PermissionLookupService;
 import com.collabcode.execution.runner.CodeRunner;
 import com.collabcode.execution.runner.ExecutionResult;
+import com.collabcode.execution.snapshot.MemberInfo;
 import com.collabcode.execution.snapshot.SavedVersionReader;
+import com.collabcode.execution.snapshot.SnapshotModule;
 import com.collabcode.execution.snapshot.SnapshotResult;
 import jakarta.validation.Valid;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.time.Instant;
+import java.time.format.DateTimeFormatter;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
 /**
- * Run endpoint – T-17 V2.8, V2.11, V2.12 (Decision 8 & Decision 11).
+ * Run endpoint – T-17 V2.8 to V2.12 (Decisions 8 and 9, T-19).
  *
  * POST /v1/runs
- *   1. Validates request body, legacy code field rejection, and language.
+ *   1. Validates request body, rejects legacy 'code' field, and checks language.
  *   2. Checks caller permissions with sync-service via PermissionLookupService (V2.11).
  *   3. Validates source kind against room mode, language, and reads saved module snapshot (V2.8).
  *   4. Runs user code via CodeRunner with the run spec object (RunSpec).
- *   5. Broadcasts the result to the room through sync-service (FR4.5).
- *   6. Returns HTTP 200 with the full run-result body.
+ *   5. Populates Decision 9 result fields (runner, ran_at, visibility, saved_versions, failure, compile_time_ms).
+ *   6. Broadcasts the result to the room / audience through sync-service (FR4.5, V2.10).
+ *   7. Returns HTTP 200 with the full run-result body.
  */
 @RestController
 @RequestMapping("/v1")
@@ -106,14 +112,18 @@ public class RunController {
             );
         }
 
+        // Capture start timestamp (Decision 9, FR26)
+        String ranAt = DateTimeFormatter.ISO_INSTANT.format(Instant.now());
+
         // Check 6: Build the RunSpec object (inline or one-call snapshot read)
         RunSpec runSpec;
+        SnapshotResult snapshot = null;
         if (source instanceof InlineSource inline) {
             runSpec = new RunSpec(req.getLanguage(), inline.getFiles(), inline.getEntry(), req.getStdin());
         } else {
             SavedSource saved = (SavedSource) source;
             // One-call snapshot rule (T-17 V2.8)
-            SnapshotResult snapshot = savedVersionReader.readSnapshot(req.getRoom_id(), saved);
+            snapshot = savedVersionReader.readSnapshot(req.getRoom_id(), saved);
             if (snapshot == null || snapshot.getModules() == null || snapshot.getModules().isEmpty()) {
                 throw new ModuleNotFoundException(req.getRequest_id(), "No modules returned in snapshot.");
             }
@@ -126,10 +136,10 @@ public class RunController {
         // --- Execute code with spec object ---
         ExecutionResult result = codeRunner.execute(runSpec);
 
-        // --- Build response ---
-        RunResponse response = buildResponse(req, result);
+        // --- Build response with Decision 9 fields ---
+        RunResponse response = buildResponse(req, result, lookup, snapshot, ranAt);
 
-        // --- Broadcast to room (FR4.5) ---
+        // --- Broadcast to room / audience (FR4.5, V2.10) ---
         broadcastService.broadcast(req.getRoom_id(), response);
 
         return ResponseEntity.ok(response);
@@ -208,22 +218,118 @@ public class RunController {
         }
     }
 
-    private RunResponse buildResponse(RunRequest req, ExecutionResult result) {
+    private RunResponse buildResponse(
+            RunRequest req,
+            ExecutionResult result,
+            PermissionLookupResult lookup,
+            SnapshotResult snapshot,
+            String ranAt) {
+
         RunResponse r = new RunResponse();
         r.setRequest_id(req.getRequest_id());
         r.setRoom_id(req.getRoom_id());
         r.setLanguage(req.getLanguage());
+
+        // Process outputs
         r.setStdout(result.getStdout());
         r.setStderr(result.getStderr());
         r.setExit_code(result.getExitCode());
         r.setExecution_time_ms(result.getExecutionTimeMs());
         r.setPeak_memory_mb(result.getPeakMemoryMb());
         r.setTimed_out(result.isTimedOut());
-        r.setOom_killed(result.isOomKilled());
-        r.setFailure_kind(result.getFailureKind());
+
+        // Decision 9 OOM kill rule: failure_kind is "non_zero_exit" with oom_killed: true, never "oom"
+        boolean oom = result.isOomKilled();
+        r.setOom_killed(oom);
+        if (oom) {
+            r.setFailure_kind("non_zero_exit");
+        } else {
+            r.setFailure_kind(result.getFailureKind());
+        }
+
         r.setOutput_truncated(result.isOutputTruncated());
         r.setMessage(result.getMessage());
+
+        // Decision 9: compile_time_ms (null for languages with no compile stage)
+        r.setCompile_time_ms(result.getCompileTimeMs());
+
+        // Decision 9: runner (from permission lookup: member_id, display_name)
+        String memberId = lookup.getMember_id() != null ? lookup.getMember_id() : "m_unknown";
+        String displayName = lookup.getDisplay_name() != null ? lookup.getDisplay_name() : "Anonymous";
+        r.setRunner(new MemberInfo(memberId, displayName));
+
+        // Decision 9: ran_at (ISO 8601 UTC with milliseconds and Z)
+        r.setRan_at(ranAt);
+
+        // Decision 10: visibility ("room" for Pair, "private" for Open)
+        String mode = lookup.getMode() != null ? lookup.getMode().toLowerCase() : "pair";
+        String visibility = "open".equals(mode) ? "private" : "room";
+        r.setVisibility(visibility);
+
+        // Decision 9: saved_versions (Open mode: snapshot modules; Pair mode: empty list [])
+        if ("open".equals(mode) && snapshot != null && snapshot.getModules() != null) {
+            List<SavedVersionInfo> savedVersions = snapshot.getModules().stream()
+                    .map(m -> new SavedVersionInfo(
+                            m.getModule_id(),
+                            m.getName(),
+                            m.getVersion(),
+                            m.getSaved_by(),
+                            m.getSaved_at()
+                    ))
+                    .toList();
+            r.setSaved_versions(savedVersions);
+        } else {
+            r.setSaved_versions(Collections.emptyList());
+        }
+
+        // Decision 9: failure (Open mode when failed and points to one module; null otherwise)
+        if ("open".equals(mode) && snapshot != null && (result.getExitCode() != 0 || result.getFailureKind() != null)) {
+            FailureInfo failure = resolveFailure(result, snapshot, (SavedSource) req.getSource());
+            r.setFailure(failure);
+        } else {
+            r.setFailure(null);
+        }
+
         return r;
+    }
+
+    private FailureInfo resolveFailure(ExecutionResult result, SnapshotResult snapshot, SavedSource source) {
+        if (result.isTimedOut()) {
+            return null; // Timeouts cannot be pinned to one module
+        }
+
+        List<SnapshotModule> modules = snapshot.getModules();
+        if (modules == null || modules.isEmpty()) {
+            return null;
+        }
+
+        // 1. If ExecutionResult explicitly named a failing module
+        String failingTarget = result.getFailingModule();
+        if (failingTarget != null) {
+            for (SnapshotModule m : modules) {
+                if (failingTarget.equalsIgnoreCase(m.getName()) || failingTarget.equals(m.getModule_id())) {
+                    return new FailureInfo(m.getModule_id(), m.getName(), m.getOwner(), m.getSaved_by());
+                }
+            }
+        }
+
+        // 2. If target was a single module, that module failed
+        if ("module".equals(source.getTarget()) && modules.size() == 1) {
+            SnapshotModule m = modules.get(0);
+            return new FailureInfo(m.getModule_id(), m.getName(), m.getOwner(), m.getSaved_by());
+        }
+
+        // 3. Check stderr for module names
+        String stderr = result.getStderr();
+        if (stderr != null && !stderr.isBlank()) {
+            for (SnapshotModule m : modules) {
+                if (stderr.contains(m.getName()) || stderr.contains(m.getModule_id())) {
+                    return new FailureInfo(m.getModule_id(), m.getName(), m.getOwner(), m.getSaved_by());
+                }
+            }
+        }
+
+        return null;
     }
 
     public static class UnsupportedLanguageException extends RuntimeException {

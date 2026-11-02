@@ -16,39 +16,27 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
- * Delivers a run result to every participant in a room via sync-service.
- *
- * T-06 section 5: after execution finishes, execution-service POSTs the
- * run-result JSON to sync-service's internal endpoint. sync-service then
- * forwards it as a text frame to every WebSocket connection in the room.
+ * Delivers a run result to participants in a room via sync-service (T-06 §5, T-17 V2.9, V2.10).
  *
  * Endpoint:
  *   POST {SYNC_SERVICE_INTERNAL_URL}/internal/rooms/{room_id}/messages
  *   X-Internal-Token: {INTERNAL_API_TOKEN}
  *
+ * In Pair mode: message is broadcast to the whole room (visibility: "room").
+ * In Open mode: message carries targeted audience or visibility: "private".
+ *
  * This call is best-effort. A failure (sync-service down, wrong token, etc.)
  * is logged as a warning, but the caller's HTTP 200 response is never
- * affected (NFR9: execution result is never delayed by anything after it).
+ * affected (NFR9: execution result is delivered first).
  */
 @Service
 public class RoomBroadcastService {
 
     private static final Logger log = LoggerFactory.getLogger(RoomBroadcastService.class);
 
-    /**
-     * Base URL of sync-service. Read from environment variable
-     * SYNC_SERVICE_INTERNAL_URL (T-06 section 1).
-     * Default: http://localhost:8081 for local dev.
-     */
     @Value("${app.sync-service.internal-url:http://localhost:8081}")
     private String syncServiceInternalUrl;
 
-    /**
-     * Shared secret protecting the internal endpoint (T-06 section 5).
-     * Read from environment variable INTERNAL_API_TOKEN.
-     * Defaults to empty string so local dev without the variable set
-     * fails gracefully with a logged warning rather than an NPE.
-     */
     @Value("${app.sync-service.internal-token:}")
     private String internalToken;
 
@@ -57,7 +45,6 @@ public class RoomBroadcastService {
 
     public RoomBroadcastService(ObjectMapper objectMapper) {
         this.objectMapper = objectMapper;
-        // Single reusable HttpClient; connects in under a second for localhost.
         this.httpClient = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(3))
                 .build();
@@ -65,16 +52,9 @@ public class RoomBroadcastService {
 
     /**
      * Sends the run-result message to sync-service for the given room.
-     *
-     * Failures are logged and swallowed so callers are never blocked (NFR9).
-     *
-     * @param roomId   room to broadcast to
-     * @param response the full run result (T-06 §4.2)
      */
     public void broadcast(String roomId, RunResponse response) {
         try {
-            // Build the "run-result" text frame body (T-06 section 3.6).
-            // We add "type" on top of the existing RunResponse fields.
             Map<String, Object> payload = buildPayload(response);
             String json = objectMapper.writeValueAsString(payload);
 
@@ -101,18 +81,11 @@ public class RoomBroadcastService {
             }
 
         } catch (Exception e) {
-            // Best-effort: never let a broadcast failure propagate to the caller.
             log.warn("broadcast: room={} failed to deliver run-result to sync-service: {}",
                     roomId, e.getMessage());
         }
     }
 
-    // ----- private helpers -----
-
-    /**
-     * Builds the JSON body for the internal endpoint (T-06 section 3.6).
-     * The "type" field is added here; all other fields come from RunResponse.
-     */
     private Map<String, Object> buildPayload(RunResponse r) {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("type",               "run-result");
@@ -129,6 +102,12 @@ public class RoomBroadcastService {
         m.put("failure_kind",       r.getFailure_kind());
         m.put("output_truncated",   r.isOutput_truncated());
         m.put("message",            r.getMessage());
+        m.put("compile_time_ms",    r.getCompile_time_ms());
+        m.put("runner",             r.getRunner());
+        m.put("ran_at",             r.getRan_at());
+        m.put("visibility",         r.getVisibility());
+        m.put("saved_versions",     r.getSaved_versions());
+        m.put("failure",            r.getFailure());
         return m;
     }
 }
