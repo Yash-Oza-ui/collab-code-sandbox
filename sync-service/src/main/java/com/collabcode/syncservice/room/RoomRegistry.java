@@ -98,4 +98,27 @@ public class RoomRegistry {
         }
         return result;
     }
+
+    /**
+     * Find the first open session in a room whose {@code sessionId} attribute matches
+     * the given client-supplied session id.
+     *
+     * <p>Used by {@link com.collabcode.syncservice.handler.DocumentHandler} to
+     * route the {@code edit-rejected} message to the sender's control socket
+     * (both sockets share the same client {@code session_id}).
+     *
+     * @param roomId    room to search
+     * @param sessionId the client-supplied session id ({@code session_id} query param)
+     * @return the matching open session, or {@code null} if not found
+     */
+    public WebSocketSession findBySessionId(String roomId, String sessionId) {
+        if (sessionId == null) return null;
+        List<WebSocketSession> raw = rooms.getOrDefault(roomId, Collections.emptyList());
+        for (WebSocketSession s : raw) {
+            if (s.isOpen() && sessionId.equals(s.getAttributes().get("sessionId"))) {
+                return s;
+            }
+        }
+        return null;
+    }
 }
