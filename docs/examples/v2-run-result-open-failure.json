@@ -1,0 +1,56 @@
+{
+  "request_id": "d7a2f5c8-1e39-4b60-a4c2-9f8e1d7b3a06",
+  "room_id": "k3Yc1t9Qx7mBvA2nR0sLpQ",
+  "language": "python",
+  "stdout": "",
+  "stderr": "Traceback (most recent call last):\n  File \"main.py\", line 2, in <module>\n    print(add(2, \"3\"))\n  File \"helper.py\", line 2, in add\n    return a + b\nTypeError: unsupported operand type(s) for +: 'int' and 'str'\n",
+  "exit_code": 1,
+  "execution_time_ms": 41,
+  "peak_memory_mb": 8.4,
+  "timed_out": false,
+  "oom_killed": false,
+  "failure_kind": "non_zero_exit",
+  "output_truncated": false,
+  "message": null,
+  "compile_time_ms": null,
+  "runner": {
+    "member_id": "m_4b19d2",
+    "display_name": "Lin"
+  },
+  "ran_at": "2026-11-01T10:15:30.412Z",
+  "visibility": "private",
+  "saved_versions": [
+    {
+      "module_id": "mod_9Qx7mBvA2nR0",
+      "name": "main.py",
+      "version": 4,
+      "saved_by": {
+        "member_id": "m_7a3c9f",
+        "display_name": "Ada"
+      },
+      "saved_at": "2026-11-01T10:12:04.118Z"
+    },
+    {
+      "module_id": "mod_5Lm8Np2Qr4St",
+      "name": "helper.py",
+      "version": 2,
+      "saved_by": {
+        "member_id": "m_4b19d2",
+        "display_name": "Lin"
+      },
+      "saved_at": "2026-11-01T10:14:51.733Z"
+    }
+  ],
+  "failure": {
+    "module_id": "mod_5Lm8Np2Qr4St",
+    "name": "helper.py",
+    "owner": {
+      "member_id": "m_7a3c9f",
+      "display_name": "Ada"
+    },
+    "last_saved_by": {
+      "member_id": "m_4b19d2",
+      "display_name": "Lin"
+    }
+  }
+}

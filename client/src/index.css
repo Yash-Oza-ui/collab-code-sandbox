@@ -25,3 +25,85 @@ body {
   flex: 1;
   min-height: 0;
 }
+
+.display-name-screen {
+  display: grid;
+  min-height: 100%;
+  place-items: center;
+  padding: 24px;
+  box-sizing: border-box;
+  background: #f5f7fa;
+}
+
+.display-name-card {
+  width: min(100%, 420px);
+  padding: 28px;
+  border: 1px solid #d9dee7;
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 8px 28px rgb(15 23 42 / 8%);
+}
+
+.display-name-card h1 {
+  margin: 0 0 8px;
+  font-size: 1.4rem;
+}
+
+.display-name-card > p {
+  margin: 0 0 22px;
+  color: #526071;
+}
+
+.display-name-card form {
+  display: grid;
+  gap: 10px;
+}
+
+.display-name-card label {
+  font-weight: 600;
+}
+
+.display-name-card input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 11px 12px;
+  border: 1px solid #aeb8c6;
+  border-radius: 6px;
+  font: inherit;
+}
+
+.display-name-card input:focus {
+  outline: 2px solid #2563eb;
+  outline-offset: 2px;
+}
+
+.display-name-help,
+.display-name-error {
+  margin: 0;
+  font-size: 0.9rem;
+}
+
+.display-name-help {
+  color: #526071;
+}
+
+.display-name-error {
+  color: #b42318;
+}
+
+.display-name-card button {
+  justify-self: start;
+  margin-top: 8px;
+  padding: 10px 18px;
+  border: 0;
+  border-radius: 6px;
+  background: #2563eb;
+  color: #fff;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.display-name-card button:hover {
+  background: #1d4ed8;
+}

@@ -1,0 +1,24 @@
+{
+  "request_id": "0b9d2f3e-7a41-4c58-9e1b-5d3c8a6f2e10",
+  "room_id": "Zq8-Lw2Ef6Th0Yx4Rn7JbA",
+  "language": "python",
+  "stdout": "hello\n",
+  "stderr": "",
+  "exit_code": 0,
+  "execution_time_ms": 38,
+  "peak_memory_mb": 7.9,
+  "timed_out": false,
+  "oom_killed": false,
+  "failure_kind": null,
+  "output_truncated": false,
+  "message": null,
+  "compile_time_ms": null,
+  "runner": {
+    "member_id": "m_7a3c9f",
+    "display_name": "Ada"
+  },
+  "ran_at": "2026-11-01T10:20:05.087Z",
+  "visibility": "room",
+  "saved_versions": [],
+  "failure": null
+}

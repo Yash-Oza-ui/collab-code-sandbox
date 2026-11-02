@@ -1,0 +1,11 @@
+{
+  "audience": {
+    "kind": "sessions",
+    "session_ids": [
+      "2f8d6b14-9c03-4e7a-b5d1-6a0e3c9f7d28"
+    ]
+  },
+  "type": "analysis-result",
+  "request_id": "d7a2f5c8-1e39-4b60-a4c2-9f8e1d7b3a06",
+  "room_id": "k3Yc1t9Qx7mBvA2nR0sLpQ"
+}

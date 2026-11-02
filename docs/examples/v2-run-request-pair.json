@@ -1,0 +1,17 @@
+{
+  "request_id": "0b9d2f3e-7a41-4c58-9e1b-5d3c8a6f2e10",
+  "room_id": "Zq8-Lw2Ef6Th0Yx4Rn7JbA",
+  "session_id": "7c1e4a52-3b0d-4f6a-9a2e-8d5f1b6c3e90",
+  "language": "python",
+  "stdin": "",
+  "source": {
+    "kind": "inline",
+    "files": [
+      {
+        "name": "main.py",
+        "content": "print(\"hello\")\n"
+      }
+    ],
+    "entry": "main.py"
+  }
+}
