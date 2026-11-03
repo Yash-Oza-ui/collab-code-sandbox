@@ -43,17 +43,25 @@ public final class RoomMessages {
     public static Map<String, Object> roster(Room room) {
         List<Map<String, Object>> members = new ArrayList<>();
         for (Member member : room.getMembers().values()) {
-            Map<String, Object> entry = new LinkedHashMap<>();
-            entry.put("member_id", member.getMemberId());
-            entry.put("display_name", member.getDisplayName());
-            entry.put("role", member.getRole().value());
-            entry.put("permissions", permissions(room, member));
-            members.add(entry);
+            members.add(memberEntry(room, member));
         }
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("type", "roster");
         m.put("members", members);
         return m;
+    }
+
+    /**
+     * One member as it appears in {@code roster} (member_id, display_name, role,
+     * permissions). Also the body of the role-change response (V2.17).
+     */
+    public static Map<String, Object> memberEntry(Room room, Member member) {
+        Map<String, Object> entry = new LinkedHashMap<>();
+        entry.put("member_id", member.getMemberId());
+        entry.put("display_name", member.getDisplayName());
+        entry.put("role", member.getRole().value());
+        entry.put("permissions", permissions(room, member));
+        return entry;
     }
 
     /**
