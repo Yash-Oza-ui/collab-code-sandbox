@@ -110,13 +110,22 @@ export function encodeQueryAwarenessMessage(): Uint8Array {
   return encoding.toUint8Array(encoder)
 }
 
+type WebSocketSendData = Parameters<WebSocket['send']>[0]
+
+function sendBinary(
+  ws: { send: (data: WebSocketSendData) => void },
+  data: Uint8Array,
+): void {
+  ws.send(data as unknown as WebSocketSendData)
+}
+
 /**
  * Dispatches an incoming binary message from the WebSocket relay into the local Awareness instance.
  */
 export function handleIncomingAwarenessFrame(
   awareness: Awareness,
   data: Uint8Array | ArrayBuffer,
-  ws: { send: (msg: unknown) => void; readyState?: number },
+  ws: { send: (msg: WebSocketSendData) => void; readyState?: number },
 ): void {
   const uint8 = data instanceof ArrayBuffer ? new Uint8Array(data) : data
   if (!uint8 || uint8.length === 0) return
@@ -135,7 +144,7 @@ export function handleIncomingAwarenessFrame(
         Array.from(awareness.getStates().keys()),
       )
       if (!('readyState' in ws) || ws.readyState === WS_OPEN) {
-        ws.send(response)
+        sendBinary(ws, response)
       }
     }
   }
@@ -192,7 +201,7 @@ export function connectAwarenessWs(
     if (origin === ws) return
     const changedClients = added.concat(updated).concat(removed)
     if (ws.readyState === WS_OPEN && changedClients.length > 0) {
-      ws.send(encodeAwarenessMessage(awareness, changedClients))
+      sendBinary(ws, encodeAwarenessMessage(awareness, changedClients))
     }
   }
 
@@ -200,11 +209,11 @@ export function connectAwarenessWs(
 
   ws.onopen = () => {
     // Contract Rule 6: query awareness from existing participants upon connecting
-    ws.send(encodeQueryAwarenessMessage())
+    sendBinary(ws, encodeQueryAwarenessMessage())
 
     // Advertise local state if already present
     if (awareness.getLocalState() !== null) {
-      ws.send(encodeAwarenessMessage(awareness, [awareness.clientID]))
+      sendBinary(ws, encodeAwarenessMessage(awareness, [awareness.clientID]))
     }
   }
 
@@ -219,7 +228,7 @@ export function connectAwarenessWs(
     if (ws.readyState === WS_OPEN) {
       try {
         removeAwarenessStates(awareness, [awareness.clientID], ws)
-        ws.send(encodeAwarenessMessage(awareness, [awareness.clientID]))
+        sendBinary(ws, encodeAwarenessMessage(awareness, [awareness.clientID]))
       } catch {
         // ignore send error on teardown
       }
