@@ -9,6 +9,7 @@ import {
   getExistingUserColors,
   setUserAwareness,
 } from './awareness'
+import { connectAwarenessWs } from './awarenessWs'
 import { getRoomIdFromPath } from './roomId'
 import { useRoomDoc } from './roomDoc'
 import { pickUserColor } from './userColor'
@@ -26,6 +27,14 @@ export interface RoomPageProps {
   awarenessRef?: RefObject<Awareness | null>
   /** Called once a guest has supplied a valid name; ready for awareness integration. */
   onDisplayNameAccepted?: (displayName: string, userColor?: string) => void
+  /**
+   * Optional WebSocket relay configuration or custom WebSocket implementation for testing.
+   */
+  wsOptions?: {
+    syncWsUrl?: string
+    sessionId?: string
+    WebSocketClass?: typeof WebSocket
+  }
 }
 
 // Reads the room id from the URL (T-06 section 3.2: /room/{room_id}).
@@ -36,6 +45,7 @@ export default function RoomPage(props: RoomPageProps = {}) {
     docRef: externalDocRef,
     awarenessRef: externalAwarenessRef,
     onDisplayNameAccepted,
+    wsOptions,
   } = props
   const roomId = getRoomIdFromPath(window.location.pathname)
   const [displayName, setDisplayName] = useState<string | null>(null)
@@ -46,7 +56,7 @@ export default function RoomPage(props: RoomPageProps = {}) {
 
   const awarenessInstanceRef = useRef<Awareness | null>(null)
 
-  // Manage Awareness instance lifecycle tied to the active Y.Doc
+  // Manage Awareness instance lifecycle tied to active Y.Doc and WebSocket relay
   useEffect(() => {
     const doc = docRef.current
     if (!doc) return
@@ -62,7 +72,21 @@ export default function RoomPage(props: RoomPageProps = {}) {
       ;(window as unknown as { awareness?: Awareness }).awareness = awareness
     }
 
+    // Connect awareness to room WebSocket relay if in a room (US-05 / T-06)
+    let wsCleanup: (() => void) | undefined
+    if (roomId) {
+      const conn = connectAwarenessWs({
+        roomId,
+        awareness,
+        syncWsUrl: wsOptions?.syncWsUrl,
+        sessionId: wsOptions?.sessionId,
+        WebSocketClass: wsOptions?.WebSocketClass,
+      })
+      wsCleanup = conn.destroy
+    }
+
     return () => {
+      wsCleanup?.()
       awareness.destroy()
       if (awarenessInstanceRef.current === awareness) {
         awarenessInstanceRef.current = null
@@ -77,7 +101,7 @@ export default function RoomPage(props: RoomPageProps = {}) {
         delete (window as unknown as { awareness?: Awareness }).awareness
       }
     }
-  }, [roomId, docRef, externalAwarenessRef])
+  }, [roomId, docRef, externalAwarenessRef, wsOptions])
 
   // Keep presence updated in awareness whenever displayName and userColor are set or change
   useEffect(() => {
