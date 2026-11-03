@@ -6,7 +6,7 @@ import {
   removeAwarenessStates,
   type Awareness,
 } from 'y-protocols/awareness'
-import { DEFAULT_SYNC_WS_URL, getServiceConfig } from './config'
+import { DEFAULT_SYNC_WS_URL, getClientConfig } from './config'
 
 export const COLLAB_SESSION_ID_KEY = 'collab_session_id'
 
@@ -164,7 +164,7 @@ export function connectAwarenessWs(
   const {
     roomId,
     awareness,
-    syncWsUrl = getServiceConfig().syncWsUrl,
+    syncWsUrl = getClientConfig().syncWsUrl,
     sessionId = getCollabSessionId(),
     WebSocketClass = typeof WebSocket !== 'undefined' ? WebSocket : undefined,
   } = options
