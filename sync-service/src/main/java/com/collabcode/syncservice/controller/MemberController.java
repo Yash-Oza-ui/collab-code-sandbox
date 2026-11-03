@@ -18,6 +18,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.regex.Pattern;
 
 /**
  * Member role change (US-27, V2.17; FR9.4).
@@ -32,6 +33,10 @@ import java.util.Map;
 @RestController
 @RequestMapping("/v1")
 public class MemberController {
+
+    /** session_id is a client-generated UUID v4 (contract §3.3). */
+    private static final Pattern UUID_V4 = Pattern.compile(
+            "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$");
 
     private final RoomStore store;
     private final RoomService roomService;
@@ -49,11 +54,12 @@ public class MemberController {
             @RequestHeader(value = "X-Owner-Token", required = false) String ownerToken,
             @RequestBody(required = false) UpdateMemberRequest body) {
 
-        // Missing or malformed caller identity is a client error (V2.6),
-        // distinct from a well-formed session that has not joined the room.
-        if (sessionId == null || sessionId.isBlank()) {
+        // The caller identity must be a well-formed UUID v4 (contract §3.3, V2.6);
+        // null, blank or malformed is a client error (422), distinct from a valid
+        // session that has simply not joined the room (404 SESSION_NOT_FOUND below).
+        if (sessionId == null || !UUID_V4.matcher(sessionId).matches()) {
             return error(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_REQUEST",
-                    "Header 'X-Session-Id' is required.");
+                    "Header 'X-Session-Id' must be a UUID.");
         }
 
         Room room = store.get(roomId);
