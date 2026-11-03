@@ -119,11 +119,12 @@ npm test
 Test suites cover:
 - `src/roomId.test.ts`: URL room ID validation and parsing rules (T-06 §3.2).
 - `src/config.test.ts`: Environment configuration parsing and fallback to T-06 service contract defaults.
-- `src/displayName.test.ts`: Display name validation (whitespace trimming, non-empty, max 32 chars).
+- `src/displayName.test.ts`: Display name validation (whitespace trimming, non-empty, max 50 chars).
 - `src/userColor.test.ts`: User colour palette modulo indexing, non-colliding participant colour selection, and fallback logic (US-05).
 - `src/awareness.test.ts`: Yjs awareness presence initialization and peer colour aggregation (US-05).
+- `src/awarenessWs.test.ts`: Stable session ID management (T-06 §3.3), WebSocket URL construction (T-06 §3.1), message framing, and multi-client relay awareness synchronization (US-05).
 - `src/DisplayNamePrompt.test.tsx`: Display name input modal and error message handling.
-- `src/RoomPage.displayName.test.tsx`: Display name gating, room header colour badge rendering, and awareness state exposure.
+- `src/RoomPage.displayName.test.tsx`: Display name gating, room header colour badge rendering, awareness state exposure, and multi-client room sync over relay.
 - `src/roomDoc.test.tsx`:
   - `createRoomDoc` unit tests (instantiation, shared text mutations, clean destruction).
   - `useRoomDoc` StrictMode regression test (verifies that during React StrictMode effect replay, each replaced document is destroyed, the document after effect replay is live, and the document is destroyed on final unmount).
@@ -145,7 +146,7 @@ In T-01:
 - `yjs` is installed as a primary dependency.
 - **StrictMode-Safe Lifecycle:** `useRoomDoc` (`src/roomDoc.ts`) creates each `Y.Doc` inside effect setup and destroys that exact instance in effect cleanup. No disposable documents are instantiated during the render phase. In development with React StrictMode enabled, effect replay cleanly destroys the first instance and recreates a live document without leaving stale or destroyed documents.
 - **Ref Availability:** The active document is exposed via `docRef` for subsequent **US-01** and **US-02** integrations.
-- Per T-01 specification, the client does **not** connect to the sync relay yet. The WebSocket provider connection and Monaco editor binding are implemented in **US-01** and **US-02**.
+- Per T-01 specification, document syncing is bound to Monaco in **US-01** and **US-02**.
 
 ---
 
@@ -154,48 +155,68 @@ In T-01:
 **US-05** allows guests joining a room without GitHub authentication to enter a display name and automatically receive a distinct presence colour:
 1. **Name Prompt & Validation (`src/displayName.ts`, `src/DisplayNamePrompt.tsx`):**
    - Prompted before entering the room editor.
-   - Validated: trimmed, non-empty, and limited to 32 characters.
+   - Validated: trimmed, non-empty, and limited to 50 characters (`MAX_DISPLAY_NAME_LENGTH = 50`).
 2. **Colour Picker (`src/userColor.ts`):**
    - High-contrast, accessible 10-colour palette sized for room capacity (NFR2).
    - Pure function `pickUserColor(existingColors, fallbackIndex)` finds an unused colour among active participants in the room, falling back deterministically when all palette colours are taken.
 3. **Yjs Awareness Presence (`src/awareness.ts`):**
    - Stores user presence in Yjs awareness state under `awareness.setLocalStateField('user', { name, color })`.
    - Ready for live cursors (US-03) without rework.
-4. **Browser Console Inspection (DoD #5):**
+4. **WebSocket Awareness Synchronization (`src/awarenessWs.ts`):**
+   - Automatically connects to the room WebSocket relay:
+     `ws://localhost:8081/ws/rooms/{room_id}?session_id={session_id}`
+   - Formatted in accordance with T-06 §3.1 and §3.3 using stable UUID v4 stored in `localStorage` (`collab_session_id`).
+   - Binary awareness frames (`MESSAGE_AWARENESS = 1`) and query awareness frames (`MESSAGE_QUERY_AWARENESS = 3`) synchronize participant presence states in real time across peers without echo loops.
+5. **Browser Console Inspection (DoD #5):**
    - The active awareness instance is exposed at `window.awareness`.
    - Reviewers and developers can inspect the active participants and local presence in DevTools console:
      ```javascript
      window.awareness.getStates()
-     // Map(1) { [clientID] => { user: { name: 'Alice', color: '#e11d48' } } }
+     // Map(2) {
+     //   [clientAId] => { user: { name: 'Alice', color: '#e11d48' } },
+     //   [clientBId] => { user: { name: 'Bob', color: '#2563eb' } }
+     // }
      ```
 
 ---
 
-## 10. Fresh-Clone Verification Procedure (For Reviewers / Teammates)
+## 10. Multi-Client Verification Procedure (Reviewers / Teammates)
 
-The following steps are provided for another team member or reviewer to verify the client scaffold on a fresh clone:
-
+### Automated Test Verification
+Run the multi-client relay integration suites:
 ```bash
-# 1. From repository root, navigate into the client folder
-cd client
-
-# 2. Clean install dependencies
-npm ci
-
-# 3. Run the automated test suite (all tests must pass)
-npm test
-
-# 4. Compile and verify production build
-npm run build
-
-# 5. Run linter (must pass with 0 errors and 0 warnings)
-npm run lint
-
-# 6. Start the local dev server
-npm run dev
-# -> Open http://localhost:3000/room/test-room in a browser with internet access
-# -> Confirm the display name prompt appears
-# -> Enter a name (e.g. "Alice") and click "Join room"
-# -> Confirm the header displays "Room: test-room · You: Alice" with a colour badge
-# -> In DevTools console, type `window.awareness.getStates()` to inspect presence
+npm test src/awarenessWs.test.ts src/RoomPage.displayName.test.tsx
 ```
+Both test suites simulate the sync-service WebSocket relay and verify that:
+- Client A joins as Alice.
+- Client B joins as Bob.
+- Both clients receive and observe the other's name and colour in their Awareness states.
+- Their assigned colours are distinct.
+
+### Manual Two-Client Verification (Browser)
+1. Start the services:
+   - Ensure `sync-service` is running on `ws://localhost:8081` (via Docker Compose or `./gradlew bootRun`).
+   - Start the client: `npm run dev` (opens on `http://localhost:3000`).
+2. **Window A (First Participant):**
+   - Navigate to `http://localhost:3000/room/demo-room-01`.
+   - In the name prompt, enter `Alice` and click **Join room**.
+   - The editor opens with header badge: `Room: demo-room-01 · You: Alice` with a colour dot (e.g. Rose `#e11d48`).
+   - In DevTools console, run:
+     ```javascript
+     Array.from(window.awareness.getStates().values())
+     // -> [{ user: { name: 'Alice', color: '#e11d48' } }]
+     ```
+3. **Window B (Second Participant in Incognito or second browser):**
+   - Navigate to `http://localhost:3000/room/demo-room-01`.
+   - In the name prompt, enter `Bob` and click **Join room**.
+   - The editor opens with header badge: `Room: demo-room-01 · You: Bob` with a distinct colour dot (e.g. Blue `#2563eb`).
+   - In **Window B** console, run:
+     ```javascript
+     Array.from(window.awareness.getStates().values())
+     // -> [{ user: { name: 'Alice', color: '#e11d48' } }, { user: { name: 'Bob', color: '#2563eb' } }]
+     ```
+   - In **Window A** console, re-run:
+     ```javascript
+     Array.from(window.awareness.getStates().values())
+     // -> Both Alice and Bob are present, verified synchronized over the WebSocket relay.
+     ```
