@@ -78,6 +78,27 @@ public class RoomService {
         return findBySession(room, sessionId);
     }
 
+    /**
+     * Change a member's role and recompute its permissions (US-27, V2.17).
+     * An Observer gets {@code can_edit:false, can_run:false}; a participant gets
+     * the preset's default edit access (FR19.2). Returns the updated member, or
+     * {@code null} if the room or member is unknown.
+     */
+    public synchronized Member changeRole(String roomId, String memberId, Role newRole) {
+        Room room = store.get(roomId);
+        if (room == null) {
+            return null;
+        }
+        Member member = room.getMembers().get(memberId);
+        if (member == null) {
+            return null;
+        }
+        member.setRole(newRole);
+        member.setCanEdit(computeCanEdit(room, newRole));
+        member.setCanRun(newRole != Role.OBSERVER);
+        return member;
+    }
+
     // ----- helpers -----
 
     private boolean isOwner(Room room, String ownerToken) {
