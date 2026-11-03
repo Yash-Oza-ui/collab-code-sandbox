@@ -48,11 +48,16 @@ class ExplainResponse(BaseModel):
 @router.post("/explain", response_model=ExplainResponse)
 async def explain_failure(payload: ExplainRequest, request: Request) -> ExplainResponse:
     """Explain a failed run in plain prose using LLM API (FR13.1, T-16)."""
-    # Track request_id for consistent error envelope responses
+    # Publish validated metadata into request.state for the logging middleware.
+    # Only safe, non-user-text metadata fields are stored — never code/stderr.
     request.state.request_id = payload.request_id
+    request.state.room_id = payload.room_id
+    request.state.request_type = payload.request_type
+    request.state.language = payload.language
 
     # Enforce privacy consent gate (FR12.2, contract §5)
     if not payload.consent:
+        request.state.error_code = "CONSENT_MISSING"
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail={
@@ -80,6 +85,7 @@ async def explain_failure(payload: ExplainRequest, request: Request) -> ExplainR
         )
 
     except LLMTimeoutError as exc:
+        request.state.error_code = exc.code
         raise HTTPException(
             status_code=status.HTTP_504_GATEWAY_TIMEOUT,
             detail={
@@ -90,6 +96,7 @@ async def explain_failure(payload: ExplainRequest, request: Request) -> ExplainR
         ) from exc
 
     except LLMProviderError as exc:
+        request.state.error_code = exc.code
         raise HTTPException(
             status_code=exc.status_code,
             detail={
@@ -101,6 +108,7 @@ async def explain_failure(payload: ExplainRequest, request: Request) -> ExplainR
 
     except Exception as exc:
         # Non-sensitive error logging (NFR8.2: no raw code or stderr logged)
+        request.state.error_code = "PROVIDER_ERROR"
         logger.error(
             "Unexpected error in explain endpoint for request_id=%s: %s",
             payload.request_id,
