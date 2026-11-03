@@ -52,6 +52,11 @@ class DocumentHandlerUnitTest {
     }
 
     @Test
+    void nullFrame_isNotDocumentChange() {
+        assertThat(DocumentHandler.isDocumentChange(null)).isFalse();
+    }
+
+    @Test
     void emptyFrame_isNotDocumentChange() {
         assertThat(DocumentHandler.isDocumentChange(new byte[0])).isFalse();
     }

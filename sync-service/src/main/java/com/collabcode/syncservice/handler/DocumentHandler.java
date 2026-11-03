@@ -150,14 +150,27 @@ public class DocumentHandler extends AbstractWebSocketHandler {
 
     public DocumentHandler(RoomStore roomStore,
                            RoomService roomService,
+                           RoomRegistry registry) {
+        this(roomStore, roomService, registry, registry, new ObjectMapper());
+    }
+
+    public DocumentHandler(RoomStore roomStore,
+                           RoomService roomService,
+                           RoomRegistry registry,
+                           ObjectMapper objectMapper) {
+        this(roomStore, roomService, registry, registry, objectMapper);
+    }
+
+    public DocumentHandler(RoomStore roomStore,
+                           RoomService roomService,
                            RoomRegistry registry,
                            RoomRegistry controlRegistry,
                            ObjectMapper objectMapper) {
         this.roomStore = roomStore;
         this.roomService = roomService;
         this.registry = registry;
-        this.controlRegistry = controlRegistry;
-        this.objectMapper = objectMapper;
+        this.controlRegistry = controlRegistry != null ? controlRegistry : registry;
+        this.objectMapper = objectMapper != null ? objectMapper : new ObjectMapper();
     }
 
     // -----------------------------------------------------------------------
@@ -328,7 +341,7 @@ public class DocumentHandler extends AbstractWebSocketHandler {
      * </ul>
      */
     public static boolean isDocumentChange(byte[] bytes) {
-        if (bytes.length < 2) {
+        if (bytes == null || bytes.length < 2) {
             return false;
         }
         return bytes[0] == YJS_SYNC && (bytes[1] == YJS_SYNC_STEP2 || bytes[1] == YJS_SYNC_UPDATE);

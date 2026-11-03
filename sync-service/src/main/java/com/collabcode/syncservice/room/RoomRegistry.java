@@ -85,6 +85,9 @@ public class RoomRegistry {
      * originator. Used by the internal broadcast endpoint (section 5) which
      * must deliver to <em>every</em> connection including the caller's.
      *
+     * <p>In T-20, internal broadcasts and roster updates carry text messages
+     * destined for control-socket sessions only (sessions without {@code docId}).
+     *
      * @param roomId room to look up
      * @return snapshot list; empty (not null) when the room has no connections
      */
@@ -92,7 +95,7 @@ public class RoomRegistry {
         List<WebSocketSession> raw = rooms.getOrDefault(roomId, Collections.emptyList());
         List<WebSocketSession> result = new ArrayList<>(raw.size());
         for (WebSocketSession s : raw) {
-            if (s.isOpen()) {
+            if (s.isOpen() && s.getAttributes().get("docId") == null) {
                 result.add(s);
             }
         }
@@ -115,7 +118,9 @@ public class RoomRegistry {
         if (sessionId == null) return null;
         List<WebSocketSession> raw = rooms.getOrDefault(roomId, Collections.emptyList());
         for (WebSocketSession s : raw) {
-            if (s.isOpen() && sessionId.equals(s.getAttributes().get("sessionId"))) {
+            if (s.isOpen()
+                    && sessionId.equals(s.getAttributes().get("sessionId"))
+                    && s.getAttributes().get("docId") == null) {
                 return s;
             }
         }

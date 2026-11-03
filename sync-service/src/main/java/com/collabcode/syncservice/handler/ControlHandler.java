@@ -81,12 +81,18 @@ public class ControlHandler extends AbstractWebSocketHandler {
 
     public ControlHandler(RoomStore roomStore,
                           RoomService roomService,
+                          RoomRegistry registry) {
+        this(roomStore, roomService, registry, new ObjectMapper());
+    }
+
+    public ControlHandler(RoomStore roomStore,
+                          RoomService roomService,
                           RoomRegistry registry,
                           ObjectMapper objectMapper) {
         this.roomStore = roomStore;
         this.roomService = roomService;
         this.registry = registry;
-        this.objectMapper = objectMapper;
+        this.objectMapper = objectMapper != null ? objectMapper : new ObjectMapper();
     }
 
     // -----------------------------------------------------------------------

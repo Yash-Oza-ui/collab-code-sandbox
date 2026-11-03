@@ -5,11 +5,9 @@ import com.collabcode.syncservice.handler.DocumentHandler;
 import com.collabcode.syncservice.room.RoomRegistry;
 import com.collabcode.syncservice.room.RoomService;
 import com.collabcode.syncservice.room.RoomStore;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.context.annotation.Primary;
 import org.springframework.web.socket.config.annotation.EnableWebSocket;
 import org.springframework.web.socket.config.annotation.WebSocketConfigurer;
 import org.springframework.web.socket.config.annotation.WebSocketHandlerRegistry;
@@ -27,12 +25,6 @@ import org.springframework.web.socket.server.standard.ServletServerContainerFact
  *       1 MiB limit) plus the edit-permission check (CR13).</li>
  * </ul>
  *
- * <p>Two separate {@link RoomRegistry} beans are declared so that the control
- * registry and the document registry track their own sessions independently.
- * The {@link DocumentHandler} receives both registries: its own for binary relay,
- * and the control registry so it can route {@code edit-rejected} to the correct
- * control session.
- *
  * <p>Origin enforcement: only requests from {@code CLIENT_ORIGIN} are allowed
  * through the WebSocket handshake. {@code *} is accepted in integration tests;
  * never use {@code *} in production.
@@ -47,47 +39,14 @@ public class WebSocketConfig implements WebSocketConfigurer {
 
     private final RoomStore roomStore;
     private final RoomService roomService;
-    private final ObjectMapper objectMapper;
+    private final RoomRegistry roomRegistry;
 
     public WebSocketConfig(RoomStore roomStore,
                            RoomService roomService,
-                           ObjectMapper objectMapper) {
+                           RoomRegistry roomRegistry) {
         this.roomStore = roomStore;
         this.roomService = roomService;
-        this.objectMapper = objectMapper;
-    }
-
-    // -----------------------------------------------------------------------
-    // Registry beans — one per socket type so each tracks its own sessions
-    // -----------------------------------------------------------------------
-
-    /**
-     * Registry for control-socket sessions ({@code /ws/rooms/{room_id}}).
-     * Named explicitly so Spring can inject it by qualifier where needed.
-     */
-    @Bean("controlRegistry")
-    public RoomRegistry controlRegistry() {
-        return new RoomRegistry();
-    }
-
-    /**
-     * Registry for document-socket sessions ({@code /ws/rooms/{room_id}/docs/{doc_id}}).
-     */
-    @Bean("documentRegistry")
-    public RoomRegistry documentRegistry() {
-        return new RoomRegistry();
-    }
-
-    /**
-     * The legacy single-registry bean kept for the existing
-     * {@link com.collabcode.syncservice.internal.InternalMessageController}
-     * and any other code that injects {@link RoomRegistry} without a qualifier.
-     * It now delegates to the control registry (internal broadcasts go to control sessions).
-     */
-    @Bean
-    @Primary
-    public RoomRegistry roomRegistry() {
-        return controlRegistry();
+        this.roomRegistry = roomRegistry;
     }
 
     // -----------------------------------------------------------------------
@@ -96,16 +55,12 @@ public class WebSocketConfig implements WebSocketConfigurer {
 
     @Bean
     public ControlHandler controlHandler() {
-        return new ControlHandler(roomStore, roomService, controlRegistry(), objectMapper);
+        return new ControlHandler(roomStore, roomService, roomRegistry);
     }
 
     @Bean
     public DocumentHandler documentHandler() {
-        return new DocumentHandler(
-                roomStore, roomService,
-                documentRegistry(),   // doc-socket registry (for binary relay)
-                controlRegistry(),    // control registry (for edit-rejected delivery)
-                objectMapper);
+        return new DocumentHandler(roomStore, roomService, roomRegistry);
     }
 
     // -----------------------------------------------------------------------
