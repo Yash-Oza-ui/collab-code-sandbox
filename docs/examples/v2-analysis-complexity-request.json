@@ -1,0 +1,26 @@
+{
+  "request_id": "7a3e2b10-6c5d-4f8a-9e12-3456789abcde",
+  "room_id": "Zq8-Lw2Ef6Th0Yx4Rn7JbA",
+  "analysis_id": "8b4f3c21-7d6e-4a9b-0f23-456789abcdef",
+  "request_type": "complexity",
+  "language": "python",
+  "consent": true,
+  "ai_enabled": true,
+  "code": "def find_duplicates(arr):\n    dups = []\n    for i in range(len(arr)):\n        for j in range(i + 1, len(arr)):\n            if arr[i] == arr[j]:\n                dups.append(arr[i])\n    return dups",
+  "measurements": [
+    {
+      "input_size": 100,
+      "runtimes_ms": [1.12, 1.15, 1.14]
+    },
+    {
+      "input_size": 200,
+      "runtimes_ms": [4.45, 4.52, 4.48]
+    },
+    {
+      "input_size": 400,
+      "runtimes_ms": [17.85, 18.02, 17.91]
+    }
+  ],
+  "suggested_patch": "def find_duplicates(arr):\n    seen = set()\n    dups = []\n    for x in arr:\n        if x in seen:\n            dups.append(x)\n        else:\n            seen.add(x)\n    return dups",
+  "suggested_patch_runtimes_ms": [1.82, 1.79, 1.85]
+}
