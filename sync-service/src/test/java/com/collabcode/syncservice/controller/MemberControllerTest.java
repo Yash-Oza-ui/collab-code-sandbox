@@ -42,16 +42,21 @@ class MemberControllerTest {
         return "http://localhost:" + port;
     }
 
-    /** Create a Pair/Teach-Interview room, returning [roomId, ownerToken]. */
-    private String[] createPairRoom() throws Exception {
+    /** Create a room from a JSON body, returning [roomId, ownerToken]. */
+    private String[] createRoom(String body) throws Exception {
         HttpRequest req = HttpRequest.newBuilder()
                 .uri(URI.create(base() + "/v1/rooms"))
                 .header("Content-Type", "application/json")
-                .POST(HttpRequest.BodyPublishers.ofString("{\"mode\":\"pair\",\"preset\":\"teach_interview\"}"))
+                .POST(HttpRequest.BodyPublishers.ofString(body))
                 .build();
         HttpResponse<String> res = http.send(req, HttpResponse.BodyHandlers.ofString());
         JsonNode b = om.readTree(res.body());
         return new String[]{b.get("room_id").asText(), b.get("owner_token").asText()};
+    }
+
+    /** Create a Pair/Teach-Interview room, returning [roomId, ownerToken]. */
+    private String[] createPairRoom() throws Exception {
+        return createRoom("{\"mode\":\"pair\",\"preset\":\"teach_interview\"}");
     }
 
     private HttpResponse<String> patch(String roomId, String memberId, String sessionId,
@@ -153,5 +158,94 @@ class MemberControllerTest {
         HttpResponse<String> res = patch(room[0], hostId, "host-sess", room[1], "{\"role\":\"observer\"}");
         assertThat(res.statusCode()).isEqualTo(422);
         assertThat(errorCode(res)).isEqualTo("INVALID_REQUEST");
+    }
+
+    @Test
+    void missingSessionIdHeader_isInvalidRequest() throws Exception {
+        String[] room = createPairRoom();
+        String guestId = roomService.join(room[0], "guest-sess", "Guest", null).getMember().getMemberId();
+
+        HttpResponse<String> res = patch(room[0], guestId, null, room[1], "{\"role\":\"observer\"}");
+        assertThat(res.statusCode()).isEqualTo(422);
+        assertThat(errorCode(res)).isEqualTo("INVALID_REQUEST");
+    }
+
+    @Test
+    void joinedGuestWithoutToken_isNotOwner() throws Exception {
+        String[] room = createPairRoom();
+        roomService.join(room[0], "host-sess", "Host", room[1]);
+        roomService.join(room[0], "guest-sess", "Guest", null);
+        String targetId = roomService.join(room[0], "other-sess", "Other", null).getMember().getMemberId();
+
+        // a real guest, using their own session id, sends no owner token
+        HttpResponse<String> res = patch(room[0], targetId, "guest-sess", null, "{\"role\":\"observer\"}");
+        assertThat(res.statusCode()).isEqualTo(403);
+        assertThat(errorCode(res)).isEqualTo("NOT_OWNER");
+    }
+
+    @Test
+    void observerBackToParticipant_teachInterview_canEditFalse() throws Exception {
+        String[] room = createPairRoom(); // teach_interview
+        roomService.join(room[0], "host-sess", "Host", room[1]);
+        String guestId = roomService.join(room[0], "guest-sess", "Guest", null).getMember().getMemberId();
+
+        patch(room[0], guestId, "host-sess", room[1], "{\"role\":\"observer\"}");
+        HttpResponse<String> res = patch(room[0], guestId, "host-sess", room[1], "{\"role\":\"participant\"}");
+
+        assertThat(res.statusCode()).isEqualTo(200);
+        JsonNode p = om.readTree(res.body()).get("permissions");
+        assertThat(p.get("can_run").asBoolean()).isTrue();
+        assertThat(p.get("can_edit").asBoolean()).isFalse(); // teach_interview: only the Host edits
+    }
+
+    @Test
+    void observerBackToParticipant_debugTogether_canEditTrue() throws Exception {
+        String[] room = createRoom("{\"mode\":\"pair\",\"preset\":\"debug_together\"}");
+        roomService.join(room[0], "host-sess", "Host", room[1]);
+        String guestId = roomService.join(room[0], "guest-sess", "Guest", null).getMember().getMemberId();
+
+        patch(room[0], guestId, "host-sess", room[1], "{\"role\":\"observer\"}");
+        HttpResponse<String> res = patch(room[0], guestId, "host-sess", room[1], "{\"role\":\"participant\"}");
+
+        assertThat(res.statusCode()).isEqualTo(200);
+        JsonNode p = om.readTree(res.body()).get("permissions");
+        assertThat(p.get("can_run").asBoolean()).isTrue();
+        assertThat(p.get("can_edit").asBoolean()).isTrue(); // debug_together: everyone edits
+    }
+
+    @Test
+    void settingSameRoleTwice_returns200() throws Exception {
+        String[] room = createPairRoom();
+        roomService.join(room[0], "host-sess", "Host", room[1]);
+        String guestId = roomService.join(room[0], "guest-sess", "Guest", null).getMember().getMemberId();
+
+        assertThat(patch(room[0], guestId, "host-sess", room[1], "{\"role\":\"observer\"}").statusCode())
+                .isEqualTo(200);
+        assertThat(patch(room[0], guestId, "host-sess", room[1], "{\"role\":\"observer\"}").statusCode())
+                .isEqualTo(200);
+    }
+
+    @Test
+    void missingBody_isInvalidRequest() throws Exception {
+        String[] room = createPairRoom();
+        roomService.join(room[0], "host-sess", "Host", room[1]);
+        String guestId = roomService.join(room[0], "guest-sess", "Guest", null).getMember().getMemberId();
+
+        HttpResponse<String> res = patch(room[0], guestId, "host-sess", room[1], "");
+        assertThat(res.statusCode()).isEqualTo(422);
+        assertThat(errorCode(res)).isEqualTo("INVALID_REQUEST");
+    }
+
+    @Test
+    void openModeObserver_omitsCanEdit() throws Exception {
+        String[] room = createRoom("{\"mode\":\"open\",\"language\":\"python\"}");
+        roomService.join(room[0], "host-sess", "Host", room[1]);
+        String guestId = roomService.join(room[0], "guest-sess", "Guest", null).getMember().getMemberId();
+
+        HttpResponse<String> res = patch(room[0], guestId, "host-sess", room[1], "{\"role\":\"observer\"}");
+        assertThat(res.statusCode()).isEqualTo(200);
+        JsonNode p = om.readTree(res.body()).get("permissions");
+        assertThat(p.has("can_run")).isTrue();
+        assertThat(p.has("can_edit")).isFalse(); // Open mode omits can_edit
     }
 }

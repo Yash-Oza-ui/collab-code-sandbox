@@ -49,6 +49,13 @@ public class MemberController {
             @RequestHeader(value = "X-Owner-Token", required = false) String ownerToken,
             @RequestBody(required = false) UpdateMemberRequest body) {
 
+        // Missing or malformed caller identity is a client error (V2.6),
+        // distinct from a well-formed session that has not joined the room.
+        if (sessionId == null || sessionId.isBlank()) {
+            return error(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_REQUEST",
+                    "Header 'X-Session-Id' is required.");
+        }
+
         Room room = store.get(roomId);
         if (room == null) {
             return error(HttpStatus.NOT_FOUND, "ROOM_NOT_FOUND", "Room not found.");
@@ -78,13 +85,16 @@ public class MemberController {
                     "The Host cannot change their own role.");
         }
 
-        if (!room.getMembers().containsKey(memberId)) {
+        Member updated = roomService.changeRole(roomId, memberId, newRole);
+        if (updated == null) {
+            // No such member, or it was removed between checks.
             return error(HttpStatus.NOT_FOUND, "MEMBER_NOT_FOUND", "Member not found in this room.");
         }
-
-        Member updated = roomService.changeRole(roomId, memberId, newRole);
-        // The new roster is pushed to the room by the control-socket layer; the
-        // response returns the member as it appears in the roster (V2.17).
+        // The role change is applied to the server model and returned as it
+        // appears in the roster (V2.17). Broadcasting the new roster to the room
+        // (V2.17 rule 4) and the edit-rejected handling for a now-Observer
+        // (rule 3) are done by the control-socket layer (the T-20 socket split),
+        // which is not yet in main.
         return ResponseEntity.ok(RoomMessages.memberEntry(room, updated));
     }
 
