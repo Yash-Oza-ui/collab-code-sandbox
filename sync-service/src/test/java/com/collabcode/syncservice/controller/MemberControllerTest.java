@@ -161,6 +161,18 @@ class MemberControllerTest {
     }
 
     @Test
+    void cannotDemoteAnotherHost() throws Exception {
+        String[] room = createPairRoom();
+        roomService.join(room[0], "host-sess", "Host", room[1]);
+        // a second Host session (same owner token, different session/name)
+        String host2Id = roomService.join(room[0], "host2-sess", "Host2", room[1]).getMember().getMemberId();
+
+        HttpResponse<String> res = patch(room[0], host2Id, "host-sess", room[1], "{\"role\":\"observer\"}");
+        assertThat(res.statusCode()).isEqualTo(422);
+        assertThat(errorCode(res)).isEqualTo("INVALID_REQUEST");
+    }
+
+    @Test
     void missingSessionIdHeader_isInvalidRequest() throws Exception {
         String[] room = createPairRoom();
         String guestId = roomService.join(room[0], "guest-sess", "Guest", null).getMember().getMemberId();

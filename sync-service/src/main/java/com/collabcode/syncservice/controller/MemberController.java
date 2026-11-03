@@ -79,15 +79,21 @@ public class MemberController {
                     "Field 'role' must be 'participant' or 'observer'.");
         }
 
-        // The Host cannot change their own role (V2.17, rule 1).
-        if (memberId.equals(caller.getMemberId())) {
+        // A Host's role cannot be changed here — not the caller's own, and not a
+        // second Host session (V2.17, rule 1). Transferring or removing the Host
+        // is FR31.1, a separate story.
+        Member target = room.getMembers().get(memberId);
+        if (target == null) {
+            return error(HttpStatus.NOT_FOUND, "MEMBER_NOT_FOUND", "Member not found in this room.");
+        }
+        if (target.getRole() == Role.HOST) {
             return error(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_REQUEST",
-                    "The Host cannot change their own role.");
+                    "The Host's role cannot be changed here.");
         }
 
         Member updated = roomService.changeRole(roomId, memberId, newRole);
         if (updated == null) {
-            // No such member, or it was removed between checks.
+            // Removed between the lookup and the change.
             return error(HttpStatus.NOT_FOUND, "MEMBER_NOT_FOUND", "Member not found in this room.");
         }
         // The role change is applied to the server model and returned as it
