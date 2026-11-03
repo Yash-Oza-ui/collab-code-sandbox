@@ -60,7 +60,10 @@ public class WebSocketConfig implements WebSocketConfigurer {
 
     @Bean
     public DocumentHandler documentHandler() {
-        return new DocumentHandler(roomStore, roomService, roomRegistry);
+        // Both handlers share the registry, but DocumentHandler explicitly uses
+        // the control-socket view to route edit-rejected notifications.
+        return new DocumentHandler(roomStore, roomService, roomRegistry, roomRegistry,
+                new com.fasterxml.jackson.databind.ObjectMapper());
     }
 
     // -----------------------------------------------------------------------

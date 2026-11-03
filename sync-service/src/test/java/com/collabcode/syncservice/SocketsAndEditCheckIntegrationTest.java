@@ -78,6 +78,24 @@ class SocketsAndEditCheckIntegrationTest {
         for (int i = 0; i < n; i++) c.pollText(2, TimeUnit.SECONDS);
     }
 
+    /** Read until a matching control message arrives, ignoring asynchronous roster updates. */
+    private String pollControlMessage(WsClient client, String expectedType,
+                                      long timeout, TimeUnit unit) throws InterruptedException {
+        long deadline = System.nanoTime() + unit.toNanos(timeout);
+        while (System.nanoTime() < deadline) {
+            long remaining = deadline - System.nanoTime();
+            String message = client.pollText(Math.max(1, TimeUnit.NANOSECONDS.toMillis(remaining)),
+                    TimeUnit.MILLISECONDS);
+            if (message == null) {
+                return null;
+            }
+            if (message.contains("\"type\":\"" + expectedType + "\"")) {
+                return message;
+            }
+        }
+        return null;
+    }
+
     // -----------------------------------------------------------------------
     // 1. Join + joined + roster flow on the control socket
     // -----------------------------------------------------------------------
@@ -121,7 +139,7 @@ class SocketsAndEditCheckIntegrationTest {
 
             sendJoin(b, "Alice", null); // same name, different session
 
-            String refused = b.pollText(3, TimeUnit.SECONDS);
+            String refused = pollControlMessage(b, "join-refused", 3, TimeUnit.SECONDS);
             assertThat(refused)
                     .as("Second session with same name must get join-refused")
                     .contains("\"type\":\"join-refused\"", "NAME_TAKEN");
@@ -162,7 +180,7 @@ class SocketsAndEditCheckIntegrationTest {
                         .isNull();
 
                 // B's control socket must receive edit-rejected with T-17 contract reason
-                String rejected = ctrlB.pollText(3, TimeUnit.SECONDS);
+                String rejected = pollControlMessage(ctrlB, "edit-rejected", 3, TimeUnit.SECONDS);
                 assertThat(rejected)
                         .as("Forbidden sender must receive edit-rejected on control socket")
                         .contains("\"type\":\"edit-rejected\"")
@@ -190,7 +208,7 @@ class SocketsAndEditCheckIntegrationTest {
                 byte[] updateFrame = {0x00, 0x02, 0x10, 0x20};
                 docB.sendBinary(updateFrame);
 
-                String rejected = ctrlB.pollText(3, TimeUnit.SECONDS);
+                String rejected = pollControlMessage(ctrlB, "edit-rejected", 3, TimeUnit.SECONDS);
                 assertThat(rejected)
                         .as("In Open mode, rejection reason must be 'not_module_writer'")
                         .contains("\"type\":\"edit-rejected\"")
@@ -233,7 +251,9 @@ class SocketsAndEditCheckIntegrationTest {
                         .isEqualTo(docChangeFrame);
 
                 // No edit-rejected for B
-                assertThat(ctrlB.pollText(300, TimeUnit.MILLISECONDS))
+                String unexpectedRejection = pollControlMessage(
+                        ctrlB, "edit-rejected", 300, TimeUnit.MILLISECONDS);
+                assertThat(unexpectedRejection)
                         .as("Permitted sender must NOT receive edit-rejected")
                         .isNull();
             }
