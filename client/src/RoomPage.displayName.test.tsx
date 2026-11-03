@@ -162,4 +162,133 @@ describe('RoomPage display-name and colour presence', () => {
     expect((window as unknown as { awareness?: Awareness }).awareness).toBeUndefined()
     expect(awarenessRef.current).toBeNull()
   })
+
+  it('synchronizes Alice and Bob presence between two connected RoomPage instances over relay', async () => {
+    class Relay {
+      clients = new Set<RelaySocket>()
+      broadcast(sender: RelaySocket, data: ArrayBuffer | Uint8Array) {
+        const uint8 = data instanceof ArrayBuffer ? new Uint8Array(data) : data
+        if (uint8.length === 0) return
+        for (const c of this.clients) {
+          if (c !== sender) c.receive(uint8)
+        }
+        if (uint8[0] === 1) sender.receive(uint8)
+      }
+    }
+
+    const relay = new Relay()
+
+    class RelaySocket {
+      readyState = 1
+      binaryType = 'arraybuffer'
+      url: string
+      onopen: ((e: Event) => void) | null = null
+      onmessage: ((e: MessageEvent) => void) | null = null
+      onclose: ((e: CloseEvent) => void) | null = null
+      constructor(url: string) {
+        this.url = url
+        relay.clients.add(this)
+        queueMicrotask(() => this.onopen?.(new Event('open')))
+      }
+      send(data: unknown) {
+        if (data instanceof Uint8Array || data instanceof ArrayBuffer) {
+          relay.broadcast(this, data)
+        }
+      }
+      receive(data: Uint8Array) {
+        const buf = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength)
+        this.onmessage?.(new MessageEvent('message', { data: buf }))
+      }
+      close() {
+        relay.clients.delete(this)
+        this.onclose?.(new CloseEvent('close'))
+      }
+    }
+
+    const containerA = document.createElement('div')
+    const containerB = document.createElement('div')
+    document.body.appendChild(containerA)
+    document.body.appendChild(containerB)
+
+    const rootA = createRoot(containerA)
+    const rootB = createRoot(containerB)
+
+    const awarenessRefA: RefObject<Awareness | null> = { current: null }
+    const awarenessRefB: RefObject<Awareness | null> = { current: null }
+
+    originalPathname = window.location.pathname
+    window.history.replaceState({}, '', '/room/shared-room-101')
+
+    await act(async () => {
+      rootA.render(
+        <RoomPage
+          awarenessRef={awarenessRefA}
+          wsOptions={{
+            WebSocketClass: RelaySocket as unknown as typeof WebSocket,
+            sessionId: '11111111-1111-4111-8111-111111111111',
+          }}
+        />,
+      )
+    })
+
+    // Alice joins
+    const inputA = containerA.querySelector<HTMLInputElement>('#display-name')!
+    const formA = containerA.querySelector<HTMLFormElement>('form')!
+    await act(async () => {
+      inputA.value = 'Alice'
+      formA.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+    })
+
+    // Render Bob
+    await act(async () => {
+      rootB.render(
+        <RoomPage
+          awarenessRef={awarenessRefB}
+          wsOptions={{
+            WebSocketClass: RelaySocket as unknown as typeof WebSocket,
+            sessionId: '22222222-2222-4222-8222-222222222222',
+          }}
+        />,
+      )
+    })
+
+    // Bob joins
+    const inputB = containerB.querySelector<HTMLInputElement>('#display-name')!
+    const formB = containerB.querySelector<HTMLFormElement>('form')!
+    await act(async () => {
+      inputB.value = 'Bob'
+      formB.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+    })
+
+    // Allow awareness updates to propagate through the relay
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 50))
+    })
+
+    const statesA = Array.from(awarenessRefA.current?.getStates().values() ?? [])
+    const statesB = Array.from(awarenessRefB.current?.getStates().values() ?? [])
+
+    const aliceInA = statesA.find((s) => s.user?.name === 'Alice')
+    const bobInA = statesA.find((s) => s.user?.name === 'Bob')
+    const aliceInB = statesB.find((s) => s.user?.name === 'Alice')
+    const bobInB = statesB.find((s) => s.user?.name === 'Bob')
+
+    expect(aliceInA?.user?.name).toBe('Alice')
+    expect(bobInA?.user?.name).toBe('Bob')
+    expect(aliceInB?.user?.name).toBe('Alice')
+    expect(bobInB?.user?.name).toBe('Bob')
+
+    // Assigned colours are distinct
+    expect(aliceInA?.user?.color).not.toBe(bobInA?.user?.color)
+    expect(aliceInB?.user?.color).toBe(aliceInA?.user?.color)
+    expect(bobInB?.user?.color).toBe(bobInA?.user?.color)
+
+    // Unmount
+    await act(async () => {
+      rootA.unmount()
+      rootB.unmount()
+    })
+    containerA.remove()
+    containerB.remove()
+  })
 })
