@@ -14,6 +14,12 @@ const UUID_V4_REGEX =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
 /**
+ * Standard WebSocket readyState constants (RFC 6455).
+ */
+const WS_CONNECTING = 0
+const WS_OPEN = 1
+
+/**
  * Generates a valid UUID v4 compliant with RFC 4122 (T-06 §3.3).
  */
 export function generateUuidV4(): string {
@@ -128,7 +134,7 @@ export function handleIncomingAwarenessFrame(
         awareness,
         Array.from(awareness.getStates().keys()),
       )
-      if (!('readyState' in ws) || ws.readyState === 1 /* WebSocket.OPEN */) {
+      if (!('readyState' in ws) || ws.readyState === WS_OPEN) {
         ws.send(response)
       }
     }
@@ -185,7 +191,7 @@ export function connectAwarenessWs(
     // Avoid re-transmitting frames we received from this websocket
     if (origin === ws) return
     const changedClients = added.concat(updated).concat(removed)
-    if (ws.readyState === WebSocketClass.OPEN && changedClients.length > 0) {
+    if (ws.readyState === WS_OPEN && changedClients.length > 0) {
       ws.send(encodeAwarenessMessage(awareness, changedClients))
     }
   }
@@ -210,7 +216,7 @@ export function connectAwarenessWs(
 
   const destroy = () => {
     awareness.off('update', onAwarenessUpdate)
-    if (ws.readyState === WebSocketClass.OPEN) {
+    if (ws.readyState === WS_OPEN) {
       try {
         removeAwarenessStates(awareness, [awareness.clientID], ws)
         ws.send(encodeAwarenessMessage(awareness, [awareness.clientID]))
@@ -218,11 +224,10 @@ export function connectAwarenessWs(
         // ignore send error on teardown
       }
       ws.close()
-    } else if (ws.readyState === WebSocketClass.CONNECTING) {
+    } else if (ws.readyState === WS_CONNECTING) {
       ws.close()
     }
   }
 
   return { ws, destroy }
 }
-
