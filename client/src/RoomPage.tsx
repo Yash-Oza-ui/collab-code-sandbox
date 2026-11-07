@@ -1,10 +1,19 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { RefObject } from 'react'
+import type { Awareness } from 'y-protocols/awareness'
 import type * as Y from 'yjs'
 import Editor from '@monaco-editor/react'
 import DisplayNamePrompt from './DisplayNamePrompt'
+import {
+  createAwareness,
+  getExistingUserColors,
+  setUserAwareness,
+  type AwarenessUserState,
+} from './awareness'
+import { connectAwarenessWs, type AwarenessWsConnection } from './awarenessWs'
 import { getRoomIdFromPath } from './roomId'
 import { useRoomDoc } from './roomDoc'
+import { pickUserColor } from './userColor'
 
 export interface RoomPageProps {
   /**
@@ -12,23 +21,154 @@ export interface RoomPageProps {
    * Enables US-01/US-02 integration and StrictMode regression testing.
    */
   docRef?: RefObject<Y.Doc | null>
+  /**
+   * Optional ref to expose the active Awareness instance.
+   * Enables tests and downstream US-03 live cursor / awareness integration.
+   */
+  awarenessRef?: RefObject<Awareness | null>
   /** Called once a guest has supplied a valid name; ready for awareness integration. */
-  onDisplayNameAccepted?: (displayName: string) => void
+  onDisplayNameAccepted?: (displayName: string, userColor?: string) => void
+  /**
+   * Optional WebSocket relay configuration or custom WebSocket implementation for testing.
+   */
+  wsOptions?: {
+    syncWsUrl?: string
+    sessionId?: string
+    WebSocketClass?: typeof WebSocket
+  }
 }
 
 // Reads the room id from the URL (T-06 section 3.2: /room/{room_id}).
 // Manages the Y.Doc lifecycle inside effect setup/cleanup (T-01).
+// Manages the Yjs Awareness lifecycle and user presence colour assignment (US-05 / FR14).
 export default function RoomPage(props: RoomPageProps = {}) {
-  const { docRef: externalDocRef, onDisplayNameAccepted } = props
+  const {
+    docRef: externalDocRef,
+    awarenessRef: externalAwarenessRef,
+    onDisplayNameAccepted,
+    wsOptions,
+  } = props
   const roomId = getRoomIdFromPath(window.location.pathname)
   const [displayName, setDisplayName] = useState<string | null>(null)
+  const [userColor, setUserColor] = useState<string | null>(null)
 
   // One Y.Doc is created inside effect setup and destroyed in its cleanup (T-01).
   const { docRef } = useRoomDoc(roomId, { docRef: externalDocRef })
 
+  const awarenessInstanceRef = useRef<Awareness | null>(null)
+  const connRef = useRef<AwarenessWsConnection | null>(null)
+
+  // Manage Awareness instance lifecycle tied to active Y.Doc and WebSocket relay
+  useEffect(() => {
+    const doc = docRef.current
+    if (!doc) return
+
+    const awareness = createAwareness(doc)
+    awarenessInstanceRef.current = awareness
+    if (externalAwarenessRef) {
+      externalAwarenessRef.current = awareness
+    }
+
+    // Expose awareness on window for browser console inspection (US-05 DoD #5)
+    if (typeof window !== 'undefined') {
+      ;(window as unknown as { awareness?: Awareness }).awareness = awareness
+    }
+
+    // Listen to remote awareness changes to automatically avoid color collisions once document socket connects
+    const handleAwarenessChange = () => {
+      const localState = awareness.getLocalState() as AwarenessUserState | null
+      const myColor = localState?.user?.color
+      const myName = localState?.user?.name
+      if (!myColor || !myName) return
+
+      const otherColors: string[] = []
+      let collisionWithLowerClientId = false
+
+      awareness.getStates().forEach((peerState, peerClientId) => {
+        if (peerClientId === awareness.clientID) return
+        const peer = (peerState as AwarenessUserState)?.user
+        if (peer?.color) {
+          otherColors.push(peer.color)
+          if (peer.color.toLowerCase() === myColor.toLowerCase()) {
+            if (peerClientId < awareness.clientID) {
+              collisionWithLowerClientId = true
+            }
+          }
+        }
+      })
+
+      if (collisionWithLowerClientId) {
+        const newColor = pickUserColor(otherColors, awareness.clientID)
+        if (newColor !== myColor) {
+          setUserAwareness(awareness, { name: myName, color: newColor })
+          setUserColor(newColor)
+        }
+      }
+    }
+
+    awareness.on('change', handleAwarenessChange)
+
+    // Connect awareness to room WebSocket relay if in a room (US-05 / T-20)
+    let wsCleanup: (() => void) | undefined
+    if (roomId) {
+      const conn = connectAwarenessWs({
+        roomId,
+        docId: 'main',
+        awareness,
+        syncWsUrl: wsOptions?.syncWsUrl,
+        sessionId: wsOptions?.sessionId,
+        WebSocketClass: wsOptions?.WebSocketClass,
+      })
+      connRef.current = conn
+      wsCleanup = () => {
+        conn.destroy()
+        if (connRef.current === conn) {
+          connRef.current = null
+        }
+      }
+    }
+
+    return () => {
+      awareness.off('change', handleAwarenessChange)
+      wsCleanup?.()
+      awareness.destroy()
+      if (awarenessInstanceRef.current === awareness) {
+        awarenessInstanceRef.current = null
+      }
+      if (externalAwarenessRef && externalAwarenessRef.current === awareness) {
+        externalAwarenessRef.current = null
+      }
+      if (
+        typeof window !== 'undefined' &&
+        (window as unknown as { awareness?: Awareness }).awareness === awareness
+      ) {
+        delete (window as unknown as { awareness?: Awareness }).awareness
+      }
+    }
+  }, [roomId, docRef, externalAwarenessRef, wsOptions])
+
+  // Keep presence updated in awareness whenever displayName and userColor are set or change
+  useEffect(() => {
+    const awareness = awarenessInstanceRef.current
+    if (awareness && displayName && userColor) {
+      setUserAwareness(awareness, { name: displayName, color: userColor })
+    }
+  }, [displayName, userColor])
+
   function handleDisplayNameAccepted(name: string) {
+    const awareness = awarenessInstanceRef.current
+    const existingColors = awareness ? getExistingUserColors(awareness) : []
+    const fallbackIndex = docRef.current?.clientID ?? 0
+    const color = pickUserColor(existingColors, fallbackIndex)
+
+    if (awareness) {
+      setUserAwareness(awareness, { name, color })
+    }
+
     setDisplayName(name)
-    onDisplayNameAccepted?.(name)
+    setUserColor(color)
+    connRef.current?.join(name)
+    onDisplayNameAccepted?.(name, color)
   }
 
   if (roomId && displayName === null) {
@@ -38,8 +178,23 @@ export default function RoomPage(props: RoomPageProps = {}) {
   return (
     <div className="room-page">
       <header className="room-header">
-        {roomId ? `Room: ${roomId}` : 'No room id in the URL (expected /room/{room_id})'}
-        {displayName ? ` · You: ${displayName}` : ''}
+        <span>{roomId ? `Room: ${roomId}` : 'No room id in the URL (expected /room/{room_id})'}</span>
+        {displayName && (
+          <>
+            <span className="room-header-separator" aria-hidden="true"> · </span>
+            <span className="room-user-badge" data-testid="room-user-badge">
+              {userColor && (
+                <span
+                  className="room-user-color-dot"
+                  data-testid="room-user-color-dot"
+                  style={{ backgroundColor: userColor }}
+                  aria-hidden="true"
+                />
+              )}
+              <span>You: {displayName}</span>
+            </span>
+          </>
+        )}
       </header>
       <div className="room-editor">
         <Editor
