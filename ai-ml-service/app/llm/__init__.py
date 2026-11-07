@@ -1,6 +1,7 @@
 """LLM integration module for AI/ML service (T-16, FR12, FR13, US-17)."""
 
 from app.llm.client import (
+    AIDisabledError,
     ConsentMissingError,
     LLMClient,
     LLMProviderError,
@@ -19,6 +20,7 @@ from app.llm.explainer import (
 from app.llm.prompts import EXPLAIN_SYSTEM_INSTRUCTION, build_explanation_prompt
 
 __all__ = [
+    "AIDisabledError",
     "ConsentMissingError",
     "LLMClient",
     "LLMProviderError",

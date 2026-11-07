@@ -94,13 +94,14 @@ if ! echo "$body_missing" | grep -q "skipped"; then
 fi
 pass ai-ml-service "consent missing returns HTTP 200 with skipped AI step CONSENT_MISSING (FR12.3)"
 
-# 3. Test: consent is true -> passes gate (returns 200, never fails with CONSENT_MISSING)
+# 3. Test: consent is true and ai_enabled is true -> passes gate (returns 200 or 502, never fails with CONSENT_MISSING)
 payload_consent_true='{
   "request_id": "test-int-consent-true-003",
   "room_id": "room-int-01",
   "request_type": "explanation",
   "language": "python",
   "consent": true,
+  "ai_enabled": true,
   "code": "print(1 / 0)",
   "stderr": "ZeroDivisionError: division by zero",
   "exit_code": 1,
@@ -159,3 +160,38 @@ if ! echo "$body_comp_false" | grep -q "nested_loops"; then
   exit 1
 fi
 pass ai-ml-service "POST /v1/analyses/complexity with consent=false returns HTTP 200 with slow_patterns and skipped AI step (T-18 v2)"
+
+# 5. Test: POST /v1/analyses/complexity with ai_enabled=false returns HTTP 200 with slow_patterns and AI_DISABLED (FR35, T-18 v2 §19)
+payload_ai_disabled='{
+  "request_id": "test-int-complexity-ai-disabled-005",
+  "room_id": "Zq8-Lw2Ef6Th0Yx4Rn7JbA",
+  "analysis_id": "an-int-002",
+  "request_type": "complexity",
+  "language": "python",
+  "consent": true,
+  "ai_enabled": false,
+  "code": "for i in range(10):\n    for j in range(10):\n        pass"
+}'
+
+resp_ai_disabled="$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST "$base/v1/analyses/complexity" \
+  -H "Content-Type: application/json" \
+  -d "$payload_ai_disabled")"
+
+status_ai_disabled="$(echo "$resp_ai_disabled" | grep 'HTTP_STATUS:' | cut -d':' -f2)"
+body_ai_disabled="$(echo "$resp_ai_disabled" | grep -v 'HTTP_STATUS:')"
+
+if [ "$status_ai_disabled" != "200" ]; then
+  fail ai-ml-service "expected HTTP 200 on /v1/analyses/complexity ai_enabled=false, got $status_ai_disabled. Body: $body_ai_disabled"
+  exit 1
+fi
+
+if ! echo "$body_ai_disabled" | grep -q "AI_DISABLED"; then
+  fail ai-ml-service "expected AI_DISABLED in complexity response on ai_enabled=false, got: $body_ai_disabled"
+  exit 1
+fi
+
+if ! echo "$body_ai_disabled" | grep -q "nested_loops"; then
+  fail ai-ml-service "expected nested_loops in complexity slow_patterns, got: $body_ai_disabled"
+  exit 1
+fi
+pass ai-ml-service "POST /v1/analyses/complexity with ai_enabled=false returns HTTP 200 with slow_patterns and AI_DISABLED (FR35)"

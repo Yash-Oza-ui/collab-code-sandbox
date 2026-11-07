@@ -43,7 +43,7 @@ class ComplexityRequest(BaseModel):
     request_type: Literal["complexity"]
     language: Literal["cpp", "python", "c", "java", "javascript"]
     consent: Optional[bool] = None
-    ai_enabled: bool = True
+    ai_enabled: Optional[bool] = None
     code: str
     measurements: list[MeasurementItem] = Field(default_factory=list)
     suggested_patch: Optional[str] = None
@@ -88,7 +88,7 @@ class CrashExplanationRequest(BaseModel):
     request_type: Literal["crash_explanation"]
     language: Literal["cpp", "python", "c", "java", "javascript"]
     consent: Optional[bool] = None
-    ai_enabled: bool = True
+    ai_enabled: Optional[bool] = None
     sanitizer_output: str
     code_snippet: str
 
@@ -211,6 +211,7 @@ async def analyze_complexity(payload: ComplexityRequest, request: Request) -> Co
         return await call_llm_with_consent(
             prompt=prompt,
             consent=payload.consent,
+            ai_enabled=payload.ai_enabled,
         )
 
     # 3. Rules-First Static Analysis with Central Consent/AI Gate (FR12.2, FR12.3, FR35)
@@ -306,7 +307,7 @@ async def explain_crash(payload: CrashExplanationRequest, request: Request) -> C
             explanation=None,
             suggested_fix=None,
         )
-    elif not payload.ai_enabled:
+    elif payload.ai_enabled is not True:
         ai_step = CrashAIStep(
             status="skipped",
             error_code="AI_DISABLED",
@@ -318,6 +319,7 @@ async def explain_crash(payload: CrashExplanationRequest, request: Request) -> C
             explanation = await generate_explanation(
                 language=payload.language,
                 consent=payload.consent,
+                ai_enabled=payload.ai_enabled,
                 failure_kind="crash",
                 exit_code=139,
                 stderr=payload.sanitizer_output,

@@ -9,6 +9,7 @@ import re
 from typing import Optional
 
 from app.llm.client import (
+    AIDisabledError,
     ConsentMissingError,
     LLMClient,
     LLMProviderError,
@@ -61,16 +62,18 @@ def enforce_sentence_limit(text: str, max_sentences: int = 3) -> str:
 async def call_llm_api(
     prompt: str,
     consent: Optional[bool] = None,
+    ai_enabled: Optional[bool] = None,
     api_key: Optional[str] = None,
     model: Optional[str] = None,
     base_url: Optional[str] = None,
     timeout_seconds: Optional[float] = None,
     client: Optional[LLMClient] = None,
 ) -> str:
-    """Call external LLM API routed through the central consent gate (FR12.2, US-17)."""
+    """Call external LLM API routed through the central consent gate (FR12.2, FR35, US-17)."""
     return await call_llm_with_consent(
         prompt=prompt,
         consent=consent,
+        ai_enabled=ai_enabled,
         client=client,
         api_key=api_key,
         model=model,
@@ -82,6 +85,7 @@ async def call_llm_api(
 async def generate_explanation(
     language: str,
     consent: Optional[bool] = None,
+    ai_enabled: Optional[bool] = None,
     failure_kind: Optional[str] = None,
     exit_code: Optional[int] = None,
     stderr: str = "",
@@ -96,7 +100,7 @@ async def generate_explanation(
     """Generate a 3-sentence plain prose failure explanation using LLM.
 
     Privacy & Consent compliance:
-    - FR12.2: If consent is missing or false, fails immediately at the gate without outbound calls.
+    - FR12.2, FR35: If consent is missing/false or ai_enabled is missing/false, fails immediately at the gate without outbound calls.
     - NFR8.2: Never logs raw code, stderr, or prompts.
     """
     # Safe logging of non-sensitive execution metadata
@@ -123,6 +127,7 @@ async def generate_explanation(
     raw_output = await call_llm_with_consent(
         prompt=prompt,
         consent=consent,
+        ai_enabled=ai_enabled,
         client=llm_client,
         api_key=api_key,
         model=model,

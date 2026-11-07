@@ -31,6 +31,7 @@ from app.llm import (
     LLMTimeoutError,
 )
 from app.llm.client import (
+    AIDisabledError,
     ConsentMissingError,
     LLMClient,
     call_llm_with_consent,
@@ -138,18 +139,57 @@ async def test_wrapper_consent_missing_raises_consent_missing_and_zero_calls():
 
 @pytest.mark.anyio
 async def test_wrapper_consent_true_calls_llm_client_exactly_once():
-    """Verify wrapper permits outbound call when consent=True and calls client exactly once."""
+    """Verify wrapper permits outbound call when consent=True AND ai_enabled=True, calling client exactly once."""
     mock_client = AsyncMock(spec=LLMClient)
     mock_client.complete = AsyncMock(return_value="Valid explanation.")
 
     result = await call_llm_with_consent(
         prompt="Explain error",
         consent=True,
+        ai_enabled=True,
         client=mock_client,
     )
 
     assert result == "Valid explanation."
     assert mock_client.complete.call_count == 1
+
+
+@pytest.mark.anyio
+async def test_wrapper_ai_disabled_raises_ai_disabled_and_zero_calls():
+    """Verify wrapper blocks outbound call when ai_enabled=False even if consent=True (FR35)."""
+    mock_client = AsyncMock(spec=LLMClient)
+    mock_client.complete = AsyncMock(return_value="mock answer")
+
+    with pytest.raises(AIDisabledError) as exc_info:
+        await call_llm_with_consent(
+            prompt="Explain error",
+            consent=True,
+            ai_enabled=False,
+            client=mock_client,
+        )
+
+    assert exc_info.value.code == "AI_DISABLED"
+    assert exc_info.value.status_code == 403
+    assert mock_client.complete.call_count == 0
+
+
+@pytest.mark.anyio
+async def test_wrapper_ai_missing_raises_ai_disabled_and_zero_calls():
+    """Verify wrapper blocks outbound call when ai_enabled is missing (None) even if consent=True (FR35)."""
+    mock_client = AsyncMock(spec=LLMClient)
+    mock_client.complete = AsyncMock(return_value="mock answer")
+
+    with pytest.raises(AIDisabledError) as exc_info:
+        await call_llm_with_consent(
+            prompt="Explain error",
+            consent=True,
+            ai_enabled=None,
+            client=mock_client,
+        )
+
+    assert exc_info.value.code == "AI_DISABLED"
+    assert exc_info.value.status_code == 403
+    assert mock_client.complete.call_count == 0
 
 
 # ============================================================================
@@ -406,10 +446,11 @@ def test_explain_endpoint_consent_false_returns_200_with_skipped_ai_step_and_zer
     assert mock_llm_complete.call_count == 0
 
 
-def test_explain_endpoint_consent_true_calls_llm_once():
-    """Test POST /v1/explain with consent=True returns HTTP 200 and calls LLM exactly once."""
+def test_explain_endpoint_consent_true_and_ai_enabled_calls_llm_once():
+    """Test POST /v1/explain with consent=True and ai_enabled=True returns HTTP 200 and calls LLM exactly once."""
     payload = dict(SAMPLE_EXPLAIN_PAYLOAD)
     payload["consent"] = True
+    payload["ai_enabled"] = True
 
     mock_fix = "The function divided by zero. Ensure denominator is non-zero."
     mock_llm_complete = AsyncMock(return_value=mock_fix)
@@ -422,6 +463,44 @@ def test_explain_endpoint_consent_true_calls_llm_once():
     assert data["explanation"] == mock_fix
     assert data["ai_step"]["status"] == "ok"
     assert mock_llm_complete.call_count == 1
+
+
+def test_explain_endpoint_ai_disabled_returns_200_with_skipped_ai_step_and_zero_llm_calls():
+    """Test POST /v1/explain with consent=True but ai_enabled=False returns HTTP 200 with AI_DISABLED and 0 calls."""
+    payload = dict(SAMPLE_EXPLAIN_PAYLOAD)
+    payload["consent"] = True
+    payload["ai_enabled"] = False
+
+    mock_llm_complete = AsyncMock(return_value="mock answer")
+    with patch("app.llm.client.LLMClient.complete", mock_llm_complete):
+        response = client.post("/v1/explain", json=payload)
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["explanation"] is None
+    assert len(data["slow_patterns"]) >= 1
+    assert data["ai_step"]["status"] == "skipped"
+    assert data["ai_step"]["error_code"] == "AI_DISABLED"
+    assert mock_llm_complete.call_count == 0
+
+
+def test_explain_endpoint_ai_missing_returns_200_with_skipped_ai_step_and_zero_llm_calls():
+    """Test POST /v1/explain with consent=True and missing ai_enabled returns HTTP 200 with AI_DISABLED and 0 calls."""
+    payload = dict(SAMPLE_EXPLAIN_PAYLOAD)
+    payload["consent"] = True
+    payload.pop("ai_enabled", None)
+
+    mock_llm_complete = AsyncMock(return_value="mock answer")
+    with patch("app.llm.client.LLMClient.complete", mock_llm_complete):
+        response = client.post("/v1/explain", json=payload)
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["explanation"] is None
+    assert len(data["slow_patterns"]) >= 1
+    assert data["ai_step"]["status"] == "skipped"
+    assert data["ai_step"]["error_code"] == "AI_DISABLED"
+    assert mock_llm_complete.call_count == 0
 
 
 # ============================================================================
@@ -541,3 +620,156 @@ def test_endpoint_usage_returns_200():
     data = response.json()
     assert "monthly_spend_usd" in data
     assert "cost_cap_reached" in data
+
+
+# ============================================================================
+# 8. Complete 7-Permutation Permission Matrix Tests (FR12.2, FR35, US-17)
+# ============================================================================
+
+
+@pytest.mark.parametrize(
+    "consent_val, ai_enabled_val, expected_status, expected_error_code, expected_calls",
+    [
+        (True, True, "ok", None, 1),
+        (True, False, "skipped", "AI_DISABLED", 0),
+        (False, True, "skipped", "CONSENT_MISSING", 0),
+        (False, False, "skipped", "CONSENT_MISSING", 0),
+        (True, "MISSING", "skipped", "AI_DISABLED", 0),
+        ("MISSING", True, "skipped", "CONSENT_MISSING", 0),
+        ("MISSING", "MISSING", "skipped", "CONSENT_MISSING", 0),
+    ],
+)
+def test_matrix_endpoint_complexity_permission_permutations(
+    consent_val, ai_enabled_val, expected_status, expected_error_code, expected_calls
+):
+    """Test all 7 combinations of (consent, ai_enabled) on POST /v1/analyses/complexity."""
+    payload = dict(SAMPLE_COMPLEXITY_PAYLOAD)
+    if consent_val == "MISSING":
+        payload.pop("consent", None)
+    else:
+        payload["consent"] = consent_val
+
+    if ai_enabled_val == "MISSING":
+        payload.pop("ai_enabled", None)
+    else:
+        payload["ai_enabled"] = ai_enabled_val
+
+    mock_llm_complete = AsyncMock(return_value="Optimized code fix.")
+    with patch("app.llm.client.LLMClient.complete", mock_llm_complete):
+        response = client.post("/v1/analyses/complexity", json=payload)
+
+    assert response.status_code == 200
+    data = response.json()
+    assert mock_llm_complete.call_count == expected_calls
+
+    # Rule-based findings are ALWAYS returned intact (FR12.3)
+    assert len(data["slow_patterns"]) >= 1
+    assert "nested_loops" in [p["pattern"] for p in data["slow_patterns"]]
+
+    assert data["ai_step"]["status"] == expected_status
+    assert data["ai_step"]["error_code"] == expected_error_code
+    if expected_status == "ok":
+        assert data["ai_step"]["suggested_fix"] == "Optimized code fix."
+    else:
+        assert data["ai_step"]["suggested_fix"] is None
+
+
+@pytest.mark.parametrize(
+    "consent_val, ai_enabled_val, expected_status, expected_error_code, expected_calls",
+    [
+        (True, True, "ok", None, 1),
+        (True, False, "skipped", "AI_DISABLED", 0),
+        (False, True, "skipped", "CONSENT_MISSING", 0),
+        (False, False, "skipped", "CONSENT_MISSING", 0),
+        (True, "MISSING", "skipped", "AI_DISABLED", 0),
+        ("MISSING", True, "skipped", "CONSENT_MISSING", 0),
+        ("MISSING", "MISSING", "skipped", "CONSENT_MISSING", 0),
+    ],
+)
+def test_matrix_endpoint_crash_explanation_permission_permutations(
+    consent_val, ai_enabled_val, expected_status, expected_error_code, expected_calls
+):
+    """Test all 7 combinations of (consent, ai_enabled) on POST /v1/analyses/crash-explanation."""
+    payload = {
+        "request_id": f"req-matrix-crash-{consent_val}-{ai_enabled_val}",
+        "room_id": "Zq8-Lw2Ef6Th0Yx4Rn7JbA",
+        "analysis_id": "an-matrix-001",
+        "request_type": "crash_explanation",
+        "language": "cpp",
+        "sanitizer_output": (
+            "==4210==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x602000000014\n"
+            "READ of size 4 at 0x602000000014 thread T0\n"
+            "    #0 0x401233 in process_buffer /workspace/solution.cpp:14"
+        ),
+        "code_snippet": "int val = buffer[index];\nreturn val * 2;",
+    }
+    if consent_val != "MISSING":
+        payload["consent"] = consent_val
+    if ai_enabled_val != "MISSING":
+        payload["ai_enabled"] = ai_enabled_val
+
+    mock_llm_complete = AsyncMock(return_value="Crash caused by out-of-bounds heap read.")
+    with patch("app.llm.client.LLMClient.complete", mock_llm_complete):
+        response = client.post("/v1/analyses/crash-explanation", json=payload)
+
+    assert response.status_code == 200
+    data = response.json()
+    assert mock_llm_complete.call_count == expected_calls
+
+    # Deterministic parser outputs are always returned
+    assert data["error_type"] == "heap-buffer-overflow"
+    assert data["line_number"] == 14
+
+    assert data["ai_step"]["status"] == expected_status
+    assert data["ai_step"]["error_code"] == expected_error_code
+    if expected_status == "ok":
+        assert data["ai_step"]["explanation"] == "Crash caused by out-of-bounds heap read."
+    else:
+        assert data["ai_step"]["explanation"] is None
+
+
+@pytest.mark.parametrize(
+    "consent_val, ai_enabled_val, expected_status, expected_error_code, expected_calls",
+    [
+        (True, True, "ok", None, 1),
+        (True, False, "skipped", "AI_DISABLED", 0),
+        (False, True, "skipped", "CONSENT_MISSING", 0),
+        (False, False, "skipped", "CONSENT_MISSING", 0),
+        (True, "MISSING", "skipped", "AI_DISABLED", 0),
+        ("MISSING", True, "skipped", "CONSENT_MISSING", 0),
+        ("MISSING", "MISSING", "skipped", "CONSENT_MISSING", 0),
+    ],
+)
+def test_matrix_endpoint_explain_permission_permutations(
+    consent_val, ai_enabled_val, expected_status, expected_error_code, expected_calls
+):
+    """Test all 7 combinations of (consent, ai_enabled) on POST /v1/explain."""
+    payload = dict(SAMPLE_EXPLAIN_PAYLOAD)
+    if consent_val != "MISSING":
+        payload["consent"] = consent_val
+    else:
+        payload.pop("consent", None)
+
+    if ai_enabled_val != "MISSING":
+        payload["ai_enabled"] = ai_enabled_val
+    else:
+        payload.pop("ai_enabled", None)
+
+    mock_fix = "Division by zero occurred. Check that denominator is not zero."
+    mock_llm_complete = AsyncMock(return_value=mock_fix)
+    with patch("app.llm.client.LLMClient.complete", mock_llm_complete):
+        response = client.post("/v1/explain", json=payload)
+
+    assert response.status_code == 200
+    data = response.json()
+    assert mock_llm_complete.call_count == expected_calls
+
+    # Rule findings are always returned (FR12.3)
+    assert len(data["slow_patterns"]) >= 1
+
+    assert data["ai_step"]["status"] == expected_status
+    assert data["ai_step"]["error_code"] == expected_error_code
+    if expected_status == "ok":
+        assert data["explanation"] == mock_fix
+    else:
+        assert data["explanation"] is None

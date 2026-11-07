@@ -10,15 +10,14 @@ import re
 from typing import Any, Optional
 
 from app.llm import (
+    AIDisabledError,
+    ConsentMissingError,
     LLMProviderError,
     LLMRateLimitError,
     LLMTimeoutError,
-)
-from app.llm.client import (
-    ConsentMissingError,
-    LLMClient,
     call_llm_with_consent,
 )
+from app.llm.client import LLMClient
 
 
 def detect_slow_patterns(code: str, language: str = "python") -> list[dict[str, Any]]:
@@ -110,18 +109,23 @@ async def run_rule_based_analysis_with_ai_fallback(
     code: str,
     language: str,
     consent: Optional[bool] = None,
-    ai_enabled: bool = True,
+    ai_enabled: Optional[bool] = None,
     client: Optional[LLMClient] = None,
     ai_fallback: Optional[Any] = None,
     reraise_ai_errors: bool = False,
 ) -> dict[str, Any]:
-    """Execute rule-based pattern checks first, followed by consent-gated AI assistance (US-67, FR12.3, T-18 v2).
+    """Execute rule-based pattern checks first, followed by consent-gated AI assistance (US-67, FR12.3, FR35, T-18 v2).
 
-    Core Invariant (FR12.3):
+    Core Invariant (FR12.3, FR35):
     Declining consent or disabling AI does NOT affect the AI-free parts.
+    External AI calls require BOTH consent == True AND ai_enabled == True.
     When consent is missing or False:
     - Rule-based analysis returns its results normally.
     - AI step is marked skipped with error_code CONSENT_MISSING.
+    - Outbound LLM client is called 0 times.
+    When ai_enabled is missing or False:
+    - Rule-based analysis returns its results normally.
+    - AI step is marked skipped with error_code AI_DISABLED.
     - Outbound LLM client is called 0 times.
     """
     # 1. AI-free rule-based analysis (always executes first)
@@ -137,7 +141,7 @@ async def run_rule_based_analysis_with_ai_fallback(
             "verified": False,
             "verified_speedup_pct": None,
         }
-    elif not ai_enabled:
+    elif ai_enabled is not True:
         ai_step = {
             "status": "skipped",
             "error_code": "AI_DISABLED",
@@ -155,6 +159,7 @@ async def run_rule_based_analysis_with_ai_fallback(
                 ai_suggestion = await call_llm_with_consent(
                     prompt=prompt,
                     consent=consent,
+                    ai_enabled=ai_enabled,
                     client=client,
                 )
 
@@ -169,6 +174,14 @@ async def run_rule_based_analysis_with_ai_fallback(
             ai_step = {
                 "status": "skipped",
                 "error_code": "CONSENT_MISSING",
+                "suggested_fix": None,
+                "verified": False,
+                "verified_speedup_pct": None,
+            }
+        except AIDisabledError:
+            ai_step = {
+                "status": "skipped",
+                "error_code": "AI_DISABLED",
                 "suggested_fix": None,
                 "verified": False,
                 "verified_speedup_pct": None,

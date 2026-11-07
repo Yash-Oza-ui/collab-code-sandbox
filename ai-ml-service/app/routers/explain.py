@@ -10,6 +10,7 @@ from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
 from app.llm import (
+    AIDisabledError,
     ConsentMissingError,
     LLMProviderError,
     LLMRateLimitError,
@@ -33,6 +34,10 @@ class ExplainRequest(BaseModel):
     consent: Optional[bool] = Field(
         default=None,
         description="User consent boolean (FR12). When missing or false, external AI is not called.",
+    )
+    ai_enabled: Optional[bool] = Field(
+        default=None,
+        description="Host AI switch boolean (FR35). When missing or false, external AI is not called.",
     )
     code: str
     stderr: str = ""
@@ -72,6 +77,7 @@ async def explain_failure(payload: ExplainRequest, request: Request) -> ExplainR
         return await generate_explanation(
             language=payload.language,
             consent=payload.consent,
+            ai_enabled=payload.ai_enabled,
             failure_kind=payload.failure_kind,
             exit_code=payload.exit_code,
             stderr=payload.stderr,
@@ -88,6 +94,7 @@ async def explain_failure(payload: ExplainRequest, request: Request) -> ExplainR
             code=payload.code,
             language=payload.language,
             consent=payload.consent,
+            ai_enabled=payload.ai_enabled,
             ai_fallback=explain_fallback,
             reraise_ai_errors=True,
         )
@@ -105,6 +112,20 @@ async def explain_failure(payload: ExplainRequest, request: Request) -> ExplainR
                 ai_step=AIStep(
                     status="skipped",
                     error_code="CONSENT_MISSING",
+                    suggested_fix=None,
+                ),
+            )
+
+        # 3. Host AI Switch Invariant (FR35): When AI is disabled or missing, return rule-based findings
+        # with HTTP 200 and ai_step.status = "skipped", error_code = "AI_DISABLED".
+        if payload.ai_enabled is not True:
+            return ExplainResponse(
+                request_id=payload.request_id,
+                explanation=None,
+                slow_patterns=slow_patterns,
+                ai_step=AIStep(
+                    status="skipped",
+                    error_code="AI_DISABLED",
                     suggested_fix=None,
                 ),
             )

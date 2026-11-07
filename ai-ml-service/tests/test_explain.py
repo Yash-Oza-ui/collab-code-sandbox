@@ -37,6 +37,7 @@ SAMPLE_PAYLOAD = {
     "request_type": "explanation",
     "language": "python",
     "consent": True,
+    "ai_enabled": True,
     "code": "def divide(a, b):\n    return a / b\nprint(divide(10, 0))",
     "stderr": "ZeroDivisionError: division by zero",
     "exit_code": 1,

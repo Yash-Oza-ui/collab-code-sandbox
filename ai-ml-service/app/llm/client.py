@@ -80,6 +80,23 @@ class ConsentMissingError(Exception):
         self.retry_after_seconds = retry_after_seconds
 
 
+class AIDisabledError(Exception):
+    """Raised when an LLM call is attempted while Host AI switch is disabled or missing (FR35, T-18 v2)."""
+
+    def __init__(
+        self,
+        message: str = "Host AI switch is disabled for this room/session.",
+        status_code: int = 403,
+        code: str = "AI_DISABLED",
+        retry_after_seconds: Optional[int] = None,
+    ) -> None:
+        super().__init__(message)
+        self.message = message
+        self.status_code = status_code
+        self.code = code
+        self.retry_after_seconds = retry_after_seconds
+
+
 class LLMClient:
     """Outbound HTTP client communicating with external LLM APIs (Gemini / OpenAI)."""
 
@@ -219,6 +236,7 @@ def set_default_llm_client(client: LLMClient) -> None:
 async def call_llm_with_consent(
     prompt: str,
     consent: Optional[bool] = None,
+    ai_enabled: Optional[bool] = None,
     *,
     client: Optional[LLMClient] = None,
     api_key: Optional[str] = None,
@@ -226,14 +244,17 @@ async def call_llm_with_consent(
     base_url: Optional[str] = None,
     timeout_seconds: Optional[float] = None,
 ) -> str:
-    """Universal consent gate through which every outbound LLM call must pass (FR12.2, US-17).
+    """Universal consent and Host AI switch gate through which every outbound LLM call must pass (FR12.2, FR35, US-17).
 
     Guarantees:
     1. If consent is missing (None) or False:
        - The LLM client is never invoked (0 outbound calls made).
        - No prompts or source code are logged (NFR8.2).
        - ConsentMissingError is raised immediately (HTTP 403 CONSENT_MISSING).
-    2. Only if consent is explicitly True is the LLM client invoked.
+    2. If Host AI switch (ai_enabled) is missing (None) or False:
+       - The LLM client is never invoked (0 outbound calls made).
+       - AIDisabledError is raised immediately (HTTP 403 AI_DISABLED).
+    3. External AI call is permitted ONLY when BOTH consent == True AND ai_enabled == True.
     """
     if consent is not True:
         # Safe logging: strictly no prompt or code logged (NFR8.2)
@@ -242,6 +263,15 @@ async def call_llm_with_consent(
             message="User consent is required before code or execution context can be sent to external AI.",
             status_code=403,
             code="CONSENT_MISSING",
+        )
+
+    if ai_enabled is not True:
+        # Safe logging: strictly no prompt or code logged (NFR8.2)
+        logger.info("Blocked external AI call: Host AI switch is disabled or missing (FR35)")
+        raise AIDisabledError(
+            message="Host AI switch is disabled for this room/session.",
+            status_code=403,
+            code="AI_DISABLED",
         )
 
     target_client = client or get_default_llm_client()
