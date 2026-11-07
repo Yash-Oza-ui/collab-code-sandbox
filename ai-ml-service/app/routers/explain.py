@@ -1,7 +1,7 @@
 """Execution failure explainer router.
 
 Implements T-16 (FR13.1, EPIC 3) failure explanation prototype behind T-07 contract.
-Conforms to docs/ai-ml-contract.md §4.3, §5 and US-17 consent gating.
+Conforms to docs/ai-ml-contract.md §4.3, §5, FR12.3 and US-17 consent gating.
 """
 
 import logging
@@ -15,6 +15,7 @@ from app.llm import (
     LLMTimeoutError,
     generate_explanation,
 )
+from app.rules.patterns import run_rule_based_analysis_with_ai_fallback
 
 logger = logging.getLogger(__name__)
 
@@ -51,13 +52,13 @@ class ExplainResponse(BaseModel):
 
 @router.post("/explain", response_model=ExplainResponse)
 async def explain_failure(payload: ExplainRequest, request: Request) -> ExplainResponse:
-    """Explain a failed run in plain prose using LLM API (FR13.1, T-16, US-17)."""
+    """Explain a failed run in plain prose using rules-first analysis and LLM API (FR12.3, FR13.1, T-16, US-17)."""
     # Track request_id for consistent error envelope responses
     request.state.request_id = payload.request_id
 
-    try:
-        # All LLM calls pass through the single universal consent gate in generate_explanation
-        explanation = await generate_explanation(
+    # Define the failure explanation AI fallback
+    async def explain_fallback() -> str:
+        return await generate_explanation(
             language=payload.language,
             consent=payload.consent,
             failure_kind=payload.failure_kind,
@@ -69,6 +70,35 @@ async def explain_failure(payload: ExplainRequest, request: Request) -> ExplainR
             request_id=payload.request_id,
         )
 
+    try:
+        # 1. Rules-First Static Analysis (FR12.3, US-67):
+        # Always execute rule-based analysis BEFORE any AI fallback.
+        rule_analysis = await run_rule_based_analysis_with_ai_fallback(
+            code=payload.code,
+            language=payload.language,
+            consent=payload.consent,
+            ai_fallback=explain_fallback,
+        )
+
+        # 2. Preserve rule-based findings internally (FR12.3):
+        request.state.rule_findings = rule_analysis.get("slow_patterns", [])
+        logger.info(
+            "Preserved rule-based analysis findings for request_id=%s (patterns_found=%d)",
+            payload.request_id,
+            len(request.state.rule_findings),
+        )
+
+        # 3. Check consent gate for external AI call (FR12.2, US-17 Version 0 behavior):
+        # When consent is false or missing (None), rule-based analysis was preserved above,
+        # and NO external LLM call occurs. Raise ConsentMissingError to return HTTP 403 CONSENT_MISSING.
+        if payload.consent is not True:
+            raise ConsentMissingError(
+                message="User consent is required before code or execution context can be sent to external AI.",
+                status_code=403,
+                code="CONSENT_MISSING",
+            )
+
+        explanation = rule_analysis["ai_step"]["suggested_fix"]
         return ExplainResponse(
             request_id=payload.request_id,
             explanation=explanation,

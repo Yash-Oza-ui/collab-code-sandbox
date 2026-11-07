@@ -4,9 +4,10 @@ Scaffold implementation for issue T-04 (Category C).
 Provides GET /health probe and routes conforming to docs/ai-ml-contract.md.
 """
 
-from fastapi import FastAPI, Request
+import logging
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from fastapi.exceptions import RequestValidationError, HTTPException
 
 from app.config import settings
 from app.llm.client import ConsentMissingError
@@ -17,11 +18,11 @@ app = FastAPI(
     description="Microservice for code review, failure explanation, and execution anomaly scoring.",
     version="0.1.0",
 )
-import logging
 
-# Configure basic logging to explicitly exclude request bodies
+# Configure basic logging to explicitly exclude request bodies (NFR8.2)
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger("ai_ml_service")
+
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next):

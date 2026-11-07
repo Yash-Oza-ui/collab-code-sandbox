@@ -1,4 +1,4 @@
-"""Tests for AI consent gate (US-17, FR12.1, FR12.2, FR12.3, NFR8.2).
+"""Tests for AI consent gate and rules-first integration (US-17, FR12.1, FR12.2, FR12.3, NFR8.2).
 
 Verifies:
 1. Consent missing or false never reaches external AI service: mocked LLM client is called 0 times.
@@ -6,6 +6,8 @@ Verifies:
 3. Consent true calls the mocked LLM client exactly once.
 4. With consent false, rule-based / AI-free analysis returns normally (FR12.3).
 5. Service logs strictly omit code and prompts in all execution paths, including consent-missing (NFR8.2).
+6. Endpoint-level integration tests proving POST /v1/explain invokes rules-first helper,
+   executes rule-based analysis, and preserves findings internally with 0 LLM calls on consent=False.
 """
 
 import logging
@@ -283,3 +285,126 @@ def test_privacy_no_code_or_prompt_logged_on_consent_missing_or_false(caplog):
     assert canary_secret_code not in logs
     assert canary_stderr not in logs
     assert "calc(x)" not in logs
+
+
+# ============================================================================
+# 5. Endpoint-Level Rules-First Integration Tests (FR12.3, Reviewer Requirement)
+# ============================================================================
+
+
+def test_endpoint_invokes_rules_first_helper_when_consent_false_and_zero_llm_calls():
+    """Endpoint integration test proving POST /v1/explain invokes rules-first helper,
+
+    executes rule-based analysis when consent=False, preserves findings internally,
+    returns HTTP 403 CONSENT_MISSING, and makes 0 outbound LLM calls (FR12.3, US-17).
+    """
+    python_code_with_slow_patterns = (
+        "def slow_func(items):\n"
+        "    result = ''\n"
+        "    for a in items:\n"
+        "        for b in items:\n"
+        "            result += str(a * b)\n"
+        "    return result\n"
+    )
+
+    payload = dict(SAMPLE_PAYLOAD)
+    payload["code"] = python_code_with_slow_patterns
+    payload["consent"] = False
+
+    mock_llm_complete = AsyncMock(return_value="mock answer")
+    captured_analysis = []
+
+    original_helper = run_rule_based_analysis_with_ai_fallback
+
+    async def spy_helper(*args, **kwargs):
+        res = await original_helper(*args, **kwargs)
+        captured_analysis.append(res)
+        return res
+
+    with patch("app.llm.client.LLMClient.complete", mock_llm_complete):
+        with patch("app.routers.explain.run_rule_based_analysis_with_ai_fallback", side_effect=spy_helper):
+            response = client.post("/v1/explain", json=payload)
+
+    # 1. Verify HTTP 403 CONSENT_MISSING response (Version 0 contract)
+    assert response.status_code == 403
+    data = response.json()
+    assert data["request_id"] == payload["request_id"]
+    assert data["error"]["code"] == "CONSENT_MISSING"
+
+    # 2. Verify the endpoint actually invoked the rules-first helper
+    assert len(captured_analysis) == 1
+    res = captured_analysis[0]
+
+    # 3. Verify rule-based analysis was executed and findings were preserved internally
+    assert len(res["slow_patterns"]) >= 1
+    pattern_names = [p["pattern"] for p in res["slow_patterns"]]
+    assert "nested_loops" in pattern_names
+    assert res["ai_step"]["status"] == "skipped"
+    assert res["ai_step"]["error_code"] == "CONSENT_MISSING"
+
+    # 4. Verify external LLM function was called 0 times
+    assert mock_llm_complete.call_count == 0
+
+
+def test_endpoint_invokes_rules_first_helper_when_consent_true_and_calls_llm_once():
+    """Endpoint integration test proving POST /v1/explain invokes rules-first helper,
+
+    runs rule-based analysis, and calls LLM client exactly once when consent=True (FR12.3, US-17).
+    """
+    python_code_with_slow_patterns = (
+        "def slow_func(items):\n"
+        "    result = ''\n"
+        "    for a in items:\n"
+        "        for b in items:\n"
+        "            result += str(a * b)\n"
+        "    return result\n"
+    )
+
+    payload = dict(SAMPLE_PAYLOAD)
+    payload["code"] = python_code_with_slow_patterns
+    payload["consent"] = True
+
+    mock_llm_complete = AsyncMock(return_value="Suggested AI explanation of the error.")
+    captured_analysis = []
+
+    original_helper = run_rule_based_analysis_with_ai_fallback
+
+    async def spy_helper(*args, **kwargs):
+        res = await original_helper(*args, **kwargs)
+        captured_analysis.append(res)
+        return res
+
+    with patch("app.llm.client.LLMClient.complete", mock_llm_complete):
+        with patch("app.routers.explain.run_rule_based_analysis_with_ai_fallback", side_effect=spy_helper):
+            response = client.post("/v1/explain", json=payload)
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["request_id"] == payload["request_id"]
+    assert data["explanation"] == "Suggested AI explanation of the error."
+
+    # Verify rules-first helper was called
+    assert len(captured_analysis) == 1
+    assert len(captured_analysis[0]["slow_patterns"]) >= 1
+
+    # Verify LLM complete was called (by generate_explanation)
+    assert mock_llm_complete.call_count == 1
+
+
+def test_detect_slow_patterns_nested_loops_string_concat_linear_search():
+    """Test AST detection for nested loops, repeated string concat in loop, and linear search in loop."""
+    code = (
+        "def test_patterns(items):\n"
+        "    s = ''\n"
+        "    for a in items:\n"
+        "        for b in items:\n"
+        "            if a in items:\n"
+        "                s += str(a)\n"
+        "    return s\n"
+    )
+    patterns = detect_slow_patterns(code, language="python")
+    pattern_names = [p["pattern"] for p in patterns]
+    assert "nested_loops" in pattern_names
+    assert "repeated_string_concat" in pattern_names
+    assert "linear_search_in_loop" in pattern_names
+
