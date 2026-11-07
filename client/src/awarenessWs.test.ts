@@ -2,9 +2,12 @@ import { describe, expect, it } from 'vitest'
 import * as Y from 'yjs'
 import { createAwareness, getExistingUserColors, setUserAwareness } from './awareness'
 import {
+  CLOSE_NOT_JOINED,
   COLLAB_SESSION_ID_KEY,
   MESSAGE_AWARENESS,
   MESSAGE_QUERY_AWARENESS,
+  buildControlWebSocketUrl,
+  buildDocumentWebSocketUrl,
   buildRoomWebSocketUrl,
   connectAwarenessWs,
   encodeAwarenessMessage,
@@ -14,44 +17,185 @@ import {
 } from './awarenessWs'
 import { USER_COLORS, pickUserColor } from './userColor'
 
+interface RelayRoomSession {
+  sessionId: string
+  displayName: string
+  role: string
+  canEdit: boolean
+  canRun: boolean
+}
+
 /**
- * High-fidelity in-memory WebSocket Relay replicating sync-service RelayHandler.java:
- * - Rule 1a: Forwards binary frames to all other clients in the room.
- * - Rule 1b: Echoes awareness frames (first byte == 1) back to sender.
- * - Rule 6: Forwards query-awareness frames (first byte == 3) to other peers.
+ * High-fidelity in-memory WebSocket Relay replicating sync-service T-20 architecture:
+ * - ControlHandler.java: /ws/rooms/{roomId}?session_id=<UUID>
+ *   Handles { type: 'join', display_name }, replies with 'joined', broadcasts 'roster'.
+ * - DocumentHandler.java: /ws/rooms/{roomId}/docs/{docId}?session_id=<UUID>
+ *   Rejects with close code 4406 if opened before join on control socket.
+ *   Forwards binary Yjs/Awareness frames within the same room and docId.
+ *   Echoes awareness frames (first byte == 1) back to sender (lone-client heartbeat).
  */
 class TestRelay {
-  clients = new Set<TestWebSocket>()
+  rooms = new Map<string, Map<string, RelayRoomSession>>()
+  controlClients = new Map<TestWebSocket, { roomId: string; sessionId: string }>()
+  docClients = new Map<TestWebSocket, { roomId: string; docId: string; sessionId: string }>()
 
   createClient(url: string): TestWebSocket {
-    const ws = new TestWebSocket(url, this)
-    this.clients.add(ws)
-    return ws
+    return new TestWebSocket(url, this)
   }
 
-  removeClient(ws: TestWebSocket): void {
-    this.clients.delete(ws)
+  handleOpen(ws: TestWebSocket): void {
+    const parsed = this.parseUrl(ws.url)
+    if (!parsed) {
+      ws.close(4400, 'Malformed URL')
+      return
+    }
+
+    if (parsed.type === 'control') {
+      this.controlClients.set(ws, { roomId: parsed.roomId, sessionId: parsed.sessionId })
+      if (!this.rooms.has(parsed.roomId)) {
+        this.rooms.set(parsed.roomId, new Map())
+      }
+    } else {
+      // Document socket: reject if join has not completed on control socket (T-20 / T-17 V2.5)
+      const room = this.rooms.get(parsed.roomId)
+      const member = room?.get(parsed.sessionId)
+      if (!member) {
+        ws.close(CLOSE_NOT_JOINED, 'Not joined')
+        return
+      }
+      this.docClients.set(ws, {
+        roomId: parsed.roomId,
+        docId: parsed.docId,
+        sessionId: parsed.sessionId,
+      })
+    }
   }
 
-  broadcast(sender: TestWebSocket, data: ArrayBuffer | Uint8Array): void {
-    const uint8 = data instanceof ArrayBuffer ? new Uint8Array(data) : data
-    if (uint8.length === 0) return
+  handleTextMessage(ws: TestWebSocket, text: string): void {
+    const meta = this.controlClients.get(ws)
+    if (!meta) return // Document sockets ignore text frames (T-20)
 
-    const isAwareness = uint8[0] === 1
+    try {
+      const msg = JSON.parse(text)
+      if (msg.type === 'join') {
+        const room = this.rooms.get(meta.roomId) ?? new Map()
+        this.rooms.set(meta.roomId, room)
 
-    // Rule 1a: forward to others
-    for (const client of this.clients) {
-      if (client !== sender) {
-        client.receive(uint8)
+        const session: RelayRoomSession = {
+          sessionId: meta.sessionId,
+          displayName: msg.display_name,
+          role: 'Guest',
+          canEdit: true,
+          canRun: true,
+        }
+        room.set(meta.sessionId, session)
+
+        // 1. Reply to joining client with 'joined'
+        ws.receiveText(
+          JSON.stringify({
+            type: 'joined',
+            member_id: meta.sessionId,
+            role: session.role,
+            mode: 'COLLAB',
+            permissions: { can_edit: true, can_run: true },
+          }),
+        )
+
+        // 2. Broadcast roster to all control clients in this room
+        const roster = {
+          type: 'roster',
+          members: Array.from(room.values()).map((m) => ({
+            member_id: m.sessionId,
+            display_name: m.displayName,
+            role: m.role,
+            permissions: { can_edit: m.canEdit, can_run: m.canRun },
+          })),
+        }
+        const rosterJson = JSON.stringify(roster)
+        for (const [client, clientMeta] of this.controlClients.entries()) {
+          if (clientMeta.roomId === meta.roomId && client.readyState === TestWebSocket.OPEN) {
+            client.receiveText(rosterJson)
+          }
+        }
+      }
+    } catch {
+      // ignore invalid json
+    }
+  }
+
+  handleBinaryMessage(ws: TestWebSocket, data: Uint8Array): void {
+    const meta = this.docClients.get(ws)
+    if (!meta) return // Control sockets ignore binary frames (T-20)
+
+    const isAwareness = data.length > 0 && data[0] === 1
+
+    // Forward to other document clients on same room and docId
+    for (const [client, clientMeta] of this.docClients.entries()) {
+      if (
+        client !== ws &&
+        clientMeta.roomId === meta.roomId &&
+        clientMeta.docId === meta.docId &&
+        client.readyState === TestWebSocket.OPEN
+      ) {
+        client.receiveBinary(data)
       }
     }
 
-    // Rule 1b: echo awareness frames back to sender
-    if (isAwareness) {
-      sender.receive(uint8)
+    // Echo awareness frames back to sender (lone-client heartbeat / DocumentHandler)
+    if (isAwareness && ws.readyState === TestWebSocket.OPEN) {
+      ws.receiveBinary(data)
     }
   }
+
+  handleClose(ws: TestWebSocket): void {
+    this.controlClients.delete(ws)
+    this.docClients.delete(ws)
+  }
+
+  private parseUrl(url: string) {
+    const u = new URL(url.replace(/^ws/, 'http'))
+    const sessionId = u.searchParams.get('session_id') || ''
+    const docMatch = u.pathname.match(/\/ws\/rooms\/([^/]+)\/docs\/([^/]+)$/)
+    if (docMatch) {
+      return { type: 'doc' as const, roomId: docMatch[1], docId: docMatch[2], sessionId }
+    }
+    const controlMatch = u.pathname.match(/\/ws\/rooms\/([^/]+)$/)
+    if (controlMatch) {
+      return { type: 'control' as const, roomId: controlMatch[1], sessionId }
+    }
+    return null
+  }
 }
+
+class MockCloseEvent extends Event {
+  code: number
+  reason: string
+  wasClean: boolean
+  constructor(type: string, init?: { code?: number; reason?: string; wasClean?: boolean }) {
+    super(type)
+    this.code = init?.code ?? 1000
+    this.reason = init?.reason ?? ''
+    this.wasClean = init?.wasClean ?? true
+  }
+}
+
+class MockMessageEvent extends Event {
+  data: unknown
+  constructor(type: string, init?: { data?: unknown }) {
+    super(type)
+    this.data = init?.data
+  }
+}
+
+const SafeCloseEvent =
+  typeof CloseEvent !== 'undefined'
+    ? CloseEvent
+    : (MockCloseEvent as unknown as typeof CloseEvent)
+
+const SafeMessageEvent =
+  typeof MessageEvent !== 'undefined'
+    ? MessageEvent
+    : (MockMessageEvent as unknown as typeof MessageEvent)
 
 class TestWebSocket {
   static readonly CONNECTING = 0
@@ -73,6 +217,7 @@ class TestWebSocket {
   onmessage: ((event: MessageEvent) => void) | null = null
   onerror: ((event: Event) => void) | null = null
 
+  private listeners: Record<string, Set<(event: Event) => void>> = {}
   private relay: TestRelay
 
   constructor(url: string, relay: TestRelay) {
@@ -81,29 +226,73 @@ class TestWebSocket {
     queueMicrotask(() => {
       if (this.readyState === TestWebSocket.CONNECTING) {
         this.readyState = TestWebSocket.OPEN
-        this.onopen?.(new Event('open'))
+        this.relay.handleOpen(this)
+        if (this.readyState === TestWebSocket.OPEN) {
+          const ev = new Event('open')
+          this.onopen?.(ev)
+          this.dispatchEvent('open', ev)
+        }
       }
     })
   }
 
-  send(data: unknown): void {
-    if (this.readyState !== TestWebSocket.OPEN) return
-    if (data instanceof Uint8Array || data instanceof ArrayBuffer) {
-      this.relay.broadcast(this, data)
+  addEventListener(
+    type: string,
+    listener: (event: Event) => void,
+    options?: { once?: boolean },
+  ): void {
+    if (!this.listeners[type]) this.listeners[type] = new Set()
+    if (options?.once) {
+      const onceWrapper = (e: Event) => {
+        this.removeEventListener(type, onceWrapper)
+        listener(e)
+      }
+      this.listeners[type].add(onceWrapper)
+    } else {
+      this.listeners[type].add(listener)
     }
   }
 
-  receive(data: Uint8Array): void {
-    if (this.readyState !== TestWebSocket.OPEN) return
-    const buffer = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength)
-    this.onmessage?.(new MessageEvent('message', { data: buffer }))
+  removeEventListener(type: string, listener: (event: Event) => void): void {
+    this.listeners[type]?.delete(listener)
   }
 
-  close(): void {
+  private dispatchEvent(type: string, event: Event): void {
+    this.listeners[type]?.forEach((fn) => fn(event))
+  }
+
+  send(data: unknown): void {
+    if (this.readyState !== TestWebSocket.OPEN) return
+    if (typeof data === 'string') {
+      this.relay.handleTextMessage(this, data)
+    } else if (data instanceof Uint8Array || data instanceof ArrayBuffer) {
+      const uint8 = data instanceof ArrayBuffer ? new Uint8Array(data) : data
+      this.relay.handleBinaryMessage(this, uint8)
+    }
+  }
+
+  receiveText(text: string): void {
+    if (this.readyState !== TestWebSocket.OPEN) return
+    const ev = new SafeMessageEvent('message', { data: text })
+    this.onmessage?.(ev as MessageEvent)
+    this.dispatchEvent('message', ev)
+  }
+
+  receiveBinary(data: Uint8Array): void {
+    if (this.readyState !== TestWebSocket.OPEN) return
+    const buffer = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength)
+    const ev = new SafeMessageEvent('message', { data: buffer })
+    this.onmessage?.(ev as MessageEvent)
+    this.dispatchEvent('message', ev)
+  }
+
+  close(code = 1000, reason = ''): void {
     if (this.readyState === TestWebSocket.CLOSED) return
     this.readyState = TestWebSocket.CLOSED
-    this.relay.removeClient(this)
-    this.onclose?.(new CloseEvent('close'))
+    this.relay.handleClose(this)
+    const ev = new SafeCloseEvent('close', { code, reason })
+    this.onclose?.(ev as CloseEvent)
+    this.dispatchEvent('close', ev)
   }
 }
 
@@ -142,15 +331,28 @@ describe('awarenessWs helper functions', () => {
     expect(secondId).toBe(firstId)
   })
 
-  it('builds standard room WebSocket URL per T-06 §3.1', () => {
-    const url = buildRoomWebSocketUrl(
+  it('builds control and document WebSocket URLs per T-20 / T-17', () => {
+    const controlUrl = buildControlWebSocketUrl(
       'ws://localhost:8081/ws/rooms',
       'demo-room-42',
       '00000000-0000-4000-8000-000000000001',
     )
-    expect(url).toBe(
+    expect(controlUrl).toBe(
       'ws://localhost:8081/ws/rooms/demo-room-42?session_id=00000000-0000-4000-8000-000000000001',
     )
+
+    const docUrl = buildDocumentWebSocketUrl(
+      'ws://localhost:8081/ws/rooms',
+      'demo-room-42',
+      'main',
+      '00000000-0000-4000-8000-000000000001',
+    )
+    expect(docUrl).toBe(
+      'ws://localhost:8081/ws/rooms/demo-room-42/docs/main?session_id=00000000-0000-4000-8000-000000000001',
+    )
+
+    // Backward compatible alias
+    expect(buildRoomWebSocketUrl('ws://localhost:8081/ws/rooms', 'demo-room-42', '00000000-0000-4000-8000-000000000001')).toBe(controlUrl)
   })
 
   it('encodes awareness and query frames with correct prefix bytes', () => {
@@ -165,15 +367,35 @@ describe('awarenessWs helper functions', () => {
   })
 })
 
-describe('multi-client awareness synchronization over WebSocket relay', () => {
-  it('synchronizes Alice and Bob presence, allocating distinct colours across peers', async () => {
+describe('T-20 WebSocket connection and multi-client awareness synchronization', () => {
+  it('rejects document socket with close code 4406 if join handshake has not completed', async () => {
+    const relay = new TestRelay()
+    const docUrl = buildDocumentWebSocketUrl(
+      'ws://localhost:8081/ws/rooms',
+      'unjoined-room',
+      'main',
+      '99999999-9999-4999-8999-999999999999',
+    )
+
+    let closeCode = 0
+    const rawWs = relay.createClient(docUrl)
+    rawWs.onclose = (ev) => {
+      closeCode = ev.code
+    }
+
+    await new Promise((r) => setTimeout(r, 15))
+    expect(closeCode).toBe(CLOSE_NOT_JOINED)
+  })
+
+  it('completes control join handshake and synchronizes Alice and Bob presence over document socket', async () => {
     const relay = new TestRelay()
 
-    // 1. Client A setup (Alice)
+    // 1. Client A setup (Alice joins room)
     const docA = new Y.Doc()
     const awarenessA = createAwareness(docA)
     const connA = connectAwarenessWs({
       roomId: 'test-sync-room',
+      displayName: 'Alice',
       awareness: awarenessA,
       syncWsUrl: 'ws://localhost:8081/ws/rooms',
       sessionId: '11111111-1111-4111-8111-111111111111',
@@ -182,8 +404,8 @@ describe('multi-client awareness synchronization over WebSocket relay', () => {
       } as unknown as typeof WebSocket,
     })
 
-    // Wait for connection to open
-    await new Promise((r) => setTimeout(r, 10))
+    // Wait for control open, join exchange, and doc socket open
+    await new Promise((r) => setTimeout(r, 20))
 
     // Client A enters display name "Alice" and receives color
     const existingColorsA = getExistingUserColors(awarenessA)
@@ -191,13 +413,14 @@ describe('multi-client awareness synchronization over WebSocket relay', () => {
     setUserAwareness(awarenessA, { name: 'Alice', color: colorA })
 
     // Give time for awareness frame propagation
-    await new Promise((r) => setTimeout(r, 10))
+    await new Promise((r) => setTimeout(r, 15))
 
     // 2. Client B setup (Bob joins the same room)
     const docB = new Y.Doc()
     const awarenessB = createAwareness(docB)
     const connB = connectAwarenessWs({
       roomId: 'test-sync-room',
+      displayName: 'Bob',
       awareness: awarenessB,
       syncWsUrl: 'ws://localhost:8081/ws/rooms',
       sessionId: '22222222-2222-4222-8222-222222222222',
@@ -206,25 +429,20 @@ describe('multi-client awareness synchronization over WebSocket relay', () => {
       } as unknown as typeof WebSocket,
     })
 
-    // Give time for connection open + query awareness exchange
-    await new Promise((r) => setTimeout(r, 20))
+    // Give time for connection open, join handshake, and doc socket query awareness exchange
+    await new Promise((r) => setTimeout(r, 30))
 
-    // Verify Client B already observed Alice's presence before choosing name
+    // Client B enters display name "Bob" and receives distinct color
     const existingColorsB = getExistingUserColors(awarenessB)
     expect(existingColorsB).toContain(colorA)
 
-    // Client B enters display name "Bob" and receives color
     const colorB = pickUserColor(existingColorsB, docB.clientID)
     setUserAwareness(awarenessB, { name: 'Bob', color: colorB })
 
     // Give time for Bob's frame to reach Alice
-    await new Promise((r) => setTimeout(r, 20))
+    await new Promise((r) => setTimeout(r, 25))
 
-    // 3. Assertions requested in Review Point 2:
-    // - Both clients receive and observe the other's name and colour in their Awareness states
-    // - Their assigned colours are distinct
-
-    // Inspect Client A's awareness states
+    // 3. Inspect Client A's awareness states
     const statesInA = Array.from(awarenessA.getStates().values())
     const aliceInA = statesInA.find((s) => s.user?.name === 'Alice')
     const bobInA = statesInA.find((s) => s.user?.name === 'Bob')
@@ -245,9 +463,9 @@ describe('multi-client awareness synchronization over WebSocket relay', () => {
     expect(USER_COLORS).toContain(colorA)
     expect(USER_COLORS).toContain(colorB)
 
-    // Teardown connections cleanly
+    // Teardown Client B connection cleanly
     connB.destroy()
-    await new Promise((r) => setTimeout(r, 10))
+    await new Promise((r) => setTimeout(r, 15))
 
     // Verify Client B state is removed from Client A
     const statesAfterDisconnect = Array.from(awarenessA.getStates().values())
@@ -257,4 +475,3 @@ describe('multi-client awareness synchronization over WebSocket relay', () => {
     connA.destroy()
   })
 })
-
