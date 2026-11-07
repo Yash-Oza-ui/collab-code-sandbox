@@ -164,19 +164,108 @@ describe('RoomPage display-name and colour presence', () => {
   })
 
   it('synchronizes Alice and Bob presence between two connected RoomPage instances over relay', async () => {
-    class Relay {
-      clients = new Set<RelaySocket>()
-      broadcast(sender: RelaySocket, data: ArrayBuffer | Uint8Array) {
-        const uint8 = data instanceof ArrayBuffer ? new Uint8Array(data) : data
-        if (uint8.length === 0) return
-        for (const c of this.clients) {
-          if (c !== sender) c.receive(uint8)
+    interface RelayMember {
+      sessionId: string
+      displayName: string
+    }
+
+    class T20Relay {
+      rooms = new Map<string, Map<string, RelayMember>>()
+      controlSockets = new Map<RelaySocket, { roomId: string; sessionId: string }>()
+      docSockets = new Map<RelaySocket, { roomId: string; docId: string; sessionId: string }>()
+
+      parseUrl(url: string) {
+        const u = new URL(url.replace(/^ws/, 'http'))
+        const sessionId = u.searchParams.get('session_id') || ''
+        const docMatch = u.pathname.match(/\/ws\/rooms\/([^/]+)\/docs\/([^/]+)$/)
+        if (docMatch) {
+          return { type: 'doc' as const, roomId: docMatch[1], docId: docMatch[2], sessionId }
         }
-        if (uint8[0] === 1) sender.receive(uint8)
+        const controlMatch = u.pathname.match(/\/ws\/rooms\/([^/]+)$/)
+        if (controlMatch) {
+          return { type: 'control' as const, roomId: controlMatch[1], sessionId }
+        }
+        return null
+      }
+
+      handleOpen(ws: RelaySocket) {
+        const parsed = this.parseUrl(ws.url)
+        if (!parsed) return
+        if (parsed.type === 'control') {
+          this.controlSockets.set(ws, { roomId: parsed.roomId, sessionId: parsed.sessionId })
+          if (!this.rooms.has(parsed.roomId)) {
+            this.rooms.set(parsed.roomId, new Map())
+          }
+        } else {
+          const room = this.rooms.get(parsed.roomId)
+          if (!room?.has(parsed.sessionId)) {
+            ws.close(4406, 'Not joined')
+            return
+          }
+          this.docSockets.set(ws, {
+            roomId: parsed.roomId,
+            docId: parsed.docId,
+            sessionId: parsed.sessionId,
+          })
+        }
+      }
+
+      handleText(ws: RelaySocket, text: string) {
+        const meta = this.controlSockets.get(ws)
+        if (!meta) return
+        try {
+          const msg = JSON.parse(text)
+          if (msg.type === 'join') {
+            const room = this.rooms.get(meta.roomId) ?? new Map()
+            this.rooms.set(meta.roomId, room)
+            room.set(meta.sessionId, {
+              sessionId: meta.sessionId,
+              displayName: msg.display_name,
+            })
+            // Reply joined
+            ws.receiveText(
+              JSON.stringify({
+                type: 'joined',
+                member_id: meta.sessionId,
+                role: 'Guest',
+                mode: 'COLLAB',
+                permissions: { can_edit: true, can_run: true },
+              }),
+            )
+          }
+        } catch {
+          // ignore
+        }
+      }
+
+      handleBinary(ws: RelaySocket, data: Uint8Array) {
+        const meta = this.docSockets.get(ws)
+        if (!meta) return
+        const isAwareness = data.length > 0 && data[0] === 1
+
+        for (const [client, clientMeta] of this.docSockets.entries()) {
+          if (
+            client !== ws &&
+            clientMeta.roomId === meta.roomId &&
+            clientMeta.docId === meta.docId &&
+            client.readyState === 1
+          ) {
+            client.receiveBinary(data)
+          }
+        }
+
+        if (isAwareness && ws.readyState === 1) {
+          ws.receiveBinary(data)
+        }
+      }
+
+      handleClose(ws: RelaySocket) {
+        this.controlSockets.delete(ws)
+        this.docSockets.delete(ws)
       }
     }
 
-    const relay = new Relay()
+    const relay = new T20Relay()
 
     class RelaySocket {
       readyState = 1
@@ -185,23 +274,71 @@ describe('RoomPage display-name and colour presence', () => {
       onopen: ((e: Event) => void) | null = null
       onmessage: ((e: MessageEvent) => void) | null = null
       onclose: ((e: CloseEvent) => void) | null = null
+      private listeners: Record<string, Set<(e: Event) => void>> = {}
+
       constructor(url: string) {
         this.url = url
-        relay.clients.add(this)
-        queueMicrotask(() => this.onopen?.(new Event('open')))
+        queueMicrotask(() => {
+          relay.handleOpen(this)
+          if (this.readyState === 1) {
+            const ev = new Event('open')
+            this.onopen?.(ev)
+            this.dispatchEvent('open', ev)
+          }
+        })
       }
-      send(data: unknown) {
-        if (data instanceof Uint8Array || data instanceof ArrayBuffer) {
-          relay.broadcast(this, data)
+
+      addEventListener(type: string, listener: (e: Event) => void, options?: { once?: boolean }) {
+        if (!this.listeners[type]) this.listeners[type] = new Set()
+        if (options?.once) {
+          const onceWrapper = (e: Event) => {
+            this.removeEventListener(type, onceWrapper)
+            listener(e)
+          }
+          this.listeners[type].add(onceWrapper)
+        } else {
+          this.listeners[type].add(listener)
         }
       }
-      receive(data: Uint8Array) {
-        const buf = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength)
-        this.onmessage?.(new MessageEvent('message', { data: buf }))
+
+      removeEventListener(type: string, listener: (e: Event) => void) {
+        this.listeners[type]?.delete(listener)
       }
-      close() {
-        relay.clients.delete(this)
-        this.onclose?.(new CloseEvent('close'))
+
+      private dispatchEvent(type: string, ev: Event) {
+        this.listeners[type]?.forEach((fn) => fn(ev))
+      }
+
+      send(data: unknown) {
+        if (typeof data === 'string') {
+          relay.handleText(this, data)
+        } else if (data instanceof Uint8Array || data instanceof ArrayBuffer) {
+          const uint8 = data instanceof ArrayBuffer ? new Uint8Array(data) : data
+          relay.handleBinary(this, uint8)
+        }
+      }
+
+      receiveText(text: string) {
+        if (this.readyState !== 1) return
+        const ev = new MessageEvent('message', { data: text })
+        this.onmessage?.(ev)
+        this.dispatchEvent('message', ev)
+      }
+
+      receiveBinary(data: Uint8Array) {
+        if (this.readyState !== 1) return
+        const buf = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength)
+        const ev = new MessageEvent('message', { data: buf })
+        this.onmessage?.(ev)
+        this.dispatchEvent('message', ev)
+      }
+
+      close(code = 1000, reason = '') {
+        this.readyState = 3
+        relay.handleClose(this)
+        const ev = new CloseEvent('close', { code, reason })
+        this.onclose?.(ev)
+        this.dispatchEvent('close', ev)
       }
     }
 
