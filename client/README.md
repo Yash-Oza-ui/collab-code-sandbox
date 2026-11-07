@@ -162,11 +162,16 @@ In T-01:
 3. **Yjs Awareness Presence (`src/awareness.ts`):**
    - Stores user presence in Yjs awareness state under `awareness.setLocalStateField('user', { name, color })`.
    - Ready for live cursors (US-03) without rework.
-4. **WebSocket Awareness Synchronization (`src/awarenessWs.ts`):**
-   - Automatically connects to the room WebSocket relay:
-     `ws://localhost:8081/ws/rooms/{room_id}?session_id={session_id}`
-   - Formatted in accordance with T-06 §3.1 and §3.3 using stable UUID v4 stored in `localStorage` (`collab_session_id`).
-   - Binary awareness frames (`MESSAGE_AWARENESS = 1`) and query awareness frames (`MESSAGE_QUERY_AWARENESS = 3`) synchronize participant presence states in real time across peers without echo loops.
+4. **WebSocket Awareness Synchronization & T-20 Protocol (`src/awarenessWs.ts`):**
+   - Implements the T-20 two-socket architecture:
+     - **Control Socket:** `ws://localhost:8081/ws/rooms/{room_id}?session_id={session_id}`
+       - Text-based JSON control frames.
+       - Client sends `{"type": "join", "display_name": "..."}` and receives `{"type": "joined", ...}` along with room `roster` broadcasts.
+     - **Document Socket:** `ws://localhost:8081/ws/rooms/{room_id}/docs/{doc_id}?session_id={session_id}`
+       - Dedicated binary socket for Yjs document updates and awareness frames (default `doc_id = 'main'`).
+       - Enforces T-20 lifecycle: document sockets opened before `join` is completed on the control socket are rejected by the server with close code `4406`.
+       - Binary awareness frames (`MESSAGE_AWARENESS = 1`) and query awareness frames (`MESSAGE_QUERY_AWARENESS = 3`) synchronize participant presence states in real time across peers without echo loops.
+   - Formatted in accordance with T-06 §3.1 / §3.3 and T-20 using stable UUID v4 stored in `localStorage` (`collab_session_id`).
 5. **Browser Console Inspection (DoD #5):**
    - The active awareness instance is exposed at `window.awareness`.
    - Reviewers and developers can inspect the active participants and local presence in DevTools console:
@@ -187,10 +192,12 @@ Run the multi-client relay integration suites:
 ```bash
 npm test src/awarenessWs.test.ts src/RoomPage.displayName.test.tsx
 ```
-Both test suites simulate the sync-service WebSocket relay and verify that:
+Both test suites simulate the sync-service T-20 WebSocket relay (Control socket at `/ws/rooms/{room_id}` and Document socket at `/ws/rooms/{room_id}/docs/{doc_id}`) and verify that:
+- Control join handshake (`join` -> `joined`) succeeds before document socket is established.
+- Document sockets opened before completing `join` are rejected with close code `4406`.
 - Client A joins as Alice.
 - Client B joins as Bob.
-- Both clients receive and observe the other's name and colour in their Awareness states.
+- Both clients receive and observe the other's name and colour in their Awareness states over the document socket.
 - Their assigned colours are distinct.
 
 ### Manual Two-Client Verification (Browser)
