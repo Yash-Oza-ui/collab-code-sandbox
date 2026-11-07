@@ -1,0 +1,177 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "FailingInputAnalysisResponse",
+  "type": "object",
+  "definitions": {
+    "ai_step": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "ok",
+            "skipped"
+          ]
+        },
+        "error_code": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "CONSENT_MISSING",
+            "AI_DISABLED",
+            "COST_CAP_REACHED",
+            "ROOM_RATE_LIMITED",
+            "RATE_LIMITED_PROVIDER",
+            "PROVIDER_ERROR",
+            "PROVIDER_TIMEOUT",
+            null
+          ]
+        }
+      },
+      "required": [
+        "status",
+        "error_code"
+      ],
+      "additionalProperties": false
+    },
+    "test_case": {
+      "type": "object",
+      "properties": {
+        "input": {
+          "type": "string"
+        },
+        "expected_output": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "failure_type": {
+          "type": "string",
+          "enum": [
+            "wrong_output",
+            "crash",
+            "timeout"
+          ]
+        },
+        "language": {
+          "type": "string",
+          "enum": [
+            "cpp",
+            "python",
+            "c",
+            "java",
+            "javascript"
+          ]
+        }
+      },
+      "required": [
+        "input",
+        "expected_output",
+        "failure_type",
+        "language"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "properties": {
+    "request_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "analysis_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "task": {
+      "type": "string",
+      "const": "failing_input"
+    },
+    "failure_found": {
+      "type": "boolean"
+    },
+    "failure_type": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "enum": [
+        "wrong_output",
+        "crash",
+        "timeout",
+        null
+      ]
+    },
+    "original_input": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "minimized_input": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "expected_output": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "actual_output": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "tests_executed": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "minimization_status": {
+      "type": "string",
+      "enum": [
+        "completed",
+        "budget_exhausted",
+        "not_applicable"
+      ]
+    },
+    "test_case": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/test_case"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "can_save_as_test_case": {
+      "type": "boolean"
+    },
+    "ai_step": {
+      "$ref": "#/definitions/ai_step"
+    }
+  },
+  "required": [
+    "request_id",
+    "analysis_id",
+    "task",
+    "failure_found",
+    "failure_type",
+    "original_input",
+    "minimized_input",
+    "expected_output",
+    "actual_output",
+    "tests_executed",
+    "minimization_status",
+    "test_case",
+    "can_save_as_test_case",
+    "ai_step"
+  ],
+  "additionalProperties": false
+}
