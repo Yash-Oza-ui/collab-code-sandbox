@@ -1,17 +1,18 @@
 """Execution failure explainer router.
 
 Implements T-16 (FR13.1, EPIC 3) failure explanation prototype behind T-07 contract.
-Conforms to docs/ai-ml-contract.md §4.3, §5, FR12.3 and US-17 consent gating.
+Conforms to docs/ai-ml-contract.md §4.3, §5, FR12.3, and US-17 consent gating.
 """
 
 import logging
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
 from app.llm import (
     ConsentMissingError,
     LLMProviderError,
+    LLMRateLimitError,
     LLMTimeoutError,
     generate_explanation,
 )
@@ -43,11 +44,21 @@ class ExplainRequest(BaseModel):
     failure_kind: Optional[Literal["compile_error", "non_zero_exit", "timeout"]] = None
 
 
+class AIStep(BaseModel):
+    """AI step execution or skip status (FR12.3, T-18 v2)."""
+
+    status: Literal["ok", "skipped"]
+    error_code: Optional[str] = None
+    suggested_fix: Optional[str] = None
+
+
 class ExplainResponse(BaseModel):
-    """Short plain-language explanation (at most 3 sentences)."""
+    """Plain-language explanation and rule-based findings (FR12.3)."""
 
     request_id: str
-    explanation: str
+    explanation: Optional[str] = None
+    slow_patterns: list[dict[str, Any]] = Field(default_factory=list)
+    ai_step: Optional[AIStep] = None
 
 
 @router.post("/explain", response_model=ExplainResponse)
@@ -78,35 +89,41 @@ async def explain_failure(payload: ExplainRequest, request: Request) -> ExplainR
             language=payload.language,
             consent=payload.consent,
             ai_fallback=explain_fallback,
+            reraise_ai_errors=True,
         )
 
-        # 2. Preserve rule-based findings internally (FR12.3):
-        request.state.rule_findings = rule_analysis.get("slow_patterns", [])
-        logger.info(
-            "Preserved rule-based analysis findings for request_id=%s (patterns_found=%d)",
-            payload.request_id,
-            len(request.state.rule_findings),
-        )
+        slow_patterns = rule_analysis.get("slow_patterns", [])
+        request.state.rule_findings = slow_patterns
 
-        # 3. Check consent gate for external AI call (FR12.2, US-17 Version 0 behavior):
-        # When consent is false or missing (None), rule-based analysis was preserved above,
-        # and NO external LLM call occurs. Raise ConsentMissingError to return HTTP 403 CONSENT_MISSING.
+        # 2. FR12.3 Invariant: When consent is false or missing, return rule-based findings
+        # with HTTP 200 and ai_step.status = "skipped", making 0 outbound LLM calls.
         if payload.consent is not True:
-            raise ConsentMissingError(
-                message="User consent is required before code or execution context can be sent to external AI.",
-                status_code=403,
-                code="CONSENT_MISSING",
+            return ExplainResponse(
+                request_id=payload.request_id,
+                explanation=None,
+                slow_patterns=slow_patterns,
+                ai_step=AIStep(
+                    status="skipped",
+                    error_code="CONSENT_MISSING",
+                    suggested_fix=None,
+                ),
             )
 
-        explanation = rule_analysis["ai_step"]["suggested_fix"]
+        explanation = rule_analysis["ai_step"].get("suggested_fix")
         return ExplainResponse(
             request_id=payload.request_id,
             explanation=explanation,
+            slow_patterns=slow_patterns,
+            ai_step=AIStep(
+                status="ok",
+                error_code=None,
+                suggested_fix=explanation,
+            ),
         )
 
-    except ConsentMissingError as exc:
+    except LLMTimeoutError as exc:
         raise HTTPException(
-            status_code=exc.status_code,
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
             detail={
                 "code": exc.code,
                 "message": exc.message,
@@ -114,9 +131,9 @@ async def explain_failure(payload: ExplainRequest, request: Request) -> ExplainR
             },
         ) from exc
 
-    except LLMTimeoutError as exc:
+    except LLMRateLimitError as exc:
         raise HTTPException(
-            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail={
                 "code": exc.code,
                 "message": exc.message,

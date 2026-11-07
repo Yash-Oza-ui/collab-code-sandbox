@@ -1,7 +1,6 @@
 """FastAPI entrypoint for ai-ml-service.
 
-Scaffold implementation for issue T-04 (Category C).
-Provides GET /health probe and routes conforming to docs/ai-ml-contract.md.
+Provides GET /health probe and routes conforming to docs/ai-ml-contract.md (T-18 v2).
 """
 
 import logging
@@ -11,12 +10,12 @@ from fastapi.responses import JSONResponse
 
 from app.config import settings
 from app.llm.client import ConsentMissingError
-from app.routers import explain
+from app.routers import analyses, explain
 
 app = FastAPI(
     title="Collab Code Sandbox — AI/ML Service",
-    description="Microservice for code review, failure explanation, and execution anomaly scoring.",
-    version="0.1.0",
+    description="Microservice for analysis tasks, complexity calculation, and failure explanation under T-18 v2 contract.",
+    version="0.2.0",
 )
 
 # Configure basic logging to explicitly exclude request bodies (NFR8.2)
@@ -97,10 +96,11 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 def health_check():
     """Liveness probe endpoint returning HTTP 200.
 
-    Conforms to docs/ai-ml-contract.md §4.1 and tests/integration/smoke.sh.
+    Conforms to docs/ai-ml-contract.md §4.1 and §14 (v2).
     """
-    return {"status": "ok", "version": "v0"}
+    return {"status": "ok", "version": "v2"}
 
 
 # Register API routers
+app.include_router(analyses.router, tags=["analyses"])
 app.include_router(explain.router)

@@ -47,6 +47,22 @@ class LLMTimeoutError(LLMProviderError):
         )
 
 
+class LLMRateLimitError(LLMProviderError):
+    """Raised when upstream LLM provider returns HTTP 429 rate limit."""
+
+    def __init__(
+        self,
+        message: str = "The AI provider returned HTTP 429 (rate limited).",
+        retry_after_seconds: Optional[int] = 30,
+    ) -> None:
+        super().__init__(
+            message=message,
+            status_code=429,
+            code="RATE_LIMITED_PROVIDER",
+            retry_after_seconds=retry_after_seconds,
+        )
+
+
 class ConsentMissingError(Exception):
     """Raised when an LLM call is attempted without explicit user consent (FR12.2)."""
 
@@ -147,10 +163,8 @@ class LLMClient:
         if response.status_code == 429:
             retry_header = response.headers.get("Retry-After")
             retry_seconds = int(retry_header) if retry_header and retry_header.isdigit() else 30
-            raise LLMProviderError(
+            raise LLMRateLimitError(
                 message="The AI provider returned HTTP 429 (rate limited).",
-                status_code=429,
-                code="RATE_LIMITED_PROVIDER",
                 retry_after_seconds=retry_seconds,
             )
 

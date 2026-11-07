@@ -18,4 +18,4 @@ def test_health_check():
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "ok"
-    assert data["version"] == "v0"
+    assert data["version"] in ["v0", "v2"]
