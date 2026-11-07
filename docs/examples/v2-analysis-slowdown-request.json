@@ -1,0 +1,15 @@
+{
+  "request_id": "1c2d3e4f-5a6b-7c8d-9e0f-1a2b3c4d5e6f",
+  "room_id": "Zq8-Lw2Ef6Th0Yx4Rn7JbA",
+  "analysis_id": "2d3e4f5a-6b7c-8d9e-0f1a-2b3c4d5e6f7a",
+  "request_type": "slowdown",
+  "language": "python",
+  "consent": true,
+  "ai_enabled": true,
+  "input_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "current_run": {
+    "execution_time_ms": 1420.0,
+    "peak_memory_mb": 18.5,
+    "code": "def process_data(items):\n    time.sleep(1.4)\n    return sorted(items)"
+  }
+}

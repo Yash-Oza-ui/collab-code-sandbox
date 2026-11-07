@@ -87,6 +87,7 @@ The version 2 requirement and backlog documents and their source documents. Vers
 | Record | Status |
 |---|---|
 | [Where platform features live (T-05)](docs/decisions/platform-home.md) | Accepted |
+| [Two room modes (T-23)](docs/decisions/two-room-modes.md) | Proposed |
 
 ---
 

@@ -1,0 +1,8 @@
+{
+  "request_id": "7a3e2b10-6c5d-4f8a-9e12-3456789abcde",
+  "room_id": "Zq8-Lw2Ef6Th0Yx4Rn7JbA",
+  "purpose": "measurement",
+  "language": "python",
+  "code": "def solve(n):\n    pass",
+  "inputs": ["100", "200", "400"]
+}
