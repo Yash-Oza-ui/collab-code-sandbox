@@ -16,8 +16,18 @@ const UUID_V4_REGEX =
 /**
  * Standard WebSocket readyState constants (RFC 6455).
  */
-const WS_CONNECTING = 0
-const WS_OPEN = 1
+export const WS_CONNECTING = 0
+export const WS_OPEN = 1
+export const WS_CLOSING = 2
+export const WS_CLOSED = 3
+
+/**
+ * T-20 Close codes (docs/api-contracts.md & sync-service).
+ */
+export const CLOSE_UNKNOWN_ROOM = 4404
+export const CLOSE_UNKNOWN_DOC = 4405
+export const CLOSE_NOT_JOINED = 4406
+export const CLOSE_ROOM_CLOSED = 4410
 
 /**
  * Generates a valid UUID v4 compliant with RFC 4122 (T-06 §3.3).
@@ -66,10 +76,10 @@ export function getCollabSessionId(
 }
 
 /**
- * Builds the WebSocket connection URL per T-06 §3.1:
+ * Builds the Control WebSocket URL (T-20 / T-17 Section 6.1):
  * ws://localhost:8081/ws/rooms/{room_id}?session_id={session_id}
  */
-export function buildRoomWebSocketUrl(
+export function buildControlWebSocketUrl(
   syncWsUrl: string = DEFAULT_SYNC_WS_URL,
   roomId: string,
   sessionId?: string,
@@ -79,7 +89,33 @@ export function buildRoomWebSocketUrl(
   return `${base}/${encodeURIComponent(roomId)}?session_id=${encodeURIComponent(session)}`
 }
 
-/** Wire message type constants matching y-websocket and T-06 §3.4/§3.5 */
+/**
+ * Builds the Document WebSocket URL (T-20 / T-17 Section 6.1):
+ * ws://localhost:8081/ws/rooms/{room_id}/docs/{doc_id}?session_id={session_id}
+ */
+export function buildDocumentWebSocketUrl(
+  syncWsUrl: string = DEFAULT_SYNC_WS_URL,
+  roomId: string,
+  docId = 'main',
+  sessionId?: string,
+): string {
+  const base = syncWsUrl.replace(/\/+$/, '')
+  const session = sessionId ?? getCollabSessionId()
+  return `${base}/${encodeURIComponent(roomId)}/docs/${encodeURIComponent(docId)}?session_id=${encodeURIComponent(session)}`
+}
+
+/**
+ * Backward-compatible alias for buildControlWebSocketUrl.
+ */
+export function buildRoomWebSocketUrl(
+  syncWsUrl: string = DEFAULT_SYNC_WS_URL,
+  roomId: string,
+  sessionId?: string,
+): string {
+  return buildControlWebSocketUrl(syncWsUrl, roomId, sessionId)
+}
+
+/** Wire binary message type constants matching y-websocket and T-06 §3.4/§3.5 / T-20 */
 export const MESSAGE_SYNC = 0
 export const MESSAGE_AWARENESS = 1
 export const MESSAGE_AUTH = 2
@@ -150,93 +186,244 @@ export function handleIncomingAwarenessFrame(
   }
 }
 
+export interface JoinedMessage {
+  type: 'joined'
+  member_id: string
+  role: string
+  mode: string
+  preset?: string
+  permissions?: {
+    can_edit: boolean
+    can_run: boolean
+  }
+  [key: string]: unknown
+}
+
+export interface JoinRefusedMessage {
+  type: 'join-refused'
+  reason: string
+  message: string
+  [key: string]: unknown
+}
+
+export interface RosterMember {
+  member_id: string
+  display_name: string
+  role: string
+  permissions?: {
+    can_edit: boolean
+    can_run: boolean
+  }
+}
+
+export interface RosterMessage {
+  type: 'roster'
+  members: RosterMember[]
+  [key: string]: unknown
+}
+
 export interface ConnectAwarenessWsOptions {
   roomId: string
+  displayName?: string
+  ownerToken?: string
+  docId?: string
   awareness: Awareness
   syncWsUrl?: string
   sessionId?: string
   WebSocketClass?: typeof WebSocket
+  onJoined?: (msg: JoinedMessage) => void
+  onJoinRefused?: (msg: JoinRefusedMessage) => void
+  onRoster?: (msg: RosterMessage) => void
 }
 
 export interface AwarenessWsConnection {
-  ws: WebSocket | null
+  controlWs: WebSocket | null
+  docWs: WebSocket | null
+  join: (displayName: string, ownerToken?: string) => void
   destroy: () => void
 }
 
 /**
- * Connects an Awareness instance to the sync-service WebSocket relay (T-02 / T-06 / US-05).
- * Synchronizes display names, assigned colours, and presence frames across room participants.
+ * Connects to sync-service following the T-20 two-socket protocol:
+ * 1. Opens Control Socket (/ws/rooms/{roomId}?session_id={sessionId}).
+ * 2. Sends { type: 'join', display_name, owner_token? } and awaits { type: 'joined' }.
+ * 3. Opens Document Socket (/ws/rooms/{roomId}/docs/{docId}?session_id={sessionId}).
+ * 4. Relays Yjs Awareness frames (MESSAGE_AWARENESS=1, MESSAGE_QUERY_AWARENESS=3) over the Document Socket.
  */
 export function connectAwarenessWs(
   options: ConnectAwarenessWsOptions,
 ): AwarenessWsConnection {
   const {
     roomId,
+    displayName,
+    ownerToken,
+    docId = 'main',
     awareness,
     syncWsUrl = getClientConfig().syncWsUrl,
     sessionId = getCollabSessionId(),
     WebSocketClass = typeof WebSocket !== 'undefined' ? WebSocket : undefined,
+    onJoined,
+    onJoinRefused,
+    onRoster,
   } = options
 
   if (!WebSocketClass) {
     return {
-      ws: null,
+      controlWs: null,
+      docWs: null,
+      join: () => {},
       destroy: () => {},
     }
   }
 
-  const url = buildRoomWebSocketUrl(syncWsUrl, roomId, sessionId)
-  const ws = new WebSocketClass(url)
-  ws.binaryType = 'arraybuffer'
+  let docWs: WebSocket | null = null
+  let isDestroyed = false
 
-  const onAwarenessUpdate = (
-    {
-      added,
-      updated,
-      removed,
-    }: { added: number[]; updated: number[]; removed: number[] },
-    origin: unknown,
-  ) => {
-    // Avoid re-transmitting frames we received from this websocket
-    if (origin === ws) return
-    const changedClients = added.concat(updated).concat(removed)
-    if (ws.readyState === WS_OPEN && changedClients.length > 0) {
-      sendBinary(ws, encodeAwarenessMessage(awareness, changedClients))
+  // 1. Establish Control Socket connection
+  const controlUrl = buildControlWebSocketUrl(syncWsUrl, roomId, sessionId)
+  const controlWs = new WebSocketClass(controlUrl)
+
+  const sendJoin = (name: string, token?: string) => {
+    if (controlWs.readyState === WS_OPEN) {
+      const payload: Record<string, string> = {
+        type: 'join',
+        display_name: name,
+      }
+      if (token) {
+        payload.owner_token = token
+      }
+      controlWs.send(JSON.stringify(payload))
     }
   }
 
-  awareness.on('update', onAwarenessUpdate)
-
-  ws.onopen = () => {
-    // Contract Rule 6: query awareness from existing participants upon connecting
-    sendBinary(ws, encodeQueryAwarenessMessage())
-
-    // Advertise local state if already present
-    if (awareness.getLocalState() !== null) {
-      sendBinary(ws, encodeAwarenessMessage(awareness, [awareness.clientID]))
+  controlWs.onopen = () => {
+    if (displayName) {
+      sendJoin(displayName, ownerToken)
     }
   }
 
-  ws.onmessage = (event: MessageEvent) => {
-    if (event.data instanceof ArrayBuffer || event.data instanceof Uint8Array) {
-      handleIncomingAwarenessFrame(awareness, event.data, ws)
+  // Document socket awareness update listener
+  let onDocAwarenessUpdate:
+    | ((
+        update: { added: number[]; updated: number[]; removed: number[] },
+        origin: unknown,
+      ) => void)
+    | null = null
+
+  // 2. Open Document Socket upon receiving 'joined'
+  const openDocumentSocket = () => {
+    if (isDestroyed) return
+    const docUrl = buildDocumentWebSocketUrl(syncWsUrl, roomId, docId, sessionId)
+    docWs = new WebSocketClass(docUrl)
+    docWs.binaryType = 'arraybuffer'
+
+    onDocAwarenessUpdate = (
+      {
+        added,
+        updated,
+        removed,
+      }: { added: number[]; updated: number[]; removed: number[] },
+      origin: unknown,
+    ) => {
+      if (origin === docWs) return
+      const changedClients = added.concat(updated).concat(removed)
+      if (docWs && docWs.readyState === WS_OPEN && changedClients.length > 0) {
+        sendBinary(docWs, encodeAwarenessMessage(awareness, changedClients))
+      }
+    }
+
+    awareness.on('update', onDocAwarenessUpdate)
+
+    docWs.onopen = () => {
+      // Contract Rule 6: query awareness from existing participants upon connecting
+      sendBinary(docWs!, encodeQueryAwarenessMessage())
+
+      // Advertise local state if already present
+      if (awareness.getLocalState() !== null) {
+        sendBinary(docWs!, encodeAwarenessMessage(awareness, [awareness.clientID]))
+      }
+    }
+
+    docWs.onmessage = (event: MessageEvent) => {
+      if (event.data instanceof ArrayBuffer || event.data instanceof Uint8Array) {
+        handleIncomingAwarenessFrame(awareness, event.data, docWs!)
+      }
+    }
+  }
+
+  controlWs.onmessage = (event: MessageEvent) => {
+    if (typeof event.data === 'string') {
+      try {
+        const msg = JSON.parse(event.data) as { type?: string }
+        if (msg.type === 'joined') {
+          onJoined?.(msg as JoinedMessage)
+          openDocumentSocket()
+        } else if (msg.type === 'join-refused') {
+          onJoinRefused?.(msg as JoinRefusedMessage)
+        } else if (msg.type === 'roster') {
+          onRoster?.(msg as RosterMessage)
+        }
+      } catch {
+        // ignore non-json control frames
+      }
+    }
+  }
+
+  const join = (name: string, token?: string) => {
+    if (controlWs.readyState === WS_OPEN) {
+      sendJoin(name, token)
+    } else if (typeof controlWs.addEventListener === 'function') {
+      controlWs.addEventListener(
+        'open',
+        () => {
+          sendJoin(name, token)
+        },
+        { once: true },
+      )
+    } else {
+      const prevOnOpen = controlWs.onopen
+      controlWs.onopen = (ev: Event) => {
+        prevOnOpen?.call(controlWs, ev)
+        sendJoin(name, token)
+      }
     }
   }
 
   const destroy = () => {
-    awareness.off('update', onAwarenessUpdate)
-    if (ws.readyState === WS_OPEN) {
-      try {
-        removeAwarenessStates(awareness, [awareness.clientID], ws)
-        sendBinary(ws, encodeAwarenessMessage(awareness, [awareness.clientID]))
-      } catch {
-        // ignore send error on teardown
+    isDestroyed = true
+    if (onDocAwarenessUpdate) {
+      awareness.off('update', onDocAwarenessUpdate)
+      onDocAwarenessUpdate = null
+    }
+
+    if (docWs) {
+      if (docWs.readyState === WS_OPEN) {
+        try {
+          removeAwarenessStates(awareness, [awareness.clientID], docWs)
+          sendBinary(docWs, encodeAwarenessMessage(awareness, [awareness.clientID]))
+        } catch {
+          // ignore send error during closing
+        }
+        docWs.close()
+      } else if (docWs.readyState === WS_CONNECTING) {
+        docWs.close()
       }
-      ws.close()
-    } else if (ws.readyState === WS_CONNECTING) {
-      ws.close()
+      docWs = null
+    }
+
+    if (controlWs.readyState === WS_OPEN || controlWs.readyState === WS_CONNECTING) {
+      controlWs.close()
     }
   }
 
-  return { ws, destroy }
+  return {
+    get controlWs() {
+      return controlWs
+    },
+    get docWs() {
+      return docWs
+    },
+    join,
+    destroy,
+  }
 }
