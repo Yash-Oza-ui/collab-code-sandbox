@@ -1127,11 +1127,11 @@ Data minimization rule: Every call sends only the relevant code section or funct
 
 ### 16.3 Chandan's Section: Task 3 — Failing Inputs & Delta Minimization (`POST /v1/analyses/failing-input`)
 
-**Traceability:** FR38.1 to FR38.5, CR15, NFR14, US-70 to US-72  
+**Traceability:** FR38.1 to FR38.5, CR15, NFR14, US-70 to US-72
 **Endpoint:** `POST /v1/analyses/failing-input`  
-**Caller:** `execution-service` only (Decision 5)  
-**`request_type`:** `"failing_input"`  
-**Schemas:** `docs/schemas/failing-input-request.json`, `docs/schemas/failing-input-response.json`  
+**Caller:** `execution-service` only (Decision 5)
+**`request_type`:** `"failing_input"`
+**Schemas:** `docs/schemas/failing-input-request.json`, `docs/schemas/failing-input-response.json`
 **Examples:** `docs/examples/v2-analysis-failing-input-request.json`, `docs/examples/v2-analysis-failing-input-response.json`, `docs/examples/v2-analysis-failing-input-consent-missing.json`, `docs/examples/v2-analysis-failing-input-ai-disabled.json`
 
 #### Purpose & Behaviour
@@ -1242,7 +1242,7 @@ The endpoint response is the Task 3 payload. The execution-service wraps it in t
 - A skipped AI step is represented in the HTTP 200 Task 3 response as `ai_step: { "status": "skipped", "error_code": "CONSENT_MISSING" }` or `AI_DISABLED`. Do not return HTTP 403 for these normal blocked-step outcomes. Genuine malformed requests use the shared `INVALID_REQUEST` error envelope (422), as specified by the assembled contract.
 - If both gates are false, use `CONSENT_MISSING` as the primary blocked reason; do not expose multiple error codes in a single `ai_step`.
 
-**Blocked response example — consent missing:** `docs/examples/v2-analysis-failing-input-consent-missing.json`.  
+**Blocked response example — consent missing:** `docs/examples/v2-analysis-failing-input-consent-missing.json`.
 **Blocked response example — Host AI switch disabled:** `docs/examples/v2-analysis-failing-input-ai-disabled.json`.
 
 #### Open Integration Items (must remain visible in the PR)
