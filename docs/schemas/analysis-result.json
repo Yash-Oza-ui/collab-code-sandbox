@@ -1,0 +1,48 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AnalysisResultMessage",
+  "type": "object",
+  "properties": {
+    "type": { "type": "string", "enum": ["analysis-result"] },
+    "request_id": { "type": "string" },
+    "analysis_id": { "type": "string" },
+    "room_id": { "type": "string" },
+    "task": { "type": "string", "enum": ["complexity", "slowdown", "failing_input", "crash_explanation"] },
+    "status": { "type": "string", "enum": ["ok", "fallback", "error"] },
+    "ai_step": {
+      "type": "object",
+      "properties": {
+        "status": { "type": "string", "enum": ["ok", "skipped"] },
+        "error_code": {
+          "type": ["string", "null"],
+          "enum": [
+            "CONSENT_MISSING",
+            "AI_DISABLED",
+            "COST_CAP_REACHED",
+            "ROOM_RATE_LIMITED",
+            "RATE_LIMITED_PROVIDER",
+            "PROVIDER_ERROR",
+            "PROVIDER_TIMEOUT",
+            null
+          ]
+        }
+      },
+      "required": ["status", "error_code"],
+      "additionalProperties": false
+    },
+    "result": { "type": "object" },
+    "message": { "type": "string" }
+  },
+  "required": [
+    "type",
+    "request_id",
+    "analysis_id",
+    "room_id",
+    "task",
+    "status",
+    "ai_step",
+    "result",
+    "message"
+  ],
+  "additionalProperties": false
+}

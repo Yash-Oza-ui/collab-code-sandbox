@@ -50,3 +50,7 @@ app:
       max-output-bytes: 1048576     # PLACEHOLDER (1 MiB)
       # Maximum size of a single run request body (bytes)
       max-request-body-bytes: 1048576  # PLACEHOLDER (1 MiB, T-06 section 2)
+      # FR16 / US-11 – runs waiting or running at once; one more is refused with QUEUE_FULL
+      max-queue-length: 10          # PLACEHOLDER (tune per host in US-16 / DR3)
+      # FR16 – seconds sent in Retry-After and error.retry_after_seconds
+      queue-retry-after-seconds: 5  # PLACEHOLDER
