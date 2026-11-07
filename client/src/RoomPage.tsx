@@ -8,8 +8,9 @@ import {
   createAwareness,
   getExistingUserColors,
   setUserAwareness,
+  type AwarenessUserState,
 } from './awareness'
-import { connectAwarenessWs } from './awarenessWs'
+import { connectAwarenessWs, type AwarenessWsConnection } from './awarenessWs'
 import { getRoomIdFromPath } from './roomId'
 import { useRoomDoc } from './roomDoc'
 import { pickUserColor } from './userColor'
@@ -55,6 +56,7 @@ export default function RoomPage(props: RoomPageProps = {}) {
   const { docRef } = useRoomDoc(roomId, { docRef: externalDocRef })
 
   const awarenessInstanceRef = useRef<Awareness | null>(null)
+  const connRef = useRef<AwarenessWsConnection | null>(null)
 
   // Manage Awareness instance lifecycle tied to active Y.Doc and WebSocket relay
   useEffect(() => {
@@ -72,20 +74,62 @@ export default function RoomPage(props: RoomPageProps = {}) {
       ;(window as unknown as { awareness?: Awareness }).awareness = awareness
     }
 
-    // Connect awareness to room WebSocket relay if in a room (US-05 / T-06)
+    // Listen to remote awareness changes to automatically avoid color collisions once document socket connects
+    const handleAwarenessChange = () => {
+      const localState = awareness.getLocalState() as AwarenessUserState | null
+      const myColor = localState?.user?.color
+      const myName = localState?.user?.name
+      if (!myColor || !myName) return
+
+      const otherColors: string[] = []
+      let collisionWithLowerClientId = false
+
+      awareness.getStates().forEach((peerState, peerClientId) => {
+        if (peerClientId === awareness.clientID) return
+        const peer = (peerState as AwarenessUserState)?.user
+        if (peer?.color) {
+          otherColors.push(peer.color)
+          if (peer.color.toLowerCase() === myColor.toLowerCase()) {
+            if (peerClientId < awareness.clientID) {
+              collisionWithLowerClientId = true
+            }
+          }
+        }
+      })
+
+      if (collisionWithLowerClientId) {
+        const newColor = pickUserColor(otherColors, awareness.clientID)
+        if (newColor !== myColor) {
+          setUserAwareness(awareness, { name: myName, color: newColor })
+          setUserColor(newColor)
+        }
+      }
+    }
+
+    awareness.on('change', handleAwarenessChange)
+
+    // Connect awareness to room WebSocket relay if in a room (US-05 / T-20)
     let wsCleanup: (() => void) | undefined
     if (roomId) {
       const conn = connectAwarenessWs({
         roomId,
+        docId: 'main',
         awareness,
         syncWsUrl: wsOptions?.syncWsUrl,
         sessionId: wsOptions?.sessionId,
         WebSocketClass: wsOptions?.WebSocketClass,
       })
-      wsCleanup = conn.destroy
+      connRef.current = conn
+      wsCleanup = () => {
+        conn.destroy()
+        if (connRef.current === conn) {
+          connRef.current = null
+        }
+      }
     }
 
     return () => {
+      awareness.off('change', handleAwarenessChange)
       wsCleanup?.()
       awareness.destroy()
       if (awarenessInstanceRef.current === awareness) {
@@ -123,6 +167,7 @@ export default function RoomPage(props: RoomPageProps = {}) {
 
     setDisplayName(name)
     setUserColor(color)
+    connRef.current?.join(name)
     onDisplayNameAccepted?.(name, color)
   }
 
