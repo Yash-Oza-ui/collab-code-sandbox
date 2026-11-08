@@ -1,0 +1,60 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "FailingInputAnalysisRequest",
+  "type": "object",
+  "properties": {
+    "request_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "room_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{22}$",
+      "$comment": "T-17 V2.1 server-created room IDs are generated from 128 random bits and encoded as unpadded Base64URL, producing exactly 22 characters. This endpoint accepts those server-created IDs."
+    },
+    "analysis_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "request_type": {
+      "type": "string",
+      "const": "failing_input"
+    },
+    "language": {
+      "type": "string",
+      "enum": [
+        "cpp",
+        "python",
+        "c",
+        "java",
+        "javascript"
+      ]
+    },
+    "consent": {
+      "type": "boolean"
+    },
+    "ai_enabled": {
+      "type": "boolean"
+    },
+    "code": {
+      "type": "string",
+      "minLength": 1
+    },
+    "reference_solution": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Optional internal-only reference source. It may be supplied only by execution-service from an authoritative, server-controlled source. Arbitrary client-provided reference code must never be trusted. Omit when no authoritative source is available. Never send this source to an external AI provider."
+    }
+  },
+  "required": [
+    "request_id",
+    "room_id",
+    "analysis_id",
+    "request_type",
+    "language",
+    "consent",
+    "ai_enabled",
+    "code"
+  ],
+  "additionalProperties": false
+}
