@@ -73,7 +73,7 @@ if [ "$status_room" != "200" ]; then
   exit 1
 fi
 
-if ! echo "$body_room" | grep -q "\"fallback_activations\": 1"; then
+if ! echo "$body_room" | grep -q -E '"fallback_activations"[[:space:]]*:[[:space:]]*1'; then
   fail ai-ml-service "expected room fallback_activations == 1, got: $body_room"
   exit 1
 fi
@@ -89,14 +89,14 @@ if [ "$status_del" != "200" ]; then
   exit 1
 fi
 
-if ! echo "$body_del" | grep -q "\"status\": \"cleared\""; then
+if ! echo "$body_del" | grep -q -E '"status"[[:space:]]*:[[:space:]]*"cleared"'; then
   fail ai-ml-service "expected status: cleared in delete response, got: $body_del"
   exit 1
 fi
 
 # Verify room counters are reset
 resp_room_post_del="$(curl -s -X GET "$base/v1/rooms/$room_id/usage")"
-if ! echo "$resp_room_post_del" | grep -q "\"fallback_activations\": 0"; then
+if ! echo "$resp_room_post_del" | grep -q -E '"fallback_activations"[[:space:]]*:[[:space:]]*0'; then
   fail ai-ml-service "expected fallback_activations == 0 after room clearance, got: $resp_room_post_del"
   exit 1
 fi
