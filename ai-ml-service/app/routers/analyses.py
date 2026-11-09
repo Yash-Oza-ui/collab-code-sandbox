@@ -14,6 +14,13 @@ import numpy as np
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from app.cache import compute_cache_key, get_analysis_cache
+from app.counters import (
+    clear_room,
+    get_room_usage,
+    get_total_usage,
+    record_fallback,
+)
 from app.llm import generate_explanation
 from app.llm.client import call_llm_with_consent
 from app.rules.patterns import (
@@ -212,18 +219,17 @@ async def analyze_complexity(payload: ComplexityRequest, request: Request) -> Co
             prompt=prompt,
             consent=payload.consent,
             ai_enabled=payload.ai_enabled,
+            room_id=payload.room_id,
         )
 
     # 3. Rules-First Static Analysis with Central Consent/AI Gate (FR12.2, FR12.3, FR35)
-    # Always runs AI-free AST/regex pattern detection first.
-    # When consent is false/missing or ai_enabled is false, zero LLM calls occur,
-    # and rule findings are returned with HTTP 200.
     rule_analysis = await run_rule_based_analysis_with_ai_fallback(
         code=payload.code,
         language=payload.language,
         consent=payload.consent,
         ai_enabled=payload.ai_enabled,
         ai_fallback=ai_fallback,
+        room_id=payload.room_id,
     )
 
     ai_step = rule_analysis["ai_step"]
@@ -301,6 +307,7 @@ async def explain_crash(payload: CrashExplanationRequest, request: Request) -> C
 
     # 3. AI Gate (FR12.2, FR35)
     if payload.consent is not True:
+        record_fallback(payload.room_id)
         ai_step = CrashAIStep(
             status="skipped",
             error_code="CONSENT_MISSING",
@@ -308,6 +315,7 @@ async def explain_crash(payload: CrashExplanationRequest, request: Request) -> C
             suggested_fix=None,
         )
     elif payload.ai_enabled is not True:
+        record_fallback(payload.room_id)
         ai_step = CrashAIStep(
             status="skipped",
             error_code="AI_DISABLED",
@@ -327,6 +335,7 @@ async def explain_crash(payload: CrashExplanationRequest, request: Request) -> C
                 oom_killed=False,
                 code=payload.code_snippet,
                 request_id=payload.request_id,
+                room_id=payload.room_id,
             )
             ai_step = CrashAIStep(
                 status="ok",
@@ -336,6 +345,7 @@ async def explain_crash(payload: CrashExplanationRequest, request: Request) -> C
             )
         except Exception as e:
             logger.warning("Crash explanation LLM call failed: %s", e)
+            record_fallback(payload.room_id)
             ai_step = CrashAIStep(
                 status="skipped",
                 error_code="PROVIDER_ERROR",
@@ -356,16 +366,25 @@ async def explain_crash(payload: CrashExplanationRequest, request: Request) -> C
 
 @router.get("/usage")
 @router.get("/analyses/usage")
-async def get_usage() -> dict[str, Any]:
+async def get_usage(room_id: Optional[str] = None) -> dict[str, Any]:
     """Return telemetry usage counters (Task 5, T-18 v2 §16.5)."""
+    if room_id:
+        return get_room_usage(room_id)
+    return get_total_usage()
+
+
+@router.get("/rooms/{room_id}/usage")
+async def get_room_usage_endpoint(room_id: str) -> dict[str, Any]:
+    """Return telemetry usage counters for a specific room (US-75)."""
+    return get_room_usage(room_id)
+
+
+@router.delete("/rooms/{room_id}/state")
+async def clear_room_state(room_id: str) -> dict[str, Any]:
+    """Clean up room-scoped measurement history and counters when closed/deleted (US-56, FR32, T-18 §16.5)."""
+    clear_room(room_id)
+    get_analysis_cache().clear_room(room_id)
     return {
-        "total_model_calls": 0,
-        "total_tokens_used": 0,
-        "total_cache_hits": 0,
-        "total_fallback_activations": 0,
-        "monthly_spend_usd": 0.0,
-        "monthly_budget_usd": 10.0,
-        "alert_80_percent_triggered": False,
-        "cost_cap_reached": False,
-        "rooms_tracked": 0,
+        "room_id": room_id,
+        "status": "cleared",
     }

@@ -85,6 +85,7 @@ async def explain_failure(payload: ExplainRequest, request: Request) -> ExplainR
             oom_killed=payload.oom_killed,
             code=payload.code,
             request_id=payload.request_id,
+            room_id=payload.room_id,
         )
 
     try:
@@ -97,6 +98,7 @@ async def explain_failure(payload: ExplainRequest, request: Request) -> ExplainR
             ai_enabled=payload.ai_enabled,
             ai_fallback=explain_fallback,
             reraise_ai_errors=True,
+            room_id=payload.room_id,
         )
 
         slow_patterns = rule_analysis.get("slow_patterns", [])
