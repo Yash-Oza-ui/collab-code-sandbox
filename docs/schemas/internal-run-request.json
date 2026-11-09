@@ -1,0 +1,31 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "InternalRunRequest",
+  "type": "object",
+  "properties": {
+    "request_id": { "type": "string", "format": "uuid" },
+    "room_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{22}$"
+    },
+    "purpose": {
+      "type": "string",
+      "enum": ["measurement", "test_batch", "sanitizer"]
+    },
+    "language": {
+      "type": "string",
+      "enum": ["cpp", "python", "c", "java", "javascript"]
+    },
+    "code": { "type": "string", "minLength": 1 },
+    "inputs": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "sanitizers": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  },
+  "required": ["request_id", "room_id", "purpose", "language", "code"],
+  "additionalProperties": false
+}

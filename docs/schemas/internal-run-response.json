@@ -1,0 +1,56 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "InternalRunResponse",
+  "type": "object",
+  "properties": {
+    "request_id": { "type": "string" },
+    "purpose": {
+      "type": "string",
+      "enum": ["measurement", "test_batch", "sanitizer"]
+    },
+    "completed_runs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "input": { "type": "string" },
+          "runtimes_ms": {
+            "type": "array",
+            "items": { "type": "number" }
+          }
+        },
+        "required": ["input", "runtimes_ms"],
+        "additionalProperties": false
+      }
+    },
+    "batch_results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "input": { "type": "string" },
+          "status": { "type": "string", "enum": ["pass", "crash", "timeout", "wrong_output"] },
+          "stdout": { "type": "string" },
+          "stderr": { "type": "string" },
+          "exit_code": { "type": "integer" },
+          "execution_time_ms": { "type": "number" }
+        },
+        "required": ["input", "status", "exit_code", "execution_time_ms"],
+        "additionalProperties": false
+      }
+    },
+    "sanitizer_report": {
+      "type": "object",
+      "properties": {
+        "status": { "type": "string", "enum": ["ok", "crashed"] },
+        "exit_code": { "type": "integer" },
+        "sanitizer_output": { "type": "string" },
+        "execution_time_ms": { "type": "number" }
+      },
+      "required": ["status", "exit_code", "sanitizer_output", "execution_time_ms"],
+      "additionalProperties": false
+    }
+  },
+  "required": ["request_id", "purpose"],
+  "additionalProperties": false
+}

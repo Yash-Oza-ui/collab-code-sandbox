@@ -1,0 +1,20 @@
+{
+  "type": "analysis-result",
+  "request_id": "5a6b7c8d-9e0f-1a2b-3c4d-5e6f7a8b9c0d",
+  "analysis_id": "6b7c8d9e-0f1a-2b3c-4d5e-6f7a8b9c0d1e",
+  "room_id": "Zq8-Lw2Ef6Th0Yx4Rn7JbA",
+  "task": "crash_explanation",
+  "status": "ok",
+  "ai_step": {
+    "status": "ok",
+    "error_code": null
+  },
+  "result": {
+    "error_type": "heap-buffer-overflow",
+    "line_number": 14,
+    "summary": "Detected heap-buffer-overflow at line 14.",
+    "explanation": "The program attempted to read 4 bytes past the end of the allocated buffer at line 14. Ensure the index variable is strictly less than the allocated buffer size.",
+    "suggested_fix": "Add a boundary check: if (index >= buffer_size) return -1;"
+  },
+  "message": "Crash explained: heap-buffer-overflow at line 14."
+}

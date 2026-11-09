@@ -1,0 +1,35 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ErrorEnvelope",
+  "type": "object",
+  "properties": {
+    "request_id": { "type": ["string", "null"] },
+    "error": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "INVALID_REQUEST",
+            "UNSUPPORTED_LANGUAGE",
+            "RUN_BUDGET_EXCEEDED",
+            "CONSENT_MISSING",
+            "AI_DISABLED",
+            "COST_CAP_REACHED",
+            "ROOM_RATE_LIMITED",
+            "RATE_LIMITED_PROVIDER",
+            "PROVIDER_ERROR",
+            "PROVIDER_TIMEOUT",
+            "HTTP_ERROR"
+          ]
+        },
+        "message": { "type": "string" },
+        "retry_after_seconds": { "type": ["integer", "null"] }
+      },
+      "required": ["code", "message", "retry_after_seconds"],
+      "additionalProperties": false
+    }
+  },
+  "required": ["request_id", "error"],
+  "additionalProperties": false
+}

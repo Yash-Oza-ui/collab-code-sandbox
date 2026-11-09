@@ -1,0 +1,24 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AnalysesEntryRequest",
+  "type": "object",
+  "properties": {
+    "request_id": { "type": "string", "format": "uuid" },
+    "room_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{22}$"
+    },
+    "task": {
+      "type": "string",
+      "enum": ["complexity", "slowdown", "failing_input", "crash_explanation"]
+    },
+    "language": {
+      "type": "string",
+      "enum": ["cpp", "python", "c", "java", "javascript"]
+    },
+    "consent": { "type": "boolean" },
+    "code": { "type": "string" }
+  },
+  "required": ["request_id", "room_id", "task", "language", "consent"],
+  "additionalProperties": false
+}
