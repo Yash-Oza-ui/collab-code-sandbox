@@ -1,19 +1,41 @@
 
 // @vitest-environment happy-dom
-import { act } from 'react'
+import { act, useEffect, useRef } from 'react'
 import { createRoot } from 'react-dom/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import RoomPage from './RoomPage'
-
+import { joinRoom } from './roomConnection'
 
 vi.mock('./roomConnection', () => ({
   joinRoom: vi.fn(),
   createDocumentProvider: vi.fn(),
 }))
 
-vi.mock('@monaco-editor/react', () => ({
-  default: () => <div data-testid="mock-monaco-editor" />,
-}))
+vi.mock('@monaco-editor/react', () => {
+  function MockEditor({
+    onMount,
+  }: {
+    onMount?: (editor: { getModel: () => object }) => void
+  }) {
+    const mounted = useRef(false)
+
+    useEffect(() => {
+      if (mounted.current) return
+
+      mounted.current = true
+
+      onMount?.({
+        getModel: () => ({}),
+      })
+    }, [onMount])
+
+    return <div data-testid="mock-monaco-editor" />
+  }
+
+  return {
+    default: MockEditor,
+  }
+})
 
 vi.mock('y-monaco', () => ({
   MonacoBinding: class {
@@ -97,5 +119,41 @@ describe('RoomPage display-name gate and invalid room links', () => {
 
     expect(container!.textContent).toContain('Invalid room link')
     expect(container!.textContent).not.toContain('Connecting to room...')
+  })
+
+  it('cancels a pending room join when the component unmounts', async () => {
+    let capturedSignal: AbortSignal | undefined
+
+    vi.mocked(joinRoom).mockImplementation(
+      (_roomId, _displayName, _sessionId, options) => {
+        capturedSignal = options?.signal
+
+        return new Promise(() => {})
+      },
+    )
+
+    await renderRoomAt('/room/room-demo')
+
+    const input = container!.querySelector<HTMLInputElement>('#display-name')!
+    const form = container!.querySelector<HTMLFormElement>('form')!
+
+    await act(async () => {
+      input.value = 'Chandan'
+      form.dispatchEvent(
+        new Event('submit', { bubbles: true, cancelable: true }),
+      )
+    })
+
+    expect(joinRoom).toHaveBeenCalled()
+    expect(capturedSignal).toBeDefined()
+    expect(capturedSignal?.aborted).toBe(false)
+
+    await act(async () => {
+      root?.unmount()
+    })
+
+    root = null
+
+    expect(capturedSignal?.aborted).toBe(true)
   })
 })

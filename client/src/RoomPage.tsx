@@ -49,6 +49,7 @@ export default function RoomPage(props: RoomPageProps = {}) {
     const roomEditor = editor
 
     let cancelled = false
+    const joinAbortController = new AbortController()
     let controlSocket: WebSocket | null = null
     let provider: ReturnType<typeof createDocumentProvider> | null = null
     let binding: MonacoBinding | null = null
@@ -56,7 +57,12 @@ export default function RoomPage(props: RoomPageProps = {}) {
     async function connect() {
       try {
         const sessionId = getSessionId()
-        const result = await joinRoom(validRoomId, acceptedDisplayName, sessionId)
+        const result = await joinRoom(
+          validRoomId,
+          acceptedDisplayName,
+          sessionId,
+          { signal: joinAbortController.signal },
+        )
 
         if (cancelled) {
           result.socket.close()
@@ -114,6 +120,7 @@ export default function RoomPage(props: RoomPageProps = {}) {
 
     return () => {
       cancelled = true
+      joinAbortController.abort()
       binding?.destroy()
       provider?.destroy()
       controlSocket?.close()
