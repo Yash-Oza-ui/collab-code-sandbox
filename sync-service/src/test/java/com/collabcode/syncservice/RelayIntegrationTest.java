@@ -22,6 +22,12 @@ import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.*;
 
+import com.collabcode.syncservice.room.Room;
+import com.collabcode.syncservice.room.RoomMode;
+import com.collabcode.syncservice.room.RoomStore;
+import org.junit.jupiter.api.BeforeEach;
+import org.springframework.beans.factory.annotation.Autowired;
+
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -57,6 +63,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 )
 class RelayIntegrationTest {
 
+    @Autowired
+    private RoomStore roomStore;
+
     @LocalServerPort
     int port;
 
@@ -65,6 +74,27 @@ class RelayIntegrationTest {
     private static final String SESSION_B = "b0000000-0000-4000-8000-000000000002";
     private static final String SESSION_C = "c0000000-0000-4000-8000-000000000003";
     private static final String TOKEN     = "test-token-ci";
+
+        @BeforeEach
+    void seedTestRooms() {
+        seedRoom("room-relay-test");
+        seedRoom("room-echo-test");
+        seedRoom("room-isolation-1");
+        seedRoom("room-isolation-2");
+        seedRoom("room-awareness-test");
+        seedRoom("room-disconnect-test");
+        seedRoom("room-internal-test");
+    }
+
+    private void seedRoom(String roomId) {
+        roomStore.put(new Room(
+                roomId,
+                RoomMode.PAIR,
+                "debug_together",
+                null,
+                "test-owner-token-hash"
+        ));
+    }
 
     // -----------------------------------------------------------------------
     // 1. Health endpoint

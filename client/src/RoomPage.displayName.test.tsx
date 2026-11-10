@@ -8,6 +8,12 @@ vi.mock('@monaco-editor/react', () => ({
   default: () => <div data-testid="mock-monaco-editor" />,
 }))
 
+vi.mock('y-monaco', () => ({
+  MonacoBinding: class {
+    destroy() {}
+  },
+}))
+
 ;(globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true
 
 describe('RoomPage display-name gate', () => {

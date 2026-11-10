@@ -14,6 +14,12 @@ vi.mock('@monaco-editor/react', () => ({
   default: () => <div data-testid="mock-monaco-editor" />,
 }))
 
+vi.mock('y-monaco', () => ({
+  MonacoBinding: class {
+    destroy() {}
+  },
+}))
+
 describe('createRoomDoc', () => {
   it('creates an initialized Y.Doc instance with valid clientID', () => {
     const doc = createRoomDoc()
