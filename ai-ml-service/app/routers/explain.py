@@ -109,6 +109,7 @@ async def explain_failure(payload: ExplainRequest, request: Request) -> ExplainR
         # 2. FR12.3 Invariant: When consent is false or missing, return rule-based findings
         # with HTTP 200 and ai_step.status = "skipped", making 0 outbound LLM calls.
         if payload.consent is not True:
+            request.state.error_code = "CONSENT_MISSING"
             return ExplainResponse(
                 request_id=payload.request_id,
                 explanation=None,
@@ -123,6 +124,7 @@ async def explain_failure(payload: ExplainRequest, request: Request) -> ExplainR
         # 3. Host AI Switch Invariant (FR35): When AI is disabled or missing, return rule-based findings
         # with HTTP 200 and ai_step.status = "skipped", error_code = "AI_DISABLED".
         if payload.ai_enabled is not True:
+            request.state.error_code = "AI_DISABLED"
             return ExplainResponse(
                 request_id=payload.request_id,
                 explanation=None,
@@ -135,6 +137,7 @@ async def explain_failure(payload: ExplainRequest, request: Request) -> ExplainR
             )
 
         explanation = rule_analysis["ai_step"].get("suggested_fix")
+        request.state.error_code = None
         return ExplainResponse(
             request_id=payload.request_id,
             explanation=explanation,
@@ -158,6 +161,7 @@ async def explain_failure(payload: ExplainRequest, request: Request) -> ExplainR
         ) from exc
 
     except LLMRateLimitError as exc:
+        request.state.error_code = exc.code
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail={
