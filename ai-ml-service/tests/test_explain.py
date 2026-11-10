@@ -37,6 +37,7 @@ SAMPLE_PAYLOAD = {
     "request_type": "explanation",
     "language": "python",
     "consent": True,
+    "ai_enabled": True,
     "code": "def divide(a, b):\n    return a / b\nprint(divide(10, 0))",
     "stderr": "ZeroDivisionError: division by zero",
     "exit_code": 1,
@@ -262,16 +263,17 @@ async def test_explain_provider_rate_limited_returns_429_contract_error():
     assert data["error"]["retry_after_seconds"] == 45
 
 
-def test_explain_missing_consent_returns_403_consent_missing():
-    """Test payload with consent=False returns HTTP 403 CONSENT_MISSING (FR12)."""
+def test_explain_missing_consent_returns_200_with_skipped_ai_step():
+    """Test payload with consent=False returns HTTP 200 with skipped AI step (FR12.3, T-18 v2)."""
     no_consent_payload = dict(SAMPLE_PAYLOAD)
     no_consent_payload["consent"] = False
 
     response = client.post("/v1/explain", json=no_consent_payload)
-    assert response.status_code == 403
+    assert response.status_code == 200
     data = response.json()
     assert data["request_id"] == no_consent_payload["request_id"]
-    assert data["error"]["code"] == "CONSENT_MISSING"
+    assert data["ai_step"]["status"] == "skipped"
+    assert data["ai_step"]["error_code"] == "CONSENT_MISSING"
 
 
 # ============================================================================

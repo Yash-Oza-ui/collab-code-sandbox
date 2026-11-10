@@ -1,0 +1,10 @@
+{
+  "request_id": "3e4f5a6b-7c8d-9e0f-1a2b-3c4d5e6f7a8b",
+  "room_id": "Zq8-Lw2Ef6Th0Yx4Rn7JbA",
+  "analysis_id": "4f5a6b7c-8d9e-0f1a-2b3c-4d5e6f7a8b9c",
+  "request_type": "failing_input",
+  "language": "python",
+  "consent": true,
+  "ai_enabled": true,
+  "code": "values = list(map(int, input().split()))\nprint(max(values))"
+}
