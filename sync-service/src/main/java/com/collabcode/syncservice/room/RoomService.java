@@ -142,4 +142,28 @@ public class RoomService {
         }
         return null;
     }
+
+    /**
+     * Register an Open-mode module in the given room (V2.6).
+     * Returns {@code false} if the room is unknown or is not in Open mode.
+     * The document socket uses {@link #isKnownModule} to validate doc_id (4405).
+     */
+    public boolean registerModule(String roomId, String moduleId) {
+        Room room = store.get(roomId);
+        if (room == null) return false;
+        // Modules are only valid in Open mode; Pair mode has no modules
+        if (room.getMode() == RoomMode.PAIR) return false;
+        room.registerModule(moduleId);
+        return true;
+    }
+
+    /**
+     * Returns {@code true} if {@code moduleId} has been registered in an Open-mode room.
+     * Always {@code false} for Pair rooms or unknown rooms.
+     */
+    public boolean isKnownModule(String roomId, String moduleId) {
+        Room room = store.get(roomId);
+        if (room == null) return false;
+        return room.hasModule(moduleId);
+    }
 }

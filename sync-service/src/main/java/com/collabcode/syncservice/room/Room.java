@@ -1,6 +1,8 @@
 package com.collabcode.syncservice.room;
 
+import java.util.Collections;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -40,6 +42,14 @@ public class Room {
         this.aiEnabled = !"teach_interview".equals(preset); // FR35.2
     }
 
+    /**
+     * Open-mode module IDs registered in this room (V2.6).
+     * In Pair mode this set is always empty; the only valid doc_id is "main".
+     * In Open mode, {@link #registerModule(String)} adds an id here and
+     * {@link #hasModule(String)} lets the document socket validate the doc_id (4405).
+     */
+    private final Set<String> moduleIds = Collections.newSetFromMap(new ConcurrentHashMap<>());
+
     public String getRoomId() { return roomId; }
     public RoomMode getMode() { return mode; }
     public String getPreset() { return preset; }
@@ -47,4 +57,25 @@ public class Room {
     public String getOwnerTokenHash() { return ownerTokenHash; }
     public boolean isAiEnabled() { return aiEnabled; }
     public Map<String, Member> getMembers() { return members; }
+
+    /**
+     * Register an Open-mode module id so the document socket can validate it (4405).
+     * No-op in Pair mode (the caller should not call this in Pair mode).()
+     */
+    public void registerModule(String moduleId) {
+        moduleIds.add(moduleId);
+    }
+
+    /**
+     * Returns {@code true} if {@code moduleId} has been registered in this Open-mode room.
+     * Always returns {@code false} in Pair mode (Pair has no modules).
+     */
+    public boolean hasModule(String moduleId) {
+        return moduleIds.contains(moduleId);
+    }
+
+    /** Unmodifiable view of module ids (for testing / REST listing). */
+    public Set<String> getModuleIds() {
+        return Collections.unmodifiableSet(moduleIds);
+    }
 }

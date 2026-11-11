@@ -196,6 +196,7 @@ public class ControlHandler extends AbstractWebSocketHandler {
         } catch (Exception e) {
             sendText(session, objectMapper.writeValueAsString(
                     RoomMessages.joinRefused("INVALID_MESSAGE", "Join message is not valid JSON")));
+            closeSessionQuietly(session);
             return;
         }
 
@@ -204,6 +205,7 @@ public class ControlHandler extends AbstractWebSocketHandler {
             sendText(session, objectMapper.writeValueAsString(
                     RoomMessages.joinRefused("INVALID_MESSAGE",
                             "First message must be a 'join' frame")));
+            closeSessionQuietly(session);
             return;
         }
 
@@ -211,6 +213,7 @@ public class ControlHandler extends AbstractWebSocketHandler {
         if (nameNode == null || nameNode.asText().isBlank()) {
             sendText(session, objectMapper.writeValueAsString(
                     RoomMessages.joinRefused("INVALID_MESSAGE", "display_name is required")));
+            closeSessionQuietly(session);
             return;
         }
         String displayName = nameNode.asText().trim();
@@ -235,12 +238,7 @@ public class ControlHandler extends AbstractWebSocketHandler {
             // join-refused, EXCEPT for APPROVAL_PENDING where it must remain open
             // until the server later sends join-approved or join-declined.
             if (!"APPROVAL_PENDING".equals(reason)) {
-                try {
-                    session.close(CloseStatus.NORMAL);
-                } catch (IOException ex) {
-                    log.warn("Control: failed to close session after join-refused wsSession={}: {}",
-                            session.getId(), ex.getMessage());
-                }
+                closeSessionQuietly(session);
             }
             return;
         }
@@ -280,6 +278,21 @@ public class ControlHandler extends AbstractWebSocketHandler {
             }
         } catch (IOException e) {
             log.warn("Control: send failed to wsSession={}: {}", target.getId(), e.getMessage());
+        }
+    }
+
+    /**
+     * Close {@code session} with {@link CloseStatus#NORMAL}, swallowing any
+     * {@link IOException} that the WebSocket container may throw when the
+     * connection is already half-closed (the message was sent; the frame is
+     * flushed before this call).
+     */
+    private void closeSessionQuietly(WebSocketSession session) {
+        try {
+            session.close(CloseStatus.NORMAL);
+        } catch (IOException ex) {
+            log.warn("Control: failed to close session after join-refused wsSession={}: {}",
+                    session.getId(), ex.getMessage());
         }
     }
 

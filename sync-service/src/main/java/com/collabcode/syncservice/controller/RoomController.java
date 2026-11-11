@@ -4,9 +4,11 @@ import com.collabcode.syncservice.room.OwnerTokens;
 import com.collabcode.syncservice.room.Room;
 import com.collabcode.syncservice.room.RoomIds;
 import com.collabcode.syncservice.room.RoomMode;
+import com.collabcode.syncservice.room.RoomService;
 import com.collabcode.syncservice.room.RoomStore;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -36,9 +38,11 @@ public class RoomController {
     private static final Set<String> PRESETS = Set.of("teach_interview", "debug_together");
 
     private final RoomStore store;
+    private final RoomService roomService;
 
-    public RoomController(RoomStore store) {
+    public RoomController(RoomStore store, RoomService roomService) {
         this.store = store;
+        this.roomService = roomService;
     }
 
     @PostMapping("/rooms")
@@ -100,6 +104,34 @@ public class RoomController {
     private ResponseEntity<Map<String, Object>> unsupportedLanguage(String language) {
         return envelope("UNSUPPORTED_LANGUAGE",
                 "Language '" + language + "' is not supported. Use one of: cpp, python, c, java, javascript.");
+    }
+
+    /**
+     * Register an Open-mode module id in a room (V2.6, partial implementation).
+     * {@code POST /v1/rooms/{room_id}/modules} with body {@code {"module_id":".."}}`r
+     * returns {@code 201} with the module_id on success, or 404 if the room is unknown.
+     * Full module creation (pending, approval, etc.) is a later story; this endpoint
+     * exists so the document socket (4405 validation) has a source of truth.
+     */
+    @PostMapping("/rooms/{roomId}/modules")
+    public ResponseEntity<?> registerModule(@PathVariable String roomId,
+                                            @RequestBody(required = false) Map<String, Object> body) {
+        Room room = store.get(roomId);
+        if (room == null) {
+            return ResponseEntity.notFound().build();
+        }
+        if (room.getMode() != RoomMode.OPEN) {
+            return ResponseEntity.status(HttpStatus.UNPROCESSABLE_ENTITY)
+                    .body(Map.of("error", "modules are only valid in Open mode"));
+        }
+        String moduleId = (body != null && body.containsKey("module_id"))
+                ? String.valueOf(body.get("module_id")) : null;
+        if (moduleId == null || moduleId.isBlank()) {
+            return ResponseEntity.status(HttpStatus.UNPROCESSABLE_ENTITY)
+                    .body(Map.of("error", "module_id is required"));
+        }
+        roomService.registerModule(roomId, moduleId);
+        return ResponseEntity.status(HttpStatus.CREATED).body(Map.of("module_id", moduleId));
     }
 
     private ResponseEntity<Map<String, Object>> envelope(String code, String message) {

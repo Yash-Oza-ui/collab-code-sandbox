@@ -228,16 +228,27 @@ public class DocumentHandler extends AbstractWebSocketHandler {
             return;
         }
 
-        // 4405: doc_id validation — Pair mode has exactly one document 'main'
-        // (contract V2.5; Open-mode module store is a later story, so any
-        // format-valid module_id is accepted until that store exists)
+        // 4405: doc_id validation (contract V2.5)
+        //   Pair mode  — only 'main' is a valid doc_id.
+        //   Open mode  — doc_id is a module_id; it must have been registered via
+        //                POST /v1/rooms/{room_id}/modules before the socket is opened.
         Room roomForDocCheck = roomStore.get(roomId);
-        if (roomForDocCheck != null && roomForDocCheck.getMode() == RoomMode.PAIR) {
-            if (!"main".equals(docId)) {
-                log.warn("Doc: closing {}: doc_id '{}' is not valid for Pair room {} (4405)",
-                        session.getId(), docId, roomId);
-                session.close(new CloseStatus(CLOSE_UNKNOWN_DOC, "Unknown doc_id"));
-                return;
+        if (roomForDocCheck != null) {
+            if (roomForDocCheck.getMode() == RoomMode.PAIR) {
+                if (!"main".equals(docId)) {
+                    log.warn("Doc: closing {}: doc_id '{}' is not 'main' in Pair room {} (4405)",
+                            session.getId(), docId, roomId);
+                    session.close(new CloseStatus(CLOSE_UNKNOWN_DOC, "Unknown doc_id"));
+                    return;
+                }
+            } else {
+                // Open mode: validate against the registered module registry
+                if (!roomService.isKnownModule(roomId, docId)) {
+                    log.warn("Doc: closing {}: module_id '{}' not registered in Open room {} (4405)",
+                            session.getId(), docId, roomId);
+                    session.close(new CloseStatus(CLOSE_UNKNOWN_DOC, "Unknown module_id"));
+                    return;
+                }
             }
         }
 
