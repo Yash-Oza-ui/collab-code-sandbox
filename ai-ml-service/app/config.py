@@ -16,10 +16,16 @@ class Settings:
         self.LLM_BASE_URL: Optional[str] = os.getenv("LLM_BASE_URL")
         self.LLM_TIMEOUT_SECONDS: float = float(os.getenv("LLM_TIMEOUT_SECONDS", "10.0"))
 
+        # Room rate limiting (NFR5.3, US-22, DR3)
+        self.ROOM_HOURLY_LIMIT: int = int(os.getenv("ROOM_HOURLY_LIMIT", "20"))
+
     def __repr__(self) -> str:
         # Never print or log the actual API key (NFR8.2)
         key_status = "set" if self.LLM_API_KEY else "unset"
-        return f"<Settings PORT={self.PORT} LLM_MODEL={self.LLM_MODEL!r} LLM_API_KEY={key_status}>"
+        return (
+            f"<Settings PORT={self.PORT} LLM_MODEL={self.LLM_MODEL!r} "
+            f"ROOM_HOURLY_LIMIT={self.ROOM_HOURLY_LIMIT} LLM_API_KEY={key_status}>"
+        )
 
     def __str__(self) -> str:
         return self.__repr__()

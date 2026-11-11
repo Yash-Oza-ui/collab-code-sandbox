@@ -11,12 +11,14 @@ The AI/ML microservice for **Collab Code Sandbox** (IT-314, Group 32). This serv
 ## Architecture & Responsibilities
 
 - **Scaffold (T-04):** FastAPI web service running on port 8000, health check at `/health`.
-- **Contracts (T-07):** Endpoints and payloads conform to `../docs/ai-ml-contract.md`.
+- **Contracts (T-07 / T-18 v2):** Endpoints and payloads conform to `../docs/ai-ml-contract.md`.
 - **Endpoints:**
   - `GET /health`: Liveness probe for container orchestration and smoke tests.
-  - `POST /v1/anomaly`: Metric-only anomaly scoring (T-13, T-15).
-  - `POST /v1/explain`: Plain-language failed run explainer (FR13, T-16).
-  - `POST /v1/review`: On-demand code review (FR7, FR12).
+  - `POST /v1/analyses/complexity`: Rules-first time complexity analysis with verified AI fallback (FR36, US-17, US-22).
+  - `POST /v1/analyses/crash-explanation`: Deterministic C/C++ sanitizer parser with crash explanation fallback (FR39, DR5).
+  - `POST /v1/explain`: Execution failure explainer behind consent, normalized caching, and rate limits (T-16, US-22).
+  - `GET /v1/usage`: Aggregate AI telemetry counters (T-18 v2).
+  - `DELETE /v1/rooms/{room_id}/state`: Purges room-scoped cache entries and resets rate-limit state (US-22, US-56, FR32).
 
 ## Local Development Setup
 
@@ -69,9 +71,28 @@ The AI/ML microservice for **Collab Code Sandbox** (IT-314, Group 32). This serv
 | `PORT` | Service listening port | `8000` | No |
 | `LLM_API_KEY` | API key for the external LLM provider | `None` | No (service starts without key) |
 | `LLM_MODEL` | Target LLM model name | `gemini-1.5-flash` | No |
+| `ROOM_HOURLY_LIMIT` | Max outbound AI calls per room per rolling hour (NFR5.3) | `20` | No |
 
 > **Security & Privacy Note (NFR8.2, NFR10):**
 > Never commit `.env` or real API keys to version control. The service starts normally even when `LLM_API_KEY` is not set. The service never logs request bodies, source code, stderr text, or API keys.
+
+## AI Request Control, Normalization & Rate Limiting (US-22)
+
+AI steps across all analysis endpoints enforce the controlled execution sequence defined in `NFR5.1`, `NFR5.2`, `NFR5.3`, and `FR40.3`:
+
+1. **Consent & Host AI Switch Gates (`US-17`, `FR35`):** External AI calls never execute unless both `consent=true` and `ai_enabled=true` in the request. Otherwise, rule-based / deterministic results still return HTTP 200 with a skipped `ai_step` (`CONSENT_MISSING` or `AI_DISABLED`).
+2. **Normalized SHA-256 Code Cache (`app/cache.py`, `NFR5.2`, `NFR8.2`):**
+   - Supported DR1 languages (`python`, `cpp`, `c`, `java`, `javascript`) are normalized before hashing:
+     - **Python:** Tokenized via standard-library `tokenize`; removes `#` comments, standalone docstrings, and excess whitespace/blank lines while preserving string literals and semantic `INDENT`/`DEDENT` structure.
+     - **C / C++ / Java / JavaScript:** Character-scanner strips `//` and `/* */` comments while preserving string/character/template literals verbatim and normalizing punctuation/operator whitespace.
+   - Cache key formula: `SHA-256(normalized_code + "\n" + language + "\n" + request_type + "\n" + error_output)`.
+   - Only the 64-character hexadecimal digest is stored in `AnalysisCache`; no source code or stderr is persisted or logged.
+   - Cache hits return immediately without invoking the LLM or consuming room rate-limit quota.
+3. **Per-Room Hourly Rate Limiting (`app/limiter.py`, `NFR5.3`, `DR3`):**
+   - `RoomRateLimiter` tracks outbound LLM call timestamps per `room_id` over a rolling 1-hour window against `ROOM_HOURLY_LIMIT` (default: `20`).
+   - Over-limit requests return HTTP 200 with AI-free findings intact and `ai_step: { "status": "skipped", "error_code": "ROOM_RATE_LIMITED" }`.
+4. **Room State Cleanup (`US-56`, `FR32`):**
+   - `DELETE /v1/rooms/{room_id}/state` evicts room-scoped cache keys and resets that room's rate-limit counters.
 
 ## Running the Service
 

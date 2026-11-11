@@ -14,7 +14,17 @@ import numpy as np
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from app.llm import generate_explanation
+from app.cache import compute_cache_key, get_analysis_cache
+from app.limiter import get_room_rate_limiter
+from app.llm import (
+    AIDisabledError,
+    ConsentMissingError,
+    LLMProviderError,
+    LLMRateLimitError,
+    LLMTimeoutError,
+    RoomRateLimitedError,
+    generate_explanation,
+)
 from app.llm.client import call_llm_with_consent
 from app.rules.patterns import (
     detect_slow_patterns,
@@ -224,6 +234,8 @@ async def analyze_complexity(payload: ComplexityRequest, request: Request) -> Co
         consent=payload.consent,
         ai_enabled=payload.ai_enabled,
         ai_fallback=ai_fallback,
+        room_id=payload.room_id,
+        request_type="complexity",
     )
 
     ai_step = rule_analysis["ai_step"]
@@ -299,7 +311,7 @@ async def explain_crash(payload: CrashExplanationRequest, request: Request) -> C
 
     summary = f"Detected {error_type} at line {line_number}."
 
-    # 3. AI Gate (FR12.2, FR35)
+    # 3. Controlled AI pipeline (US-17, FR35, NFR5.3, NFR5.2, US-22)
     if payload.consent is not True:
         ai_step = CrashAIStep(
             status="skipped",
@@ -315,33 +327,105 @@ async def explain_crash(payload: CrashExplanationRequest, request: Request) -> C
             suggested_fix=None,
         )
     else:
-        try:
-            explanation = await generate_explanation(
-                language=payload.language,
-                consent=payload.consent,
-                ai_enabled=payload.ai_enabled,
-                failure_kind="crash",
-                exit_code=139,
-                stderr=payload.sanitizer_output,
-                timed_out=False,
-                oom_killed=False,
-                code=payload.code_snippet,
-                request_id=payload.request_id,
-            )
+        cache_key = compute_cache_key(
+            code=payload.code_snippet,
+            language=payload.language,
+            request_type="crash_explanation",
+            error_output=payload.sanitizer_output,
+        )
+        cached_result = get_analysis_cache().get(cache_key, room_id=payload.room_id)
+        if cached_result is not None:
+            # Cache hit: does NOT count towards rate limit calls (US-22)
             ai_step = CrashAIStep(
                 status="ok",
                 error_code=None,
-                explanation=explanation,
-                suggested_fix=f"Add boundary check before line {line_number}.",
+                explanation=cached_result.get("explanation"),
+                suggested_fix=cached_result.get("suggested_fix"),
             )
-        except Exception as e:
-            logger.warning("Crash explanation LLM call failed: %s", e)
+        elif get_room_rate_limiter().is_rate_limited(payload.room_id):
             ai_step = CrashAIStep(
                 status="skipped",
-                error_code="PROVIDER_ERROR",
+                error_code="ROOM_RATE_LIMITED",
                 explanation=None,
                 suggested_fix=None,
             )
+        else:
+            try:
+                get_room_rate_limiter().record_call(payload.room_id)
+                explanation = await generate_explanation(
+                    language=payload.language,
+                    consent=payload.consent,
+                    ai_enabled=payload.ai_enabled,
+                    failure_kind="crash",
+                    exit_code=139,
+                    stderr=payload.sanitizer_output,
+                    timed_out=False,
+                    oom_killed=False,
+                    code=payload.code_snippet,
+                    request_id=payload.request_id,
+                )
+                suggested_fix = f"Add boundary check before line {line_number}."
+                get_analysis_cache().set(
+                    cache_key,
+                    {"explanation": explanation, "suggested_fix": suggested_fix},
+                    room_id=payload.room_id,
+                )
+                ai_step = CrashAIStep(
+                    status="ok",
+                    error_code=None,
+                    explanation=explanation,
+                    suggested_fix=suggested_fix,
+                )
+            except RoomRateLimitedError:
+                ai_step = CrashAIStep(
+                    status="skipped",
+                    error_code="ROOM_RATE_LIMITED",
+                    explanation=None,
+                    suggested_fix=None,
+                )
+            except ConsentMissingError:
+                ai_step = CrashAIStep(
+                    status="skipped",
+                    error_code="CONSENT_MISSING",
+                    explanation=None,
+                    suggested_fix=None,
+                )
+            except AIDisabledError:
+                ai_step = CrashAIStep(
+                    status="skipped",
+                    error_code="AI_DISABLED",
+                    explanation=None,
+                    suggested_fix=None,
+                )
+            except LLMTimeoutError:
+                ai_step = CrashAIStep(
+                    status="skipped",
+                    error_code="PROVIDER_TIMEOUT",
+                    explanation=None,
+                    suggested_fix=None,
+                )
+            except LLMRateLimitError:
+                ai_step = CrashAIStep(
+                    status="skipped",
+                    error_code="RATE_LIMITED_PROVIDER",
+                    explanation=None,
+                    suggested_fix=None,
+                )
+            except LLMProviderError:
+                ai_step = CrashAIStep(
+                    status="skipped",
+                    error_code="PROVIDER_ERROR",
+                    explanation=None,
+                    suggested_fix=None,
+                )
+            except Exception as e:
+                logger.warning("Crash explanation LLM call failed: %s", e)
+                ai_step = CrashAIStep(
+                    status="skipped",
+                    error_code="PROVIDER_ERROR",
+                    explanation=None,
+                    suggested_fix=None,
+                )
 
     return CrashExplanationResponse(
         request_id=payload.request_id,
@@ -369,3 +453,23 @@ async def get_usage() -> dict[str, Any]:
         "cost_cap_reached": False,
         "rooms_tracked": 0,
     }
+
+
+
+class RoomStateResponse(BaseModel):
+    room_id: str
+    status: str = "cleared"
+
+
+@router.delete("/rooms/{room_id}/state", response_model=RoomStateResponse)
+async def clear_room_state(room_id: str, request: Request) -> RoomStateResponse:
+    """Delete room-scoped cache entries and reset room rate limits (US-22, US-56, FR32)."""
+    request.state.room_id = room_id
+    get_analysis_cache().clear_room(room_id)
+    get_room_rate_limiter().clear_room(room_id)
+    try:
+        from app.counters import clear_room_counters
+        clear_room_counters(room_id)
+    except ImportError:
+        pass
+    return RoomStateResponse(room_id=room_id, status="cleared")

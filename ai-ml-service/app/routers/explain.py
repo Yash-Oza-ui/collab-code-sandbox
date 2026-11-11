@@ -1,7 +1,7 @@
 """Execution failure explainer router.
 
 Implements T-16 (FR13.1, EPIC 3) failure explanation prototype behind T-07 contract.
-Conforms to docs/ai-ml-contract.md §4.3, §5, FR12.3, and US-17 consent gating.
+Conforms to docs/ai-ml-contract.md §4.3, §5, FR12.3, US-17 consent gating, and US-22 AI control.
 """
 
 import logging
@@ -15,6 +15,7 @@ from app.llm import (
     LLMProviderError,
     LLMRateLimitError,
     LLMTimeoutError,
+    RoomRateLimitedError,
     generate_explanation,
 )
 from app.rules.patterns import run_rule_based_analysis_with_ai_fallback
@@ -68,9 +69,10 @@ class ExplainResponse(BaseModel):
 
 @router.post("/explain", response_model=ExplainResponse)
 async def explain_failure(payload: ExplainRequest, request: Request) -> ExplainResponse:
-    """Explain a failed run in plain prose using rules-first analysis and LLM API (FR12.3, FR13.1, T-16, US-17)."""
-    # Track request_id for consistent error envelope responses
+    """Explain a failed run in plain prose using rules-first analysis, rate limiting, caching, and LLM API."""
+    # Track request_id and room_id for consistent error envelope and metadata logs (NFR8.2)
     request.state.request_id = payload.request_id
+    request.state.room_id = payload.room_id
 
     # Define the failure explanation AI fallback
     async def explain_fallback() -> str:
@@ -88,8 +90,8 @@ async def explain_failure(payload: ExplainRequest, request: Request) -> ExplainR
         )
 
     try:
-        # 1. Rules-First Static Analysis (FR12.3, US-67):
-        # Always execute rule-based analysis BEFORE any AI fallback.
+        # 1. Rules-First Static Analysis with US-22 AI Control Pipeline:
+        # Consent -> AI Switch -> Room Rate Limit -> Normalized Cache -> AI Call
         rule_analysis = await run_rule_based_analysis_with_ai_fallback(
             code=payload.code,
             language=payload.language,
@@ -97,40 +99,28 @@ async def explain_failure(payload: ExplainRequest, request: Request) -> ExplainR
             ai_enabled=payload.ai_enabled,
             ai_fallback=explain_fallback,
             reraise_ai_errors=True,
+            room_id=payload.room_id,
+            request_type=payload.request_type,
+            error_output=payload.stderr,
         )
 
         slow_patterns = rule_analysis.get("slow_patterns", [])
         request.state.rule_findings = slow_patterns
+        ai_step = rule_analysis["ai_step"]
 
-        # 2. FR12.3 Invariant: When consent is false or missing, return rule-based findings
-        # with HTTP 200 and ai_step.status = "skipped", making 0 outbound LLM calls.
-        if payload.consent is not True:
+        if ai_step.get("status") == "skipped":
             return ExplainResponse(
                 request_id=payload.request_id,
                 explanation=None,
                 slow_patterns=slow_patterns,
                 ai_step=AIStep(
                     status="skipped",
-                    error_code="CONSENT_MISSING",
+                    error_code=ai_step.get("error_code"),
                     suggested_fix=None,
                 ),
             )
 
-        # 3. Host AI Switch Invariant (FR35): When AI is disabled or missing, return rule-based findings
-        # with HTTP 200 and ai_step.status = "skipped", error_code = "AI_DISABLED".
-        if payload.ai_enabled is not True:
-            return ExplainResponse(
-                request_id=payload.request_id,
-                explanation=None,
-                slow_patterns=slow_patterns,
-                ai_step=AIStep(
-                    status="skipped",
-                    error_code="AI_DISABLED",
-                    suggested_fix=None,
-                ),
-            )
-
-        explanation = rule_analysis["ai_step"].get("suggested_fix")
+        explanation = ai_step.get("suggested_fix")
         return ExplainResponse(
             request_id=payload.request_id,
             explanation=explanation,

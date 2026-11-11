@@ -1,20 +1,27 @@
-"""Rule-based code pattern analysis (US-67, FR36.4, FR12.3, T-18 v2).
+"""Rule-based code pattern analysis (US-67, FR36.4, FR12.3, NFR5.2, NFR5.3, US-22, T-18 v2).
 
 Provides static AST and regex rule analysis for slow code patterns before any AI call.
-AI-free analysis runs unconditionally, ensuring that declining consent never prevents
-rule-based analysis results from returning (FR12.3).
+Enforces the mandatory AI control sequence (US-22):
+1. User Consent (US-17)
+2. Host AI Switch (FR35)
+3. Room Hourly Rate Limit (NFR5.3)
+4. Normalized SHA-256 Code Cache (NFR5.2, Decision 11) - cache hits avoid outbound calls
+5. Outbound AI call + caching result
 """
 
 import ast
 import re
 from typing import Any, Optional
 
+from app.cache import compute_cache_key, get_analysis_cache
+from app.limiter import get_room_rate_limiter
 from app.llm import (
     AIDisabledError,
     ConsentMissingError,
     LLMProviderError,
     LLMRateLimitError,
     LLMTimeoutError,
+    RoomRateLimitedError,
     call_llm_with_consent,
 )
 from app.llm.client import LLMClient
@@ -113,26 +120,23 @@ async def run_rule_based_analysis_with_ai_fallback(
     client: Optional[LLMClient] = None,
     ai_fallback: Optional[Any] = None,
     reraise_ai_errors: bool = False,
+    room_id: Optional[str] = None,
+    request_type: str = "complexity",
+    error_output: str = "",
 ) -> dict[str, Any]:
-    """Execute rule-based pattern checks first, followed by consent-gated AI assistance (US-67, FR12.3, FR35, T-18 v2).
+    """Execute rule-based pattern checks first, followed by controlled AI assistance (US-22, US-67, FR12.3, FR35, T-18 v2).
 
-    Core Invariant (FR12.3, FR35):
-    Declining consent or disabling AI does NOT affect the AI-free parts.
-    External AI calls require BOTH consent == True AND ai_enabled == True.
-    When consent is missing or False:
-    - Rule-based analysis returns its results normally.
-    - AI step is marked skipped with error_code CONSENT_MISSING.
-    - Outbound LLM client is called 0 times.
-    When ai_enabled is missing or False:
-    - Rule-based analysis returns its results normally.
-    - AI step is marked skipped with error_code AI_DISABLED.
-    - Outbound LLM client is called 0 times.
+    Mandatory Order of Checks (US-22):
+    1. Consent (US-17, FR12.2) -> CONSENT_MISSING (skipped AI step, 0 calls)
+    2. Host AI Switch (FR35) -> AI_DISABLED (skipped AI step, 0 calls)
+    3. Room Hourly Rate Limit (NFR5.3) -> ROOM_RATE_LIMITED (skipped AI step, 0 calls)
+    4. Code Cache (NFR5.2, Decision 11) -> Cache Hit returns cached suggestion (does NOT count as call)
+    5. Outbound AI Call: records call on rate limiter, calls LLM, stores result in cache.
     """
     # 1. AI-free rule-based analysis (always executes first)
     slow_patterns = detect_slow_patterns(code, language=language)
 
-    # 2. Central AI permission gate (FR12.2, FR35, T-18 v2 §19)
-    # External AI calls require BOTH consent == True AND ai_enabled == True
+    # 2. Check 1: User Consent (FR12.2)
     if consent is not True:
         ai_step = {
             "status": "skipped",
@@ -141,6 +145,7 @@ async def run_rule_based_analysis_with_ai_fallback(
             "verified": False,
             "verified_speedup_pct": None,
         }
+    # 3. Check 2: Host AI Switch (FR35)
     elif ai_enabled is not True:
         ai_step = {
             "status": "skipped",
@@ -150,82 +155,130 @@ async def run_rule_based_analysis_with_ai_fallback(
             "verified_speedup_pct": None,
         }
     else:
-        # Both consent and ai_enabled are True: invoke AI fallback
-        try:
-            if ai_fallback is not None:
-                ai_suggestion = await ai_fallback() if callable(ai_fallback) else await ai_fallback
-            else:
-                prompt = f"Suggest a 1-sentence fix for code with patterns: {slow_patterns}"
-                ai_suggestion = await call_llm_with_consent(
-                    prompt=prompt,
-                    consent=consent,
-                    ai_enabled=ai_enabled,
-                    client=client,
-                )
+        # 4. Check 3: Normalized Code Cache (NFR5.2, FR40.3, Decision 11)
+        # Cache hits answer immediately with $0 cost and do not count toward rate limits
+        cache_key = compute_cache_key(
+            code=code,
+            language=language,
+            request_type=request_type,
+            error_output=error_output,
+        )
+        cached_result = get_analysis_cache().get(cache_key, room_id=room_id)
 
+        if cached_result is not None:
+            # Cache hit: does NOT count towards rate limit calls (US-22)
             ai_step = {
                 "status": "ok",
                 "error_code": None,
-                "suggested_fix": ai_suggestion,
+                "suggested_fix": cached_result.get("suggested_fix"),
                 "verified": False,
                 "verified_speedup_pct": None,
             }
-        except ConsentMissingError:
+        # 5. Check 4: Room Hourly Rate Limit on outbound calls (NFR5.3, US-22)
+        elif room_id and get_room_rate_limiter().is_rate_limited(room_id):
             ai_step = {
                 "status": "skipped",
-                "error_code": "CONSENT_MISSING",
+                "error_code": "ROOM_RATE_LIMITED",
                 "suggested_fix": None,
                 "verified": False,
                 "verified_speedup_pct": None,
             }
-        except AIDisabledError:
-            ai_step = {
-                "status": "skipped",
-                "error_code": "AI_DISABLED",
-                "suggested_fix": None,
-                "verified": False,
-                "verified_speedup_pct": None,
-            }
-        except LLMTimeoutError:
-            if reraise_ai_errors:
-                raise
-            ai_step = {
-                "status": "skipped",
-                "error_code": "PROVIDER_TIMEOUT",
-                "suggested_fix": None,
-                "verified": False,
-                "verified_speedup_pct": None,
-            }
-        except LLMRateLimitError:
-            if reraise_ai_errors:
-                raise
-            ai_step = {
-                "status": "skipped",
-                "error_code": "RATE_LIMITED_PROVIDER",
-                "suggested_fix": None,
-                "verified": False,
-                "verified_speedup_pct": None,
-            }
-        except LLMProviderError:
-            if reraise_ai_errors:
-                raise
-            ai_step = {
-                "status": "skipped",
-                "error_code": "PROVIDER_ERROR",
-                "suggested_fix": None,
-                "verified": False,
-                "verified_speedup_pct": None,
-            }
-        except Exception:
-            if reraise_ai_errors:
-                raise
-            ai_step = {
-                "status": "skipped",
-                "error_code": "PROVIDER_ERROR",
-                "suggested_fix": None,
-                "verified": False,
-                "verified_speedup_pct": None,
-            }
+        else:
+            # 6. Check 5: Cache Miss within Quota -> Execute Outbound AI Call
+            try:
+                # Record the call against the room rate limit
+                if room_id:
+                    get_room_rate_limiter().record_call(room_id)
+
+                if ai_fallback is not None:
+                    ai_suggestion = await ai_fallback() if callable(ai_fallback) else await ai_fallback
+                else:
+                    prompt = f"Suggest a 1-sentence fix for code with patterns: {slow_patterns}"
+                    ai_suggestion = await call_llm_with_consent(
+                        prompt=prompt,
+                        consent=consent,
+                        ai_enabled=ai_enabled,
+                        client=client,
+                    )
+
+                # Store in cache
+                get_analysis_cache().set(
+                    cache_key,
+                    {"suggested_fix": ai_suggestion},
+                    room_id=room_id,
+                )
+
+                ai_step = {
+                    "status": "ok",
+                    "error_code": None,
+                    "suggested_fix": ai_suggestion,
+                    "verified": False,
+                    "verified_speedup_pct": None,
+                }
+            except RoomRateLimitedError:
+                ai_step = {
+                    "status": "skipped",
+                    "error_code": "ROOM_RATE_LIMITED",
+                    "suggested_fix": None,
+                    "verified": False,
+                    "verified_speedup_pct": None,
+                }
+            except ConsentMissingError:
+                ai_step = {
+                    "status": "skipped",
+                    "error_code": "CONSENT_MISSING",
+                    "suggested_fix": None,
+                    "verified": False,
+                    "verified_speedup_pct": None,
+                }
+            except AIDisabledError:
+                ai_step = {
+                    "status": "skipped",
+                    "error_code": "AI_DISABLED",
+                    "suggested_fix": None,
+                    "verified": False,
+                    "verified_speedup_pct": None,
+                }
+            except LLMTimeoutError:
+                if reraise_ai_errors:
+                    raise
+                ai_step = {
+                    "status": "skipped",
+                    "error_code": "PROVIDER_TIMEOUT",
+                    "suggested_fix": None,
+                    "verified": False,
+                    "verified_speedup_pct": None,
+                }
+            except LLMRateLimitError:
+                if reraise_ai_errors:
+                    raise
+                ai_step = {
+                    "status": "skipped",
+                    "error_code": "RATE_LIMITED_PROVIDER",
+                    "suggested_fix": None,
+                    "verified": False,
+                    "verified_speedup_pct": None,
+                }
+            except LLMProviderError:
+                if reraise_ai_errors:
+                    raise
+                ai_step = {
+                    "status": "skipped",
+                    "error_code": "PROVIDER_ERROR",
+                    "suggested_fix": None,
+                    "verified": False,
+                    "verified_speedup_pct": None,
+                }
+            except Exception:
+                if reraise_ai_errors:
+                    raise
+                ai_step = {
+                    "status": "skipped",
+                    "error_code": "PROVIDER_ERROR",
+                    "suggested_fix": None,
+                    "verified": False,
+                    "verified_speedup_pct": None,
+                }
 
     return {
         "task": "complexity",
