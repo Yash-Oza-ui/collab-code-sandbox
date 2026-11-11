@@ -230,6 +230,18 @@ public class ControlHandler extends AbstractWebSocketHandler {
             sendText(session, objectMapper.writeValueAsString(
                     RoomMessages.joinRefused(reason, humanMessage)));
             log.info("Control: join refused room={} reason={}", roomId, reason);
+
+            // Contract V2.3 (review 2): close the control socket immediately after
+            // join-refused, EXCEPT for APPROVAL_PENDING where it must remain open
+            // until the server later sends join-approved or join-declined.
+            if (!"APPROVAL_PENDING".equals(reason)) {
+                try {
+                    session.close(CloseStatus.NORMAL);
+                } catch (IOException ex) {
+                    log.warn("Control: failed to close session after join-refused wsSession={}: {}",
+                            session.getId(), ex.getMessage());
+                }
+            }
             return;
         }
 

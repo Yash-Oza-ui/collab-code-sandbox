@@ -228,6 +228,19 @@ public class DocumentHandler extends AbstractWebSocketHandler {
             return;
         }
 
+        // 4405: doc_id validation — Pair mode has exactly one document 'main'
+        // (contract V2.5; Open-mode module store is a later story, so any
+        // format-valid module_id is accepted until that store exists)
+        Room roomForDocCheck = roomStore.get(roomId);
+        if (roomForDocCheck != null && roomForDocCheck.getMode() == RoomMode.PAIR) {
+            if (!"main".equals(docId)) {
+                log.warn("Doc: closing {}: doc_id '{}' is not valid for Pair room {} (4405)",
+                        session.getId(), docId, roomId);
+                session.close(new CloseStatus(CLOSE_UNKNOWN_DOC, "Unknown doc_id"));
+                return;
+            }
+        }
+
         session.getAttributes().put(ATTR_ROOM_ID, roomId);
         session.getAttributes().put(ATTR_DOC_ID, docId);
         session.getAttributes().put(ATTR_SESSION_ID, clientSessionId);
@@ -375,12 +388,11 @@ public class DocumentHandler extends AbstractWebSocketHandler {
                     controlSession.sendMessage(new TextMessage(json));
                 }
             } else {
-                // Fall back: send on the doc session itself if control session is not found
-                if (docSession.isOpen()) {
-                    synchronized (docSession) {
-                        docSession.sendMessage(new TextMessage(json));
-                    }
-                }
+                // Contract: the document socket carries ONLY binary Yjs frames.
+                // If the control session is unavailable, log and drop silently
+                // (do NOT send a text frame via the document socket).
+                log.warn("Doc: control session unavailable for wsSession={}; edit-rejected dropped",
+                        docSession.getId());
             }
         } catch (IOException e) {
             log.warn("Doc: failed to send edit-rejected to wsSession={}: {}", docSession.getId(), e.getMessage());
