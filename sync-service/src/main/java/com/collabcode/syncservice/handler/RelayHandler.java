@@ -9,7 +9,7 @@ import org.springframework.web.socket.CloseStatus;
 import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
 import org.springframework.web.socket.handler.AbstractWebSocketHandler;
-
+import com.collabcode.syncservice.room.RoomStore;
 import java.io.IOException;
 import java.net.URI;
 import java.nio.ByteBuffer;
@@ -71,9 +71,11 @@ public class RelayHandler extends AbstractWebSocketHandler {
     public static final String ATTR_SESSION_ID = "sessionId";
 
     private final RoomRegistry registry;
+    private final RoomStore roomStore;
 
-    public RelayHandler(RoomRegistry registry) {
+    public RelayHandler(RoomRegistry registry, RoomStore roomStore) {
         this.registry = registry;
+        this.roomStore = roomStore;
     }
 
     // -----------------------------------------------------------------------
@@ -101,6 +103,13 @@ public class RelayHandler extends AbstractWebSocketHandler {
         if (clientSessionId == null || !UUID_V4_OK.matcher(clientSessionId).matches()) {
             log.warn("Closing {}: session_id missing or not a UUID v4", session.getId());
             session.close(new CloseStatus(4400, "session_id missing or not a UUID"));
+            return;
+        }
+
+        // Reject connections to rooms that were never created.
+        if (!roomStore.exists(roomId)) {
+            log.warn("Closing {}: room not found: {}", session.getId(), roomId);
+            session.close(new CloseStatus(4404, "Room not found"));
             return;
         }
 
