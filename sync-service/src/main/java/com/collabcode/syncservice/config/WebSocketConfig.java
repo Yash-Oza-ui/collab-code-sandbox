@@ -10,6 +10,7 @@ import org.springframework.web.socket.config.annotation.EnableWebSocket;
 import org.springframework.web.socket.config.annotation.WebSocketConfigurer;
 import org.springframework.web.socket.config.annotation.WebSocketHandlerRegistry;
 import org.springframework.web.socket.server.standard.ServletServerContainerFactoryBean;
+import com.collabcode.syncservice.room.RoomStore;
 
 /**
  * WebSocket configuration for sync-service (T-02).
@@ -35,9 +36,11 @@ public class WebSocketConfig implements WebSocketConfigurer {
     private String clientOrigin;
 
     private final RoomRegistry roomRegistry;
+    private final RoomStore roomStore;
 
-    public WebSocketConfig(RoomRegistry roomRegistry) {
+    public WebSocketConfig(RoomRegistry roomRegistry, RoomStore roomStore) {
         this.roomRegistry = roomRegistry;
+        this.roomStore = roomStore;
     }
 
     @Override
@@ -49,7 +52,7 @@ public class WebSocketConfig implements WebSocketConfigurer {
 
     @Bean
     public WebSocketHandler relayHandler() {
-        return new RelayHandler(roomRegistry);
+        return new RelayHandler(roomRegistry, roomStore);
     }
 
     /**

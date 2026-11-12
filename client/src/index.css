@@ -107,3 +107,28 @@ body {
 .display-name-card button:hover {
   background: #1d4ed8;
 }
+
+.create-room-body {
+  display: grid;
+  gap: 10px;
+}
+
+.create-room-actions {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+}
+
+.create-room-actions button {
+  margin-top: 0;
+}
+
+.create-room-actions a {
+  color: #2563eb;
+  font-weight: 600;
+}
+
+.display-name-card button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}

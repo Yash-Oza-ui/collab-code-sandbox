@@ -12,10 +12,14 @@
 
 export const DEFAULT_SYNC_WS_URL = 'ws://localhost:8081/ws/rooms'
 export const DEFAULT_EXECUTION_API_URL = 'http://localhost:8082'
+// Base URL of sync-service's REST API: room creation and owner check.
+// Name and default come from the v1 text in docs/api-contracts.md (section 8).
+export const DEFAULT_PLATFORM_API_URL = 'http://localhost:8081'
 
 export interface ClientConfig {
   syncWsUrl: string
   executionApiUrl: string
+  platformApiUrl: string
 }
 
 export function getClientConfig(
@@ -24,6 +28,7 @@ export function getClientConfig(
   return {
     syncWsUrl: env.VITE_SYNC_WS_URL || DEFAULT_SYNC_WS_URL,
     executionApiUrl: env.VITE_EXECUTION_API_URL || DEFAULT_EXECUTION_API_URL,
+    platformApiUrl: env.VITE_PLATFORM_API_URL || DEFAULT_PLATFORM_API_URL,
   }
 }
 
