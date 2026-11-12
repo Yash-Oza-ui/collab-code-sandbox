@@ -1,8 +1,6 @@
 package com.collabcode.syncservice.room;
 
-import java.util.Collections;
 import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -19,19 +17,29 @@ public class Room {
 
     private final String roomId;
     private final RoomMode mode;
-    private final String preset;     // Pair only; null in Open
-    private final String language;   // Open only; null in Pair
+    private final String preset;
+    private final String language;
     private final String ownerTokenHash;
 
     /**
      * The room's AI switch default (FR35.2): off in a Teach/Interview room, on
-     * in every other room. The Host can toggle it later (FR35.1); the session
-     * lookup (V2.11) reads this value.
+     * in every other room. The Host can toggle it later (FR35.1).
      */
     private final boolean aiEnabled;
 
-    /** memberId -&gt; Member. Filled by join (V2.3); empty at creation. */
+    /** memberId -> Member. Filled by join (V2.3); empty at creation. */
     private final Map<String, Member> members = new ConcurrentHashMap<>();
+
+    /**
+     * Flag indicating whether the room has been closed / destroyed (FR31.2, T-17 V2.5).
+     * WebSocket connections to closed rooms are rejected with close code 4410.
+     */
+    private volatile boolean closed = false;
+
+    /**
+     * When true, a join attempt returns APPROVAL_PENDING (FR9.3 / US-26 stub for testing).
+     */
+    private volatile boolean requiresApproval = false;
 
     public Room(String roomId, RoomMode mode, String preset, String language, String ownerTokenHash) {
         this.roomId = roomId;
@@ -39,16 +47,8 @@ public class Room {
         this.preset = preset;
         this.language = language;
         this.ownerTokenHash = ownerTokenHash;
-        this.aiEnabled = !"teach_interview".equals(preset); // FR35.2
+        this.aiEnabled = !"teach_interview".equals(preset);
     }
-
-    /**
-     * Open-mode module IDs registered in this room (V2.6).
-     * In Pair mode this set is always empty; the only valid doc_id is "main".
-     * In Open mode, {@link #registerModule(String)} adds an id here and
-     * {@link #hasModule(String)} lets the document socket validate the doc_id (4405).
-     */
-    private final Set<String> moduleIds = Collections.newSetFromMap(new ConcurrentHashMap<>());
 
     public String getRoomId() { return roomId; }
     public RoomMode getMode() { return mode; }
@@ -58,24 +58,10 @@ public class Room {
     public boolean isAiEnabled() { return aiEnabled; }
     public Map<String, Member> getMembers() { return members; }
 
-    /**
-     * Register an Open-mode module id so the document socket can validate it (4405).
-     * No-op in Pair mode (the caller should not call this in Pair mode).()
-     */
-    public void registerModule(String moduleId) {
-        moduleIds.add(moduleId);
-    }
+    public boolean isClosed() { return closed; }
+    public void close() { this.closed = true; }
 
-    /**
-     * Returns {@code true} if {@code moduleId} has been registered in this Open-mode room.
-     * Always returns {@code false} in Pair mode (Pair has no modules).
-     */
-    public boolean hasModule(String moduleId) {
-        return moduleIds.contains(moduleId);
-    }
+    public boolean isRequiresApproval() { return requiresApproval; }
+    public void setRequiresApproval(boolean v) { this.requiresApproval = v; }
 
-    /** Unmodifiable view of module ids (for testing / REST listing). */
-    public Set<String> getModuleIds() {
-        return Collections.unmodifiableSet(moduleIds);
-    }
 }

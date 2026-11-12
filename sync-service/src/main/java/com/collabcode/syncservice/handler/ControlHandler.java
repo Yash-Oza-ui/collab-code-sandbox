@@ -131,9 +131,17 @@ public class ControlHandler extends AbstractWebSocketHandler {
         }
 
         // 4404: unknown room — the v0 create-on-connect behaviour is removed in T-20
-        if (!roomStore.exists(roomId)) {
+        Room room = roomStore.get(roomId);
+        if (room == null) {
             log.warn("Control: closing {}: room {} does not exist (4404)", session.getId(), roomId);
             session.close(new CloseStatus(CLOSE_UNKNOWN_ROOM, "Room not found"));
+            return;
+        }
+
+        // 4410: closed room (FR31.2, T-17 V2.5)
+        if (room.isClosed()) {
+            log.warn("Control: closing {}: room {} is closed (4410)", session.getId(), roomId);
+            session.close(new CloseStatus(CLOSE_ROOM_CLOSED, "Room is closed"));
             return;
         }
 

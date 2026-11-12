@@ -1,6 +1,10 @@
 package com.collabcode.syncservice;
 
+import com.collabcode.syncservice.room.Room;
+import com.collabcode.syncservice.room.RoomService;
+import com.collabcode.syncservice.room.RoomStore;
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.client.TestRestTemplate;
 import org.springframework.boot.test.web.server.LocalServerPort;
@@ -32,6 +36,12 @@ class SocketsAndEditCheckIntegrationTest {
 
     @LocalServerPort
     int port;
+
+    @Autowired
+    RoomService roomService;
+
+    @Autowired
+    RoomStore roomStore;
 
     private static final String SESSION_A = "aa000000-0000-4000-8000-000000000001";
     private static final String SESSION_B = "bb000000-0000-4000-8000-000000000002";
@@ -94,6 +104,32 @@ class SocketsAndEditCheckIntegrationTest {
             }
         }
         return null;
+    }
+
+    // -----------------------------------------------------------------------
+    // Helper: use the V2.6 request-and-Host-approval flow, never a test-only registry.
+    // -----------------------------------------------------------------------
+
+    @SuppressWarnings("unchecked")
+    private String createAndApproveModule(String roomId, String sessionId, String ownerToken, String name) {
+        TestRestTemplate rest = new TestRestTemplate();
+        HttpHeaders requestHeaders = new HttpHeaders();
+        requestHeaders.setContentType(MediaType.APPLICATION_JSON);
+        requestHeaders.set("X-Session-Id", sessionId);
+        ResponseEntity<Map> requested = rest.postForEntity("http://localhost:" + port + "/v1/rooms/" + roomId + "/modules",
+                new HttpEntity<>(Map.of("name", name), requestHeaders), Map.class);
+        assertThat(requested.getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
+        assertThat(requested.getBody()).containsEntry("pending", true);
+        String moduleId = (String) requested.getBody().get("module_id");
+
+        HttpHeaders approveHeaders = new HttpHeaders();
+        approveHeaders.set("X-Session-Id", sessionId);
+        approveHeaders.set("X-Owner-Token", ownerToken);
+        ResponseEntity<Map> approved = rest.postForEntity("http://localhost:" + port + "/v1/rooms/" + roomId
+                        + "/modules/" + moduleId + "/approve", new HttpEntity<>(approveHeaders), Map.class);
+        assertThat(approved.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(approved.getBody()).containsEntry("pending", false);
+        return moduleId;
     }
 
     // -----------------------------------------------------------------------
@@ -186,6 +222,9 @@ class SocketsAndEditCheckIntegrationTest {
                         .contains("\"type\":\"edit-rejected\"")
                         .contains("\"doc_id\":\"main\"")
                         .contains("\"reason\":\"no_edit_access\"");
+                assertThat(docB.pollText(300, TimeUnit.MILLISECONDS))
+                        .as("Document socket must never receive a text edit-rejected fallback")
+                        .isNull();
             }
         }
     }
@@ -198,14 +237,18 @@ class SocketsAndEditCheckIntegrationTest {
     void editCheck_openMode_notModuleWriterReason() throws Exception {
         Map<String, Object> room = createRoom("open", null, "python");
         String roomId     = (String) room.get("room_id");
-        // Register module before opening the document socket (4405 validation)
-        registerModule(roomId, "mod_test1");
+        String ownerToken = (String) room.get("owner_token");
 
-        try (WsClient ctrlB = connectControl(roomId, SESSION_B)) {
+        try (WsClient ctrlA = connectControl(roomId, SESSION_A);
+             WsClient ctrlB = connectControl(roomId, SESSION_B)) {
+            sendJoin(ctrlA, "Alice", ownerToken);
+            drainText(ctrlA, 2);
             sendJoin(ctrlB, "Bob", null);
             drainText(ctrlB, 2);
+            drainText(ctrlA, 1);
+            String moduleId = createAndApproveModule(roomId, SESSION_A, ownerToken, "test.py");
 
-            try (WsClient docB = connectDoc(roomId, "mod_test1", SESSION_B)) {
+            try (WsClient docB = connectDoc(roomId, moduleId, SESSION_B)) {
                 // Update frame (0 2: document change)
                 byte[] updateFrame = {0x00, 0x02, 0x10, 0x20};
                 docB.sendBinary(updateFrame);
@@ -214,7 +257,7 @@ class SocketsAndEditCheckIntegrationTest {
                 assertThat(rejected)
                         .as("In Open mode, rejection reason must be 'not_module_writer'")
                         .contains("\"type\":\"edit-rejected\"")
-                        .contains("\"doc_id\":\"mod_test1\"")
+                        .contains("\"doc_id\":\"" + moduleId + "\"")
                         .contains("\"reason\":\"not_module_writer\"");
             }
         }
@@ -351,13 +394,13 @@ class SocketsAndEditCheckIntegrationTest {
             drainText(ctrlB, 2);
             drainText(ctrlA, 1);
 
-            // Register modules before connecting (4405 validation)
-            registerModule(roomId, "mod_one");
-            registerModule(roomId, "mod_two");
+            // Register modules through the contract before connecting (4405 validation).
+            String firstModule = createAndApproveModule(roomId, SESSION_A, ownerToken, "one.py");
+            String secondModule = createAndApproveModule(roomId, SESSION_A, ownerToken, "two.py");
 
             // Client A connects to module 1; Client B connects to module 2
-            try (WsClient docA = connectDoc(roomId, "mod_one", SESSION_A);
-                 WsClient docB = connectDoc(roomId, "mod_two", SESSION_B)) {
+            try (WsClient docA = connectDoc(roomId, firstModule, SESSION_A);
+                 WsClient docB = connectDoc(roomId, secondModule, SESSION_B)) {
 
                 // A sends an awareness frame on mod_one
                 byte[] awareness = {0x01, 0x42};
@@ -373,26 +416,7 @@ class SocketsAndEditCheckIntegrationTest {
     }
 
     // -----------------------------------------------------------------------
-    // Helpers
-    // -----------------------------------------------------------------------
-
-    // -----------------------------------------------------------------------
-    // Helper: register a module id via REST (for 4405 tests)
-    // -----------------------------------------------------------------------
-
-    @SuppressWarnings("unchecked")
-    private void registerModule(String roomId, String moduleId) {
-        TestRestTemplate rest = new TestRestTemplate();
-        HttpHeaders headers = new HttpHeaders();
-        headers.set("Content-Type", "application/json");
-        HttpEntity<String> req = new HttpEntity<>("{\"module_id\":\"" + moduleId + "\"}", headers);
-        ResponseEntity<Map> resp = rest.postForEntity(
-                "http://localhost:" + port + "/v1/rooms/" + roomId + "/modules", req, Map.class);
-        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.CREATED);
-    }
-
-    // -----------------------------------------------------------------------
-    // 9. Control socket: invalid JSON → join-refused and socket closure
+    // 9. Control socket: invalid JSON -> join-refused and socket closure
     // -----------------------------------------------------------------------
 
     @Test
@@ -420,7 +444,7 @@ class SocketsAndEditCheckIntegrationTest {
     }
 
     // -----------------------------------------------------------------------
-    // 10. Control socket: wrong first message type → join-refused and socket closure
+    // 10. Control socket: wrong first message type -> join-refused and socket closure
     // -----------------------------------------------------------------------
 
     @Test
@@ -448,7 +472,7 @@ class SocketsAndEditCheckIntegrationTest {
     }
 
     // -----------------------------------------------------------------------
-    // 11. Control socket: missing/blank display_name → join-refused and socket closure
+    // 11. Control socket: missing/blank display_name -> join-refused and socket closure
     // -----------------------------------------------------------------------
 
     @Test
@@ -476,36 +500,79 @@ class SocketsAndEditCheckIntegrationTest {
     }
 
     // -----------------------------------------------------------------------
-    // 12. Control socket: APPROVAL_PENDING → join-refused, socket stays open
-    // (Simulated: NAME_TAKEN also closes, so we verify APPROVAL_PENDING doesn't)
-    // Note: APPROVAL_PENDING is issued by US-26 (not yet implemented); we verify
-    // the socket-stays-open contract by checking NAME_TAKEN DOES close but a
-    // regular successful join DOES NOT close — a placeholder until US-26 adds
-    // the actual APPROVAL_PENDING flow.
+    // 12. Control socket: APPROVAL_PENDING -> join-refused, socket stays open
+    //     (FR9.3 / US-26): when the room requires Host approval, the server
+    //     sends join-refused with reason APPROVAL_PENDING and keeps the socket
+    //     open so the client can receive join-approved or join-declined later.
     // -----------------------------------------------------------------------
 
     @Test
     void controlSocket_approvalPending_socketRemainsOpen() throws Exception {
-        // We stub APPROVAL_PENDING by using a NAME_TAKEN scenario to verify
-        // closure behaviour, then separately verify that a successful join keeps
-        // the socket open (the APPROVAL_PENDING code path itself is US-26 work;
-        // the ControlHandler correctly checks !APPROVAL_PENDING before closing).
         Map<String, Object> room = createRoom("pair", "debug_together", null);
-        String roomId     = (String) room.get("room_id");
-        String ownerToken = (String) room.get("owner_token");
+        String roomId = (String) room.get("room_id");
 
-        // Session A joins successfully: socket stays open (not APPROVAL_PENDING, but joined)
-        try (WsClient ctrlA = connectControl(roomId, SESSION_A)) {
-            sendJoin(ctrlA, "Alice", ownerToken);
-            drainText(ctrlA, 2); // joined + roster
-            assertThat(ctrlA.session().isOpen())
-                    .as("Successfully joined control socket must remain open")
-                    .isTrue();
+        // Set the room to require approval (simulates FR9.3 join approval flow)
+        Room r = roomStore.get(roomId);
+        assertThat(r).as("Room must exist in RoomStore").isNotNull();
+        r.setRequiresApproval(true);
+
+        CapturingHandler handler = new CapturingHandler();
+        StandardWebSocketClient wsClient = new StandardWebSocketClient();
+        WebSocketSession session = wsClient.execute(
+                handler,
+                "ws://localhost:" + port + "/ws/rooms/" + roomId + "?session_id=" + SESSION_A
+        ).get(5, TimeUnit.SECONDS);
+
+        // Send a valid join -- server must respond with APPROVAL_PENDING
+        synchronized (session) {
+            session.sendMessage(new TextMessage("{\"type\":\"join\",\"display_name\":\"Alice\"}"));
         }
+        Thread.sleep(600);
+
+        // Must receive join-refused with reason APPROVAL_PENDING
+        assertThat(handler.texts)
+                .as("Client must receive a join-refused frame")
+                .isNotEmpty();
+        assertThat(handler.texts.get(0))
+                .as("join-refused must have reason APPROVAL_PENDING")
+                .contains("\"type\":\"join-refused\"")
+                .contains("APPROVAL_PENDING");
+
+        // Socket must remain OPEN (not closed for APPROVAL_PENDING)
+        assertThat(session.isOpen())
+                .as("Control socket must remain open while APPROVAL_PENDING -- not be closed")
+                .isTrue();
+
+        assertThat(handler.closes)
+                .as("No close event must have fired for APPROVAL_PENDING")
+                .isEmpty();
+
+        // Resolve the controlled approval fixture and prove the same connection
+        // can receive the resulting join flow; this is not a successful-join
+        // lookalike pretending to cover APPROVAL_PENDING.
+        r.setRequiresApproval(false);
+        synchronized (session) {
+            session.sendMessage(new TextMessage("{\"type\":\"join\",\"display_name\":\"Alice\"}"));
+        }
+        String joined = handler.texts.stream()
+                .filter(text -> text.contains("\"type\":\"joined\""))
+                .findFirst()
+                .orElse(null);
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+        while (joined == null && System.nanoTime() < deadline) {
+            Thread.sleep(25);
+            joined = handler.texts.stream()
+                    .filter(text -> text.contains("\"type\":\"joined\""))
+                    .findFirst()
+                    .orElse(null);
+        }
+        assertThat(joined).as("Pending connection must receive its follow-up join result").isNotNull();
+
+        session.close();
     }
 
     // -----------------------------------------------------------------------
-    // 13. Document socket: Pair mode with 'main' → accepted (4405 not triggered)
+    // 13. Document socket: Pair mode with 'main' -> accepted (4405 not triggered)
     // -----------------------------------------------------------------------
 
     @Test
@@ -527,7 +594,7 @@ class SocketsAndEditCheckIntegrationTest {
     }
 
     // -----------------------------------------------------------------------
-    // 14. Document socket: Pair mode with unknown doc_id → 4405
+    // 14. Document socket: Pair mode with unknown doc_id -> 4405
     // -----------------------------------------------------------------------
 
     @Test
@@ -560,7 +627,7 @@ class SocketsAndEditCheckIntegrationTest {
     }
 
     // -----------------------------------------------------------------------
-    // 15. Document socket: Open mode with registered module → accepted
+    // 15. Document socket: Open mode with registered module -> accepted
     // -----------------------------------------------------------------------
 
     @Test
@@ -568,13 +635,13 @@ class SocketsAndEditCheckIntegrationTest {
         Map<String, Object> room = createRoom("open", null, "python");
         String roomId     = (String) room.get("room_id");
         String ownerToken = (String) room.get("owner_token");
-        registerModule(roomId, "mod_known");
 
         try (WsClient ctrl = connectControl(roomId, SESSION_A)) {
             sendJoin(ctrl, "Alice", ownerToken);
             drainText(ctrl, 2);
+            String moduleId = createAndApproveModule(roomId, SESSION_A, ownerToken, "known.py");
 
-            try (WsClient doc = connectDoc(roomId, "mod_known", SESSION_A)) {
+            try (WsClient doc = connectDoc(roomId, moduleId, SESSION_A)) {
                 assertThat(doc.session().isOpen())
                         .as("Open mode: registered module_id must be accepted")
                         .isTrue();
@@ -583,7 +650,7 @@ class SocketsAndEditCheckIntegrationTest {
     }
 
     // -----------------------------------------------------------------------
-    // 16. Document socket: Open mode with unknown module_id → 4405
+    // 16. Document socket: Open mode with unknown module_id -> 4405
     // -----------------------------------------------------------------------
 
     @Test
@@ -591,7 +658,7 @@ class SocketsAndEditCheckIntegrationTest {
         Map<String, Object> room = createRoom("open", null, "python");
         String roomId     = (String) room.get("room_id");
         String ownerToken = (String) room.get("owner_token");
-        // Do NOT register any module — doc_id "mod_unknown" is not in the registry
+        // Do NOT register any module -- doc_id "mod_unknown" is not in the registry
 
         try (WsClient ctrl = connectControl(roomId, SESSION_A)) {
             sendJoin(ctrl, "Alice", ownerToken);
@@ -617,7 +684,7 @@ class SocketsAndEditCheckIntegrationTest {
     }
 
     // -----------------------------------------------------------------------
-    // 17. Document socket: unknown room → 4404
+    // 17. Document socket: unknown room -> 4404
     // -----------------------------------------------------------------------
 
     @Test
@@ -641,35 +708,113 @@ class SocketsAndEditCheckIntegrationTest {
     }
 
     // -----------------------------------------------------------------------
-    // 18. Document socket before control join → 4406 (Open mode)
+    // 18. Document socket before control join -> 4406 (Open mode)
     // -----------------------------------------------------------------------
 
     @Test
     void docSocket_openMode_beforeControlJoin_closesWith4406() throws Exception {
         Map<String, Object> room = createRoom("open", null, "python");
         String roomId = (String) room.get("room_id");
-        registerModule(roomId, "mod_early");
+        String ownerToken = (String) room.get("owner_token");
 
-        // Open the doc socket WITHOUT first joining the control socket
+        try (WsClient host = connectControl(roomId, SESSION_A)) {
+            sendJoin(host, "Alice", ownerToken);
+            drainText(host, 2);
+            String moduleId = createAndApproveModule(roomId, SESSION_A, ownerToken, "early.py");
+
+            // Open the doc socket WITHOUT first joining the control socket.
+            CapturingHandler handler = new CapturingHandler();
+            StandardWebSocketClient client = new StandardWebSocketClient();
+            WebSocketSession session = client.execute(
+                    handler,
+                    "ws://localhost:" + port + "/ws/rooms/" + roomId + "/docs/" + moduleId + "?session_id=" + SESSION_B
+            ).get(5, TimeUnit.SECONDS);
+
+            Thread.sleep(500);
+
+            assertThat(session.isOpen())
+                .as("Doc socket before control join must be closed")
+                .isFalse();
+            assertThat(handler.closes).isNotEmpty();
+            assertThat(handler.closes.get(0).getCode())
+                .as("Close code must be 4406 (not joined) -- not 4405")
+                    .isEqualTo(4406);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // 19. Control socket: closed room -> 4410
+    // -----------------------------------------------------------------------
+
+    @Test
+    void controlSocket_closedRoom_closesWith4410() throws Exception {
+        Map<String, Object> room = createRoom("pair", "debug_together", null);
+        String roomId = (String) room.get("room_id");
+
+        // Close the room before anyone connects
+        roomStore.get(roomId).close();
+
         CapturingHandler handler = new CapturingHandler();
         StandardWebSocketClient client = new StandardWebSocketClient();
         WebSocketSession session = client.execute(
                 handler,
-                "ws://localhost:" + port + "/ws/rooms/" + roomId + "/docs/mod_early?session_id=" + SESSION_B
+                "ws://localhost:" + port + "/ws/rooms/" + roomId + "?session_id=" + SESSION_A
         ).get(5, TimeUnit.SECONDS);
 
         Thread.sleep(500);
 
         assertThat(session.isOpen())
-                .as("Doc socket before control join must be closed")
+                .as("Closed room: control socket must be rejected immediately")
                 .isFalse();
         assertThat(handler.closes).isNotEmpty();
         assertThat(handler.closes.get(0).getCode())
-                .as("Close code must be 4406 (not joined) — not 4405")
-                .isEqualTo(4406);
+                .as("Close code must be 4410 (room closed)")
+                .isEqualTo(4410);
     }
 
-        static class WsClient implements AutoCloseable {
+    // -----------------------------------------------------------------------
+    // 20. Document socket: closed room -> 4410
+    // -----------------------------------------------------------------------
+
+    @Test
+    void docSocket_closedRoom_closesWith4410() throws Exception {
+        Map<String, Object> room = createRoom("pair", "debug_together", null);
+        String roomId     = (String) room.get("room_id");
+        String ownerToken = (String) room.get("owner_token");
+
+        // Join the room first, then close it
+        try (WsClient ctrl = connectControl(roomId, SESSION_A)) {
+            sendJoin(ctrl, "Alice", ownerToken);
+            drainText(ctrl, 2);
+
+            // Now close the room
+            roomStore.get(roomId).close();
+
+            // Try to open a document socket -- must be rejected with 4410
+            CapturingHandler handler = new CapturingHandler();
+            StandardWebSocketClient client = new StandardWebSocketClient();
+            WebSocketSession session = client.execute(
+                    handler,
+                    "ws://localhost:" + port + "/ws/rooms/" + roomId + "/docs/main?session_id=" + SESSION_A
+            ).get(5, TimeUnit.SECONDS);
+
+            Thread.sleep(500);
+
+            assertThat(session.isOpen())
+                    .as("Closed room: document socket must be rejected")
+                    .isFalse();
+            assertThat(handler.closes).isNotEmpty();
+            assertThat(handler.closes.get(0).getCode())
+                    .as("Close code must be 4410 (room closed)")
+                    .isEqualTo(4410);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Inner helpers
+    // -----------------------------------------------------------------------
+
+    static class WsClient implements AutoCloseable {
 
         private final WebSocketSession session;
         private final BlockingQueue<byte[]> binaryQueue = new LinkedBlockingDeque<>();

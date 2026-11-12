@@ -1,5 +1,6 @@
 package com.collabcode.syncservice.handler;
 
+import com.collabcode.syncservice.module.ModuleService;
 import com.collabcode.syncservice.room.Member;
 import com.collabcode.syncservice.room.Role;
 import com.collabcode.syncservice.room.Room;
@@ -137,6 +138,7 @@ public class DocumentHandler extends AbstractWebSocketHandler {
 
     private final RoomStore roomStore;
     private final RoomService roomService;
+    private final ModuleService moduleService;
     private final RoomRegistry registry;
     private final ObjectMapper objectMapper;
 
@@ -150,24 +152,28 @@ public class DocumentHandler extends AbstractWebSocketHandler {
 
     public DocumentHandler(RoomStore roomStore,
                            RoomService roomService,
+                           ModuleService moduleService,
                            RoomRegistry registry) {
-        this(roomStore, roomService, registry, registry, new ObjectMapper());
+        this(roomStore, roomService, moduleService, registry, registry, new ObjectMapper());
     }
 
     public DocumentHandler(RoomStore roomStore,
                            RoomService roomService,
+                           ModuleService moduleService,
                            RoomRegistry registry,
                            ObjectMapper objectMapper) {
-        this(roomStore, roomService, registry, registry, objectMapper);
+        this(roomStore, roomService, moduleService, registry, registry, objectMapper);
     }
 
     public DocumentHandler(RoomStore roomStore,
                            RoomService roomService,
+                           ModuleService moduleService,
                            RoomRegistry registry,
                            RoomRegistry controlRegistry,
                            ObjectMapper objectMapper) {
         this.roomStore = roomStore;
         this.roomService = roomService;
+        this.moduleService = moduleService;
         this.registry = registry;
         this.controlRegistry = controlRegistry != null ? controlRegistry : registry;
         this.objectMapper = objectMapper != null ? objectMapper : new ObjectMapper();
@@ -214,9 +220,17 @@ public class DocumentHandler extends AbstractWebSocketHandler {
         }
 
         // 4404: unknown room — create-on-connect is removed in T-20
-        if (!roomStore.exists(roomId)) {
+        Room room = roomStore.get(roomId);
+        if (room == null) {
             log.warn("Doc: closing {}: room {} does not exist (4404)", session.getId(), roomId);
             session.close(new CloseStatus(CLOSE_UNKNOWN_ROOM, "Room not found"));
+            return;
+        }
+
+        // 4410: closed room (FR31.2, T-17 V2.5)
+        if (room.isClosed()) {
+            log.warn("Doc: closing {}: room {} is closed (4410)", session.getId(), roomId);
+            session.close(new CloseStatus(CLOSE_ROOM_CLOSED, "Room is closed"));
             return;
         }
 
@@ -230,25 +244,22 @@ public class DocumentHandler extends AbstractWebSocketHandler {
 
         // 4405: doc_id validation (contract V2.5)
         //   Pair mode  — only 'main' is a valid doc_id.
-        //   Open mode  — doc_id is a module_id; it must have been registered via
-        //                POST /v1/rooms/{room_id}/modules before the socket is opened.
-        Room roomForDocCheck = roomStore.get(roomId);
-        if (roomForDocCheck != null) {
-            if (roomForDocCheck.getMode() == RoomMode.PAIR) {
-                if (!"main".equals(docId)) {
-                    log.warn("Doc: closing {}: doc_id '{}' is not 'main' in Pair room {} (4405)",
-                            session.getId(), docId, roomId);
-                    session.close(new CloseStatus(CLOSE_UNKNOWN_DOC, "Unknown doc_id"));
-                    return;
-                }
-            } else {
-                // Open mode: validate against the registered module registry
-                if (!roomService.isKnownModule(roomId, docId)) {
-                    log.warn("Doc: closing {}: module_id '{}' not registered in Open room {} (4405)",
-                            session.getId(), docId, roomId);
-                    session.close(new CloseStatus(CLOSE_UNKNOWN_DOC, "Unknown module_id"));
-                    return;
-                }
+        //   Open mode  — doc_id is a module_id; it must have been registered in the room
+        //                before the socket is opened.
+        if (room.getMode() == RoomMode.PAIR) {
+            if (!"main".equals(docId)) {
+                log.warn("Doc: closing {}: doc_id '{}' is not 'main' in Pair room {} (4405)",
+                        session.getId(), docId, roomId);
+                session.close(new CloseStatus(CLOSE_UNKNOWN_DOC, "Unknown doc_id"));
+                return;
+            }
+        } else {
+            // Open mode: validate against the authoritative, approved module state.
+            if (!moduleService.isActive(roomId, docId)) {
+                log.warn("Doc: closing {}: module_id '{}' not registered in Open room {} (4405)",
+                        session.getId(), docId, roomId);
+                session.close(new CloseStatus(CLOSE_UNKNOWN_DOC, "Unknown module_id"));
+                return;
             }
         }
 
@@ -303,9 +314,12 @@ public class DocumentHandler extends AbstractWebSocketHandler {
             String clientSessionId = (String) session.getAttributes().get(ATTR_SESSION_ID);
             Member member = roomService.findMemberBySession(roomId, clientSessionId);
 
-            if (member == null || !member.isCanEdit()) {
+            Room room = roomStore.get(roomId);
+            boolean canEdit = room != null && room.getMode() == RoomMode.OPEN
+                    ? moduleService.canEdit(roomId, docId, member)
+                    : member != null && member.isCanEdit();
+            if (!canEdit) {
                 // Determine rejection reason according to T-17 Section V2.12
-                Room room = roomStore.get(roomId);
                 String reason;
                 if (member != null && member.getRole() == Role.OBSERVER) {
                     reason = "observer";

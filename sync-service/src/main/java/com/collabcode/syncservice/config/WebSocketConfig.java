@@ -2,6 +2,7 @@ package com.collabcode.syncservice.config;
 
 import com.collabcode.syncservice.handler.ControlHandler;
 import com.collabcode.syncservice.handler.DocumentHandler;
+import com.collabcode.syncservice.module.ModuleService;
 import com.collabcode.syncservice.room.RoomRegistry;
 import com.collabcode.syncservice.room.RoomService;
 import com.collabcode.syncservice.room.RoomStore;
@@ -39,13 +40,16 @@ public class WebSocketConfig implements WebSocketConfigurer {
 
     private final RoomStore roomStore;
     private final RoomService roomService;
+    private final ModuleService moduleService;
     private final RoomRegistry roomRegistry;
 
     public WebSocketConfig(RoomStore roomStore,
                            RoomService roomService,
+                           ModuleService moduleService,
                            RoomRegistry roomRegistry) {
         this.roomStore = roomStore;
         this.roomService = roomService;
+        this.moduleService = moduleService;
         this.roomRegistry = roomRegistry;
     }
 
@@ -62,7 +66,7 @@ public class WebSocketConfig implements WebSocketConfigurer {
     public DocumentHandler documentHandler() {
         // Both handlers share the registry, but DocumentHandler explicitly uses
         // the control-socket view to route edit-rejected notifications.
-        return new DocumentHandler(roomStore, roomService, roomRegistry, roomRegistry,
+        return new DocumentHandler(roomStore, roomService, moduleService, roomRegistry, roomRegistry,
                 new com.fasterxml.jackson.databind.ObjectMapper());
     }
 

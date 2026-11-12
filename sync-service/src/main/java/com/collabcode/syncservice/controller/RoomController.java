@@ -1,16 +1,20 @@
 package com.collabcode.syncservice.controller;
 
 import com.collabcode.syncservice.room.OwnerTokens;
+import com.collabcode.syncservice.room.Member;
+import com.collabcode.syncservice.room.RoomService;
+import com.collabcode.syncservice.module.ModuleRecord;
+import com.collabcode.syncservice.module.ModuleService;
 import com.collabcode.syncservice.room.Room;
 import com.collabcode.syncservice.room.RoomIds;
 import com.collabcode.syncservice.room.RoomMode;
-import com.collabcode.syncservice.room.RoomService;
 import com.collabcode.syncservice.room.RoomStore;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -39,10 +43,12 @@ public class RoomController {
 
     private final RoomStore store;
     private final RoomService roomService;
+    private final ModuleService moduleService;
 
-    public RoomController(RoomStore store, RoomService roomService) {
+    public RoomController(RoomStore store, RoomService roomService, ModuleService moduleService) {
         this.store = store;
         this.roomService = roomService;
+        this.moduleService = moduleService;
     }
 
     @PostMapping("/rooms")
@@ -89,6 +95,40 @@ public class RoomController {
         return ResponseEntity.status(HttpStatus.CREATED).body(response);
     }
 
+    @PostMapping("/rooms/{roomId}/modules")
+    public ResponseEntity<?> requestModule(@PathVariable String roomId,
+                                           @RequestHeader(value = "X-Session-Id", required = false) String sessionId,
+                                           @RequestBody(required = false) Map<String, Object> body) {
+        Member member = sessionId == null ? null : roomService.findMemberBySession(roomId, sessionId);
+        try {
+            Object rawName = body == null ? null : body.get("name");
+            ModuleRecord module = moduleService.requestCreate(roomId, member,
+                    rawName instanceof String name ? name : null);
+            return ResponseEntity.status(HttpStatus.ACCEPTED).body(moduleBody(module));
+        } catch (IllegalArgumentException e) {
+            return moduleError("SESSION_NOT_FOUND".equals(e.getMessage()) ? HttpStatus.NOT_FOUND : HttpStatus.UNPROCESSABLE_ENTITY, e.getMessage());
+        } catch (IllegalStateException e) {
+            return moduleError(HttpStatus.CONFLICT, e.getMessage());
+        }
+    }
+
+    @PostMapping("/rooms/{roomId}/modules/{moduleId}/approve")
+    public ResponseEntity<?> approveModule(@PathVariable String roomId,
+                                           @PathVariable String moduleId,
+                                           @RequestHeader(value = "X-Session-Id", required = false) String sessionId,
+                                           @RequestHeader(value = "X-Owner-Token", required = false) String ownerToken) {
+        Member member = sessionId == null ? null : roomService.findMemberBySession(roomId, sessionId);
+        try {
+            return ResponseEntity.ok(moduleBody(moduleService.approve(roomId, moduleId, member, ownerToken)));
+        } catch (SecurityException e) {
+            return moduleError(HttpStatus.FORBIDDEN, e.getMessage());
+        } catch (IllegalArgumentException e) {
+            return moduleError("SESSION_NOT_FOUND".equals(e.getMessage()) ? HttpStatus.NOT_FOUND : HttpStatus.UNPROCESSABLE_ENTITY, e.getMessage());
+        } catch (IllegalStateException e) {
+            return moduleError(HttpStatus.NOT_FOUND, e.getMessage());
+        }
+    }
+
     /**
      * {@code 422 INVALID_REQUEST} in the section 7 error envelope. Room
      * creation carries no {@code request_id}, so it is {@code null}.
@@ -106,34 +146,6 @@ public class RoomController {
                 "Language '" + language + "' is not supported. Use one of: cpp, python, c, java, javascript.");
     }
 
-    /**
-     * Register an Open-mode module id in a room (V2.6, partial implementation).
-     * {@code POST /v1/rooms/{room_id}/modules} with body {@code {"module_id":".."}}`r
-     * returns {@code 201} with the module_id on success, or 404 if the room is unknown.
-     * Full module creation (pending, approval, etc.) is a later story; this endpoint
-     * exists so the document socket (4405 validation) has a source of truth.
-     */
-    @PostMapping("/rooms/{roomId}/modules")
-    public ResponseEntity<?> registerModule(@PathVariable String roomId,
-                                            @RequestBody(required = false) Map<String, Object> body) {
-        Room room = store.get(roomId);
-        if (room == null) {
-            return ResponseEntity.notFound().build();
-        }
-        if (room.getMode() != RoomMode.OPEN) {
-            return ResponseEntity.status(HttpStatus.UNPROCESSABLE_ENTITY)
-                    .body(Map.of("error", "modules are only valid in Open mode"));
-        }
-        String moduleId = (body != null && body.containsKey("module_id"))
-                ? String.valueOf(body.get("module_id")) : null;
-        if (moduleId == null || moduleId.isBlank()) {
-            return ResponseEntity.status(HttpStatus.UNPROCESSABLE_ENTITY)
-                    .body(Map.of("error", "module_id is required"));
-        }
-        roomService.registerModule(roomId, moduleId);
-        return ResponseEntity.status(HttpStatus.CREATED).body(Map.of("module_id", moduleId));
-    }
-
     private ResponseEntity<Map<String, Object>> envelope(String code, String message) {
         Map<String, Object> error = new LinkedHashMap<>();
         error.put("code", code);
@@ -145,5 +157,29 @@ public class RoomController {
         body.put("error", error);
 
         return ResponseEntity.status(HttpStatus.UNPROCESSABLE_ENTITY).body(body);
+    }
+
+    private ResponseEntity<Map<String, Object>> moduleError(HttpStatus status, String code) {
+        Map<String, Object> error = new LinkedHashMap<>();
+        error.put("code", code);
+        error.put("message", code);
+        error.put("retry_after_seconds", null);
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("request_id", null);
+        body.put("error", error);
+        return ResponseEntity.status(status).body(body);
+    }
+
+    private Map<String, Object> moduleBody(ModuleRecord module) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("module_id", module.moduleId());
+        body.put("name", module.name());
+        body.put("owner_member_id", module.ownerMemberId());
+        body.put("writers", Set.of());
+        body.put("runnable", true);
+        body.put("is_entry", false);
+        body.put("version", 0);
+        body.put("pending", module.pending());
+        return body;
     }
 }
