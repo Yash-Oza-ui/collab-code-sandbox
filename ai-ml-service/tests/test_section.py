@@ -526,3 +526,136 @@ def test_privacy_no_code_or_prompt_logged_during_extraction(caplog):
         _ = extract_relevant_section(code, language="cpp", error_line=2)
 
     assert secret_marker not in caplog.text
+def test_endpoint_complexity_sends_detected_slow_pattern_section_not_top20():
+    """Verify POST /v1/analyses/complexity extracts window around detected slow pattern line."""
+    lines = [f"# padding line {i}" for i in range(1, 61)]
+    lines[0] = "# SECRET_TOP_COMPLEXITY_CANARY"
+    lines[43] = "for i in range(n):"
+    lines[44] = "    for j in range(n):  # slow nested loop at line 45"
+    lines[45] = "        total += i * j"
+    lines[59] = "# SECRET_BOTTOM_COMPLEXITY_CANARY"
+    full_code = "\n".join(lines)
+
+    captured_body = {}
+
+    def mock_post(url, headers=None, json=None, **kwargs):
+        captured_body.update(json or {})
+        return httpx.Response(
+            status_code=200,
+            json={
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [{"text": "Replace the nested loops with an O(n) formula."}],
+                        }
+                    }
+                ]
+            },
+        )
+
+    payload = {
+        "request_id": "req-comp-us76-001",
+        "room_id": "room-us76-comp",
+        "analysis_id": "ana-comp-us76-001",
+        "request_type": "complexity",
+        "language": "python",
+        "consent": True,
+        "ai_enabled": True,
+        "code": full_code,
+        "measurements": [
+            {"input_size": 100, "runtimes_ms": [1.0, 1.1]},
+            {"input_size": 200, "runtimes_ms": [4.0, 4.1]},
+        ],
+    }
+
+    with patch.object(settings, "LLM_API_KEY", "test-fake-key"):
+        with patch("httpx.AsyncClient.post", new=AsyncMock(side_effect=mock_post)):
+            response = client.post("/v1/analyses/complexity", json=payload)
+
+    assert response.status_code == 200
+    assert captured_body != {}
+
+    prompt_sent = captured_body["contents"][0]["parts"][0]["text"]
+    assert "slow nested loop at line 45" in prompt_sent
+    assert "SECRET_TOP_COMPLEXITY_CANARY" not in prompt_sent
+    assert "SECRET_BOTTOM_COMPLEXITY_CANARY" not in prompt_sent
+
+
+def test_endpoint_crash_explanation_preserves_localized_code_snippet():
+    """Verify POST /v1/analyses/crash-explanation does not truncate top of a localized code_snippet."""
+    snippet_lines = [f"// snippet_line_{i}" for i in range(1, 16)]
+    snippet_lines[0] = "// SNIPPET_HEADER_LINE_1"
+    snippet_lines[10] = "int val = buf[idx]; // crash near line 45 in original file"
+    snippet = "\n".join(snippet_lines)
+
+    captured_body = {}
+
+    def mock_post(url, headers=None, json=None, **kwargs):
+        captured_body.update(json or {})
+        return httpx.Response(
+            status_code=200,
+            json={
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [{"text": "Index exceeds buffer bounds at line 45."}],
+                        }
+                    }
+                ]
+            },
+        )
+
+    payload = {
+        "request_id": "req-crash-us76-001",
+        "room_id": "room-us76-crash",
+        "analysis_id": "ana-crash-us76-001",
+        "request_type": "crash_explanation",
+        "language": "cpp",
+        "consent": True,
+        "ai_enabled": True,
+        "sanitizer_output": (
+            "==4210==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x602000000014\n"
+            "    #0 0x401233 in process_buffer /workspace/solution.cpp:45"
+        ),
+        "code_snippet": snippet,
+    }
+
+    with patch.object(settings, "LLM_API_KEY", "test-fake-key"):
+        with patch("httpx.AsyncClient.post", new=AsyncMock(side_effect=mock_post)):
+            response = client.post("/v1/analyses/crash-explanation", json=payload)
+
+    assert response.status_code == 200
+    prompt_sent = captured_body["contents"][0]["parts"][0]["text"]
+    assert "SNIPPET_HEADER_LINE_1" in prompt_sent
+    assert "int val = buf[idx];" in prompt_sent
+    assert "// snippet_line_15" in prompt_sent
+
+
+def test_find_function_lines_generic_fallback_skips_control_flow_calls():
+    """Verify generic function fallback skips if/while/for calls and matches pointer/multiline definitions."""
+    code = (
+        "// TOP_CANARY_OUTSIDE_FN\n"
+        "int caller(int x) {\n"
+        "    if (my_fn(x)) {\n"
+        "        return 1;\n"
+        "    }\n"
+        "    while (my_fn(x)) {\n"
+        "        break;\n"
+        "    }\n"
+        "    return 0;\n"
+        "}\n\n"
+        "char *my_fn(int a,\n"
+        "            int b) {\n"
+        "    static char buf[8];\n"
+        "    return buf;\n"
+        "}\n"
+        "// BOTTOM_CANARY_OUTSIDE_FN\n"
+    )
+
+    section = extract_relevant_section(code, language="c", function_name="my_fn")
+    assert "char *my_fn(int a," in section
+    assert "static char buf[8];" in section
+    assert "if (my_fn(x))" not in section
+    assert "while (my_fn(x))" not in section
+    assert "TOP_CANARY_OUTSIDE_FN" not in section
+    assert "BOTTOM_CANARY_OUTSIDE_FN" not in section

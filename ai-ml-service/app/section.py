@@ -254,11 +254,19 @@ def _find_function_lines(code: str, language: str, function_name: str) -> Option
             if res:
                 return res
 
-    # Generic fallback: function_name(...) followed by {
-    generic_pat = re.compile(r"\b" + re.escape(function_name) + r"\s*\([^;{()]*\)[^{;]*\{")
+    # Generic fallback: anchored function definition header (excludes control-flow/call wrappers)
+    generic_pat = re.compile(
+        r"(?:^|\n)[ \t]*"
+        r"(?!else\b|if\b|while\b|for\b|switch\b|catch\b|return\b)"
+        r"[^\n();{}=]*?\b"
+        + re.escape(function_name)
+        + r"\s*\([^;{}()]*\)[^();{}]*\{"
+    )
     match = generic_pat.search(code)
     if match:
         start_pos = match.start()
+        if code[start_pos] == "\n":
+            start_pos += 1
         res = _find_braced_function_lines(code, start_pos, lines)
         if res:
             return res

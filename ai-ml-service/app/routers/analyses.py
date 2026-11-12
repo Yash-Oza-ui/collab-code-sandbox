@@ -205,9 +205,12 @@ async def analyze_complexity(payload: ComplexityRequest, request: Request) -> Co
 
     # 2. Define the AI optimization fallback (FR40.2: send only relevant section)
     async def ai_fallback() -> str:
+        detected_patterns = detect_slow_patterns(payload.code, language=payload.language)
+        target_line = detected_patterns[0]["line"] if detected_patterns else None
         relevant_code = extract_relevant_section(
             code=payload.code,
             language=payload.language,
+            error_line=target_line,
         )
         prompt = (
             f"Suggest an optimization fix for {payload.language} code:\n"
@@ -333,6 +336,7 @@ async def explain_crash(payload: CrashExplanationRequest, request: Request) -> C
                 code=payload.code_snippet,
                 request_id=payload.request_id,
                 error_line=line_number,
+                pre_sliced=True,
             )
             ai_step = CrashAIStep(
                 status="ok",

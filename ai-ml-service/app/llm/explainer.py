@@ -17,6 +17,7 @@ from app.llm.client import (
     call_llm_with_consent,
     get_default_llm_client,
 )
+from app.config import settings
 from app.llm.prompts import build_explanation_prompt
 from app.section import extract_error_line_from_stderr, extract_relevant_section
 
@@ -99,6 +100,7 @@ async def generate_explanation(
     llm_client: Optional[LLMClient] = None,
     error_line: Optional[int] = None,
     function_name: Optional[str] = None,
+    pre_sliced: bool = False,
 ) -> str:
     """Generate a 3-sentence plain prose failure explanation using LLM (FR13.1, FR40.2, US-76).
 
@@ -118,18 +120,26 @@ async def generate_explanation(
         oom_killed,
     )
 
-    # 1. Determine target error line (from explicit param or parsed from stderr)
-    target_error_line = error_line
-    if target_error_line is None and stderr:
-        target_error_line = extract_error_line_from_stderr(stderr, language=language)
+    # 1. Extract only the relevant code section (FR40.2, US-76)
+    if pre_sliced:
+        # Caller supplied an already-localized code_snippet (e.g. Task 4 crash explanation).
+        # Avoid re-windowing it with a full-file error_line when it already fits within SECTION_MAX_LINES.
+        code_lines = code.splitlines() if code else []
+        if len(code_lines) <= settings.SECTION_MAX_LINES:
+            relevant_code = code
+        else:
+            relevant_code = "\n".join(code_lines[: settings.SECTION_MAX_LINES])
+    else:
+        target_error_line = error_line
+        if target_error_line is None and stderr:
+            target_error_line = extract_error_line_from_stderr(stderr, language=language)
 
-    # 2. Extract only the relevant code section (FR40.2, US-76)
-    relevant_code = extract_relevant_section(
-        code=code,
-        language=language,
-        function_name=function_name,
-        error_line=target_error_line,
-    )
+        relevant_code = extract_relevant_section(
+            code=code,
+            language=language,
+            function_name=function_name,
+            error_line=target_error_line,
+        )
 
     prompt = build_explanation_prompt(
         language=language,
