@@ -11,7 +11,11 @@
     },
     "analysis_id": { "type": "string", "format": "uuid" },
     "request_type": { "type": "string", "enum": ["crash_explanation"] },
-    "language": { "type": "string", "enum": ["c", "cpp"] },
+    "language": {
+      "type": "string",
+      "enum": ["cpp", "python", "c", "java", "javascript"],
+      "description": "DR1 language identifier; non-C/C++ values pass structural schema validation so the endpoint returns 422 UNSUPPORTED_LANGUAGE (DR5)."
+    },
     "consent": { "type": "boolean" },
     "ai_enabled": { "type": "boolean" },
     "sanitizer_output": { "type": "string", "minLength": 1 },

@@ -2,7 +2,7 @@
   "request_id": "7a3e2b10-6c5d-4f8a-9e12-3456789abcde",
   "error": {
     "code": "INVALID_REQUEST",
-    "message": "Schema validation error: field 'code' is required and cannot be empty.",
+    "message": "Schema validation error: field 'sanitizer_output' is required and cannot be empty.",
     "retry_after_seconds": null
   }
 }

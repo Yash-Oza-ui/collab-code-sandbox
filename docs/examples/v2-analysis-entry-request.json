@@ -4,5 +4,14 @@
   "task": "complexity",
   "language": "python",
   "consent": true,
-  "code": "def find_duplicates(arr):\n    dups = []\n    for i in range(len(arr)):\n        for j in range(i + 1, len(arr)):\n            if arr[i] == arr[j]:\n                dups.append(arr[i])\n    return dups"
+  "source": {
+    "kind": "inline",
+    "files": [
+      {
+        "name": "main.py",
+        "content": "def find_duplicates(arr):\n    dups = []\n    for i in range(len(arr)):\n        for j in range(i + 1, len(arr)):\n            if arr[i] == arr[j]:\n                dups.append(arr[i])\n    return dups"
+      }
+    ],
+    "entry": "main.py"
+  }
 }

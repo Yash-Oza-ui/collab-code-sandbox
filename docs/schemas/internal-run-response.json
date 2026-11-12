@@ -1,9 +1,10 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "InternalRunResponse",
+  "description": "Internal container-execution response from execution-service to ai-ml-service (Decision 7, §18). Optional test_batch and sanitizer extensions remain provisional pending execution-service confirmation (§16.3, §23).",
   "type": "object",
   "properties": {
-    "request_id": { "type": "string" },
+    "request_id": { "type": "string", "format": "uuid" },
     "purpose": {
       "type": "string",
       "enum": ["measurement", "test_batch", "sanitizer"]
@@ -29,28 +30,35 @@
         "type": "object",
         "properties": {
           "input": { "type": "string" },
-          "status": { "type": "string", "enum": ["pass", "crash", "timeout", "wrong_output"] },
+          "status": {
+            "type": "string",
+            "enum": ["pass", "crash", "timeout", "wrong_output"]
+          },
           "stdout": { "type": "string" },
           "stderr": { "type": "string" },
+          "expected_output": { "type": ["string", "null"] },
           "exit_code": { "type": "integer" },
           "execution_time_ms": { "type": "number" }
         },
         "required": ["input", "status", "exit_code", "execution_time_ms"],
-        "additionalProperties": false
+        "additionalProperties": true
       }
     },
     "sanitizer_report": {
       "type": "object",
       "properties": {
-        "status": { "type": "string", "enum": ["ok", "crashed"] },
+        "status": {
+          "type": "string",
+          "enum": ["ok", "crashed", "compile_error", "timeout"]
+        },
         "exit_code": { "type": "integer" },
         "sanitizer_output": { "type": "string" },
         "execution_time_ms": { "type": "number" }
       },
       "required": ["status", "exit_code", "sanitizer_output", "execution_time_ms"],
-      "additionalProperties": false
+      "additionalProperties": true
     }
   },
   "required": ["request_id", "purpose"],
-  "additionalProperties": false
+  "additionalProperties": true
 }

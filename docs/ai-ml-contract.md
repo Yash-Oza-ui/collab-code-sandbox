@@ -751,21 +751,69 @@ The 12 decisions recorded in Backlog v2 §6.2 govern this contract. **Decided** 
 
 ## 15. Execution-Service Entry Point (`POST /v1/analyses`)
 
+**Traceability:** FR12, FR35, FR41.4, NFR9, CR08, T-17 V2.8 / V2.11 / V2.12  
 **Caller:** Client (browser)  
 **Target:** `http://execution-service:8082/v1/analyses`  
 **Purpose:** Asynchronous client trigger for an analysis task (Decision 4, NFR9).  
 **Caller Identity (T-17 V2.6):** Identified by the header `X-Session-Id: <session_id>`: the caller's private session id (v0 §3.3), sent in a header, never in the URL or body.  
+**Schemas:** `docs/schemas/analyses-request.json`, `docs/schemas/analyses-response.json`  
+**Examples:** `docs/examples/v2-analysis-entry-request.json`, `docs/examples/v2-analysis-entry-response.json`  
 
-When a user initiates an analysis, the client calls `execution-service`. `execution-service` verifies the caller's role, run permission (`can_run`), and the room's Host AI switch (`ai_enabled`) with `sync-service` (`GET /internal/rooms/{room_id}/sessions/{session_id}` per T-17 Decision 11) using `X-Internal-Token`. If permitted, `execution-service` responds immediately with HTTP `202 Accepted` carrying an `analysis_id`, and dispatches the task asynchronously to `ai-ml-service`. The analysis result arrives later as an `analysis-result` message on the control WebSocket, ensuring normal run execution is never delayed (NFR9, CR08).
+When a user initiates an analysis, the client calls `execution-service`. `execution-service` verifies the caller's role, run permission (`can_run`), and the room's Host AI switch (`ai_enabled`) with `sync-service` (`GET /internal/rooms/{room_id}/sessions/{session_id}` per T-17 Decision 11) using `X-Internal-Token`. If the caller is denied or validation fails, `execution-service` returns T-17 V2.12 platform errors (`403 RUN_NOT_ALLOWED` with optional `error.reason`, `404 ROOM_NOT_FOUND` / `SESSION_NOT_FOUND` / `MODULE_NOT_FOUND`, `422 MODULE_NOT_RUNNABLE` / `NO_ENTRY_FILE`, or `503 ROOM_SERVICE_UNAVAILABLE`). If permitted, `execution-service` responds immediately with HTTP `202 Accepted` carrying an `analysis_id`, and dispatches the resolved code/run payload asynchronously to `ai-ml-service`. The analysis result arrives later as an `analysis-result` message on the control WebSocket, ensuring normal run execution is never delayed (NFR9, CR08).
+
+#### Request Fields
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `request_id` | string (UUID v4) | Yes | Client-generated correlation ID for this analysis request. |
+| `room_id` | string (22-char base64url) | Yes | Room identifier matching T-17 V2.1. |
+| `task` | string | Yes | One of: `"complexity"`, `"slowdown"`, `"failing_input"`, `"crash_explanation"`. |
+| `language` | string | Yes | One of DR1 languages: `"cpp"`, `"python"`, `"c"`, `"java"`, `"javascript"`. |
+| `consent` | boolean | Yes | Caller AI consent status (FR12). |
+| `source` | object | Conditional* | Workspace code reference matching T-17 V2.8: Pair mode sends `{"kind": "inline", "files": [...], "entry": "..."}`; Open mode sends `{"kind": "saved", "target": "module", "module_id": "..."}` or `{"kind": "saved", "target": "entry", "module_ids": [...]}`. |
+| `run_request_id` | string (UUID v4) | Conditional* | Reference to a prior `POST /v1/runs` request ID (used when launching post-run `slowdown` or `crash_explanation` from run output). |
+| `stdin` | string | No | Optional standard input supplied when reproducing a crash during `crash_explanation`. |
+| `code` | string | Conditional* | Optional single-snippet inline convenience field when a standalone snippet is sent directly instead of `source`. |
+
+*At least one of `source`, `run_request_id`, or `code` must be present so `execution-service` has a code or run reference (Decision 4).*
 
 ### 15.1 Request Body
+
+**Pair mode (`source.kind = "inline"`, matching `docs/examples/v2-analysis-entry-request.json`):**
 ```json
 {
   "request_id": "7a3e2b10-6c5d-4f8a-9e12-3456789abcde",
   "room_id": "Zq8-Lw2Ef6Th0Yx4Rn7JbA",
   "task": "complexity",
   "language": "python",
-  "consent": true
+  "consent": true,
+  "source": {
+    "kind": "inline",
+    "files": [
+      {
+        "name": "main.py",
+        "content": "def find_duplicates(arr):\n    dups = []\n    for i in range(len(arr)):\n        for j in range(i + 1, len(arr)):\n            if arr[i] == arr[j]:\n                dups.append(arr[i])\n    return dups"
+      }
+    ],
+    "entry": "main.py"
+  }
+}
+```
+
+**Open mode (`source.kind = "saved"`) with prior run reference (`run_request_id`):**
+```json
+{
+  "request_id": "5a6b7c8d-9e0f-1a2b-3c4d-5e6f7a8b9c0d",
+  "room_id": "k3Yc1t9Qx7mBvA2nR0sLpQ",
+  "task": "crash_explanation",
+  "language": "cpp",
+  "consent": true,
+  "source": {
+    "kind": "saved",
+    "target": "module",
+    "module_id": "mod_9Qx7mBvA2nR0"
+  },
+  "run_request_id": "0b9d2f3e-7a41-4c58-9e1b-5d3c8a6f2e10"
 }
 ```
 
@@ -1531,7 +1579,7 @@ The request contains all common fields from §16 plus:
   "request_id": "7a3e2b10-6c5d-4f8a-9e12-3456789abcde",
   "error": {
     "code": "INVALID_REQUEST",
-    "message": "Schema validation error: field 'code' is required and cannot be empty.",
+    "message": "Schema validation error: field 'sanitizer_output' is required and cannot be empty.",
     "retry_after_seconds": null
   }
 }
@@ -1754,21 +1802,26 @@ The request contains all common fields from §16 plus:
 }
 ```
 
-### 17.7 WebSocket Message Payload Example (Error Outcome)
+> **Fallback Rule (Decision 10, NFR7.5):** Any blocked AI step (`CONSENT_MISSING`, `AI_DISABLED`, `COST_CAP_REACHED`, `ROOM_RATE_LIMITED`, `RATE_LIMITED_PROVIDER`, `PROVIDER_ERROR`, `PROVIDER_TIMEOUT`) **never** produces `status: "error"`. Deterministic task results (such as Task 4's `error_type`, `line_number`, and `summary`, with `explanation: null` and `suggested_fix: null`) still complete and are delivered with `status: "fallback"`.
+
+### 17.7 WebSocket Message Payload Example (Unrecoverable Error Outcome)
+
+Used only when the analysis request itself fails before any deterministic task result can be produced (e.g., `RUN_BUDGET_EXCEEDED` or container execution failure):
+
 ```json
 {
   "type": "analysis-result",
   "request_id": "7a3e2b10-6c5d-4f8a-9e12-3456789abcde",
   "analysis_id": "8b4f3c21-7d6e-4a9b-0f23-456789abcdef",
   "room_id": "Zq8-Lw2Ef6Th0Yx4Rn7JbA",
-  "task": "crash_explanation",
+  "task": "complexity",
   "status": "error",
   "ai_step": {
     "status": "skipped",
-    "error_code": "PROVIDER_ERROR"
+    "error_code": null
   },
   "result": {},
-  "message": "Analysis failed due to unrecoverable upstream provider error."
+  "message": "Analysis failed: aggregate repeated-run execution budget exceeded (RUN_BUDGET_EXCEEDED)."
 }
 ```
 
@@ -1789,8 +1842,8 @@ The request contains all common fields from §16 plus:
 3. **No User Broadcast:** Internal execution runs are never broadcast as user-visible `run-result` WebSocket messages.
 4. **Three Purpose Modes:**
    - `purpose: "measurement"`: Repeated runs at geometric input sizes ($n, 2n, 4n$) for Task 1 complexity estimation.
-   - `purpose: "test_batch"`: Batch execution of generated edge-case inputs in a single container for Task 3 failing-input detection (CR15).
-   - `purpose: "sanitizer"`: Specialized compilation and execution with AddressSanitizer and UndefinedBehaviorSanitizer instrumentation for Task 4 (C/C++ only, DR5).
+   - `purpose: "test_batch"`: Batch execution of generated edge-case inputs in a single container for Task 3 failing-input detection (CR15). Optional `reference_solution`, `expected_outputs`, and `batch_results[].expected_output` fields remain provisional pending `execution-service` confirmation (§16.3, §23).
+   - `purpose: "sanitizer"`: Specialized compilation and execution with AddressSanitizer and UndefinedBehaviorSanitizer instrumentation for Task 4 (C/C++ only, DR5). Optional `stdin` request input and extended `sanitizer_report.status` values (`"ok"`, `"crashed"`, `"compile_error"`, `"timeout"`) remain provisional pending `execution-service` confirmation (§23).
 
 ### 18.1 Measurement (`purpose: "measurement"`)
 
@@ -1963,7 +2016,7 @@ External AI calls require both `consent == true` (user privacy consent, FR12) an
 
 ### 20.2 Unprocessable Request Error Envelopes
 
-The HTTP error envelope is used **strictly** for requests that cannot be answered or processed:
+The `ai-ml-service` HTTP error envelope (`docs/schemas/error-response.json`) is used **strictly** for requests that cannot be answered or processed (`INVALID_REQUEST`, `UNSUPPORTED_LANGUAGE`, `RUN_BUDGET_EXCEEDED`); blocked AI steps are never returned as HTTP error codes. (`execution-service` `POST /v1/analyses` shares this envelope shape and may also emit T-17 V2.12 permission/lookup codes such as `RUN_NOT_ALLOWED` with optional `error.reason`.)
 
 1. **`INVALID_REQUEST` (HTTP 422):** Malformed request body or missing mandatory fields.
    ```json
@@ -1971,7 +2024,7 @@ The HTTP error envelope is used **strictly** for requests that cannot be answere
      "request_id": "7a3e2b10-6c5d-4f8a-9e12-3456789abcde",
      "error": {
        "code": "INVALID_REQUEST",
-       "message": "Schema validation error: field 'code' is required and cannot be empty.",
+       "message": "Schema validation error: field 'sanitizer_output' is required and cannot be empty.",
        "retry_after_seconds": null
      }
    }

@@ -1,6 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "ErrorEnvelope",
+  "description": "AI/ML service HTTP error envelope per Decision 10 and §20.2 (strictly for unprocessable requests: INVALID_REQUEST, UNSUPPORTED_LANGUAGE, RUN_BUDGET_EXCEEDED; blocked AI steps return HTTP 200 with ai_step.error_code). Includes optional error.reason for T-17 V2.12 compatibility where shared with execution-service.",
   "type": "object",
   "properties": {
     "request_id": { "type": ["string", "null"] },
@@ -12,18 +13,11 @@
           "enum": [
             "INVALID_REQUEST",
             "UNSUPPORTED_LANGUAGE",
-            "RUN_BUDGET_EXCEEDED",
-            "CONSENT_MISSING",
-            "AI_DISABLED",
-            "COST_CAP_REACHED",
-            "ROOM_RATE_LIMITED",
-            "RATE_LIMITED_PROVIDER",
-            "PROVIDER_ERROR",
-            "PROVIDER_TIMEOUT",
-            "HTTP_ERROR"
+            "RUN_BUDGET_EXCEEDED"
           ]
         },
         "message": { "type": "string" },
+        "reason": { "type": ["string", "null"] },
         "retry_after_seconds": { "type": ["integer", "null"] }
       },
       "required": ["code", "message", "retry_after_seconds"],
