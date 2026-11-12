@@ -75,7 +75,8 @@ public class RunController {
     public ResponseEntity<RunResponse> run(@Valid @RequestBody RunRequest req) {
 
         // Check 1: Reject legacy 'code' field (T-17 V2.8, T-19 AC4)
-        if (req.getCode() != null) {
+        // Catches both "code": "something" AND "code": null in the JSON body.
+        if (req.hasCodeField() || req.getCode() != null) {
             throw new InvalidRequestException(
                     req.getRequest_id(),
                     "Field 'code' is no longer accepted. Use 'source'."
@@ -411,13 +412,33 @@ public class RunController {
             return new FailureInfo(m.getModule_id(), m.getName(), m.getOwner(), m.getSaved_by());
         }
 
-        // 3. Check stderr for module names
+        // 3. Pick the module whose name appears LAST in stderr (deepest traceback frame, V2.9).
+        //    If two modules tie on the same last-index, return null (ambiguous, V2.9 allows that).
         String stderr = result.getStderr();
         if (stderr != null && !stderr.isBlank()) {
+            SnapshotModule latestModule = null;
+            int latestIndex = -1;
+            boolean ambiguous = false;
+
             for (SnapshotModule m : modules) {
-                if (stderr.contains(m.getName()) || stderr.contains(m.getModule_id())) {
-                    return new FailureInfo(m.getModule_id(), m.getName(), m.getOwner(), m.getSaved_by());
+                int nameIdx = m.getName() != null ? stderr.lastIndexOf(m.getName()) : -1;
+                int idIdx = m.getModule_id() != null ? stderr.lastIndexOf(m.getModule_id()) : -1;
+                int maxIdx = Math.max(nameIdx, idIdx);
+
+                if (maxIdx >= 0) {
+                    if (maxIdx > latestIndex) {
+                        latestIndex = maxIdx;
+                        latestModule = m;
+                        ambiguous = false;
+                    } else if (maxIdx == latestIndex) {
+                        ambiguous = true;
+                    }
                 }
+            }
+
+            if (latestModule != null && !ambiguous) {
+                return new FailureInfo(latestModule.getModule_id(), latestModule.getName(),
+                        latestModule.getOwner(), latestModule.getSaved_by());
             }
         }
 

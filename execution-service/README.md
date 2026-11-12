@@ -99,6 +99,21 @@ After execution finishes, execution-service broadcasts the run result to sync-se
 
 ---
 
+## ⚠️ StubPermissionLookupService
+
+`StubPermissionLookupService` is an in-memory stub activated by the
+`stub-permissions` Spring profile (enabled by default in `application.yml`).
+It returns `can_run: true` for every session that is not one of the
+well-known test session IDs (`OBSERVER_SESSION_ID`, `REVOKED_SESSION_ID`,
+`HOST_ONLY_SESSION_ID`, `NOT_IN_ROOM_SESSION_ID`).
+
+**This stub must be replaced** when sync-service implements real session
+lookup (T-20). To disable it, remove `stub-permissions` from
+`spring.profiles.active` and register a production `PermissionLookupService`
+bean.
+
+---
+
 ## Prerequisites
 
 - Java 21 (Temurin recommended)

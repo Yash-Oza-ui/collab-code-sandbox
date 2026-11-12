@@ -2,15 +2,22 @@ package com.collabcode.execution.permission;
 
 import com.collabcode.execution.exception.RoomServiceUnavailableException;
 import com.collabcode.execution.exception.RunNotAllowedException;
+import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Component;
 
 /**
  * Deterministic in-memory stub for PermissionLookupService (T-19, Jay / T-17 V2.11).
  *
- * Provides member identity and permissions until sync-service implements session lookup (T-20).
- * Throws ROOM_SERVICE_UNAVAILABLE (503) when simulated failure is active.
+ * <p><strong>WARNING – stub only.</strong> This component returns {@code can_run: true} for any
+ * session that is not one of the well-known test session IDs below. It is registered
+ * only when the {@code stub-permissions} profile is active (which is the default until
+ * sync-service implements real session lookup in T-20).</p>
+ *
+ * <p>Activate explicitly with {@code spring.profiles.active=stub-permissions} or via
+ * the {@code app.stubs.permission-lookup} property in {@code application.yml}.</p>
  */
 @Component
+@Profile("stub-permissions")
 public class StubPermissionLookupService implements PermissionLookupService {
 
     public static final String OBSERVER_SESSION_ID    = "00000000-0000-4000-8000-000000000001";

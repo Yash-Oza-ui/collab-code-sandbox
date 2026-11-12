@@ -47,8 +47,9 @@ public class RunRequest {
     private RunSource source;
 
     /**
-     * Legacy v0 field. If present in request body, rejected with 422 INVALID_REQUEST.
+     * Legacy v0 field. If present in request body (even if null), rejected with 422 INVALID_REQUEST.
      */
+    private boolean codeFieldPresent = false;
     private String code;
 
     // ----- getters and setters -----
@@ -72,5 +73,17 @@ public class RunRequest {
     public void setSource(RunSource source) { this.source = source; }
 
     public String getCode() { return code; }
-    public void setCode(String code) { this.code = code; }
+
+    @com.fasterxml.jackson.annotation.JsonProperty("code")
+    public void setCode(com.fasterxml.jackson.databind.JsonNode node) {
+        this.codeFieldPresent = true;
+        this.code = (node != null && !node.isNull()) ? node.asText() : null;
+    }
+
+    public void setCodeText(String code) {
+        this.codeFieldPresent = (code != null);
+        this.code = code;
+    }
+
+    public boolean hasCodeField() { return codeFieldPresent; }
 }

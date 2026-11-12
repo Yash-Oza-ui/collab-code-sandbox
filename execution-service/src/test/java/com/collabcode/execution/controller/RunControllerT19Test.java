@@ -931,6 +931,85 @@ class RunControllerT19Test {
                 .andExpect(jsonPath("$.failure.last_saved_by.member_id").value("m_7a3c9f"));
     }
 
+    // ------------------------------------------------------------------ 19b. V2.9 traceback example: blame last module in stderr
+
+    @Test
+    @DisplayName("V2.9 traceback: main.py imports helper.py, TypeError in helper.py → failure names helper.py (last in stderr)")
+    void run_decision9_tracebackBlamesLastModuleInStderr() throws Exception {
+        String openRoom = "room-open-01";
+
+        // V2.9 exact example from api-contracts.md:
+        // main.py calls helper.run(), TypeError raised in helper.py line 4
+        String tracebackStderr = """
+                Traceback (most recent call last):
+                  File "main.py", line 2, in <module>
+                    print(add(2, "3"))
+                  File "helper.py", line 2, in add
+                    return a + b
+                TypeError: unsupported operand type(s) for +: 'int' and 'str'
+                """;
+
+        when(codeRunner.execute(any(RunSpec.class))).thenReturn(new ExecutionResult(
+                "", tracebackStderr, 1, 41.0, 8.4,
+                false, false, "non_zero_exit", false, null, null, null
+        ));
+
+        // Use entry target with "all" modules so both main.py and helper.py are in the snapshot
+        String body = """
+                {
+                  "request_id": "%s",
+                  "room_id":    "%s",
+                  "session_id": "%s",
+                  "language":   "python",
+                  "source": {
+                    "kind": "saved",
+                    "target": "entry",
+                    "module_ids": "all"
+                  }
+                }
+                """.formatted(REQUEST_ID, openRoom, SESSION_ID);
+
+        mockMvc.perform(post("/v1/runs")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.failure.module_id").value("mod_5Lm8Np2Qr4St"))
+                .andExpect(jsonPath("$.failure.name").value("helper.py"))
+                .andExpect(jsonPath("$.failure.owner.member_id").value("m_7a3c9f"))
+                .andExpect(jsonPath("$.failure.owner.display_name").value("Ada"))
+                .andExpect(jsonPath("$.failure.last_saved_by.member_id").value("m_4b19d2"))
+                .andExpect(jsonPath("$.failure.last_saved_by.display_name").value("Lin"));
+    }
+
+    // ------------------------------------------------------------------ 19c. code: null rejected
+
+    @Test
+    @DisplayName("Body with 'code': null (explicit null) returns 422 INVALID_REQUEST")
+    void run_bodyWithCodeNull_returns422() throws Exception {
+        String body = """
+                {
+                  "request_id": "%s",
+                  "room_id":    "%s",
+                  "session_id": "%s",
+                  "language":   "python",
+                  "code":       null,
+                  "source": {
+                    "kind": "inline",
+                    "files": [{ "name": "main.py", "content": "print(1)" }],
+                    "entry": "main.py"
+                  }
+                }
+                """.formatted(REQUEST_ID, ROOM_ID, SESSION_ID);
+
+        mockMvc.perform(post("/v1/runs")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.request_id").value(REQUEST_ID))
+                .andExpect(jsonPath("$.error.code").value("INVALID_REQUEST"))
+                .andExpect(jsonPath("$.error.message").value("Field 'code' is no longer accepted. Use 'source'."));
+    }
+
     // ------------------------------------------------------------------ 20. Decision 9: OOM kill rule
 
     @Test
