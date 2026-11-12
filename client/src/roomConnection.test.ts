@@ -1,5 +1,4 @@
-
-
+// @vitest-environment happy-dom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const { WebsocketProviderMock } = vi.hoisted(() => ({
@@ -13,11 +12,10 @@ vi.mock('y-websocket', () => ({
 import {
   createControlSocketUrl,
   createDocumentProvider,
-  getSessionId,
   joinRoom,
 } from './roomConnection'
 import { config } from './config'
-
+import { ownerTokenKey } from './createRoom'
 
 class MockWebSocket {
   static instance: MockWebSocket
@@ -32,8 +30,8 @@ class MockWebSocket {
 
   url: string
 
-constructor(url: string) {
-  this.url = url
+  constructor(url: string) {
+    this.url = url
     MockWebSocket.instance = this
   }
 
@@ -54,37 +52,65 @@ constructor(url: string) {
   }
 }
 
-
 describe('roomConnection', () => {
-  let storage: Storage
+  const roomId = 'room_123'
+  const tokenKey = ownerTokenKey(roomId)
+  let storage: Map<string, string>
 
-  beforeEach(() => {
-    storage = {
-      getItem: vi.fn(),
-      setItem: vi.fn(),
-      removeItem: vi.fn(),
-      clear: vi.fn(),
-      key: vi.fn(),
-      length: 0,
-    } as unknown as Storage
+    beforeEach(() => {
+      storage = new Map()
 
-    vi.stubGlobal('localStorage', storage)
-    vi.stubGlobal('crypto', {
-      randomUUID: vi.fn().mockReturnValue('test-session-id'),
+    vi.stubGlobal('WebSocket', MockWebSocket)
+
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) =>
+        storage.set(key, String(value)),
+      removeItem: (key: string) => storage.delete(key),
+      clear: () => storage.clear(),
     })
 
     vi.clearAllMocks()
+    localStorage.removeItem(tokenKey)
   })
 
   afterEach(() => {
+    vi.useRealTimers()
     vi.unstubAllGlobals()
   })
 
+  it('builds the control socket URL', () => {
+    expect(createControlSocketUrl(roomId, 'session_456')).toBe(
+      `${config.syncWsUrl}/room_123?session_id=session_456`,
+    )
+  })
 
-  it('sends join and resolves after the server accepts', async () => {
-    vi.stubGlobal('WebSocket', MockWebSocket)
+  it('includes the stored owner token in the creator join message', async () => {
+    localStorage.setItem(tokenKey, 'secret-owner-token')
 
-    const promise = joinRoom('room_123', 'Chandan', 'session_456')
+    const promise = joinRoom(roomId, 'Chandan', 'session_456')
+    const socket = MockWebSocket.instance
+
+    socket.open()
+
+    expect(socket.send).toHaveBeenCalledWith(
+      JSON.stringify({
+        type: 'join',
+        display_name: 'Chandan',
+        owner_token: 'secret-owner-token',
+      }),
+    )
+
+    expect(socket.url).not.toContain('secret-owner-token')
+
+    socket.receive({ type: 'joined', role: 'host' })
+
+    const result = await promise
+    expect(result.joined.role).toBe('host')
+  })
+
+  it('allows an ordinary participant to join without an owner token', async () => {
+    const promise = joinRoom(roomId, 'Chandan', 'session_456')
     const socket = MockWebSocket.instance
 
     socket.open()
@@ -96,6 +122,41 @@ describe('roomConnection', () => {
       }),
     )
 
+    socket.receive({ type: 'joined', role: 'participant' })
+
+    const result = await promise
+    expect(result.joined.role).toBe('participant')
+  })
+
+    it('still allows joining when local storage is unavailable', async () => {
+    vi.stubGlobal('localStorage', {
+      getItem: () => {
+        throw new Error('Storage unavailable')
+      },
+    })
+
+    const promise = joinRoom(roomId, 'Chandan', 'session_456')
+    const socket = MockWebSocket.instance
+
+    socket.open()
+
+    expect(socket.send).toHaveBeenCalledWith(
+      JSON.stringify({
+        type: 'join',
+        display_name: 'Chandan',
+      }),
+    )
+
+    socket.receive({ type: 'joined' })
+
+    await expect(promise).resolves.toBeDefined()
+  })
+
+  it('resolves after server acceptance and removes handshake handlers', async () => {
+    const promise = joinRoom(roomId, 'Chandan', 'session_456')
+    const socket = MockWebSocket.instance
+
+    socket.open()
     socket.receive({
       type: 'joined',
       member_id: 'member_1',
@@ -106,12 +167,15 @@ describe('roomConnection', () => {
     expect(result.joined.type).toBe('joined')
     expect(result.joined.member_id).toBe('member_1')
     expect(result.socket).toBe(socket)
+    expect(socket.onopen).toBeNull()
+    expect(socket.onmessage).toBeNull()
+    expect(socket.onerror).toBeNull()
+    expect(socket.onclose).toBeNull()
+    expect(socket.close).not.toHaveBeenCalled()
   })
 
   it('rejects when the server refuses the join', async () => {
-    vi.stubGlobal('WebSocket', MockWebSocket)
-
-    const promise = joinRoom('room_123', 'Chandan', 'session_456')
+    const promise = joinRoom(roomId, 'Chandan', 'session_456')
     const socket = MockWebSocket.instance
 
     socket.open()
@@ -123,11 +187,10 @@ describe('roomConnection', () => {
     await expect(promise).rejects.toThrow(
       'Room join refused: NAME_TAKEN',
     )
+    expect(socket.close).toHaveBeenCalled()
   })
 
   it('rejects when the room does not exist (4404)', async () => {
-    vi.stubGlobal('WebSocket', MockWebSocket)
-
     const promise = joinRoom('invalid_room', 'Chandan', 'session_456')
     const socket = MockWebSocket.instance
 
@@ -136,42 +199,82 @@ describe('roomConnection', () => {
     await expect(promise).rejects.toThrow('Room not found.')
   })
 
+  it('rejects when the control socket encounters an error', async () => {
+    const promise = joinRoom(roomId, 'Chandan', 'session_456')
+    const socket = MockWebSocket.instance
 
-  it('creates and stores a session ID when none exists', () => {
-    vi.mocked(storage.getItem).mockReturnValue(null)
+    socket.onerror?.(new Event('error'))
 
-    expect(getSessionId()).toBe('test-session-id')
-    expect(storage.setItem).toHaveBeenCalledWith(
-      'collab_session_id',
-      'test-session-id',
+    await expect(promise).rejects.toThrow(
+      'Unable to connect to the room server.',
     )
+    expect(socket.close).toHaveBeenCalled()
   })
 
-  it('reuses an existing session ID', () => {
-    vi.mocked(storage.getItem).mockReturnValue('existing-session-id')
+  it('rejects when the handshake times out and closes the socket', async () => {
+    vi.useFakeTimers()
 
-    expect(getSessionId()).toBe('existing-session-id')
-    expect(storage.setItem).not.toHaveBeenCalled()
-  })
-
-  it('builds the control socket URL', () => {
-    const url = createControlSocketUrl('room_123', 'session_456')
-
-    expect(url).toBe(
-      `${config.syncWsUrl}/room_123?session_id=session_456`,
+    const promise = joinRoom(
+      roomId,
+      'Chandan',
+      'session_456',
+      { timeoutMs: 5000 },
     )
+    const socket = MockWebSocket.instance
+
+    const rejection = expect(promise).rejects.toThrow(
+      'Room connection timed out. Please try again.',
+    )
+
+    await vi.advanceTimersByTimeAsync(5000)
+    await rejection
+
+    expect(socket.close).toHaveBeenCalled()
+    expect(socket.onopen).toBeNull()
+    expect(socket.onmessage).toBeNull()
+    expect(socket.onerror).toBeNull()
+    expect(socket.onclose).toBeNull()
+    expect(vi.getTimerCount()).toBe(0)
   })
 
-  it('creates the document provider for the main document', () => {
+  it('cancels a pending handshake and closes the socket when aborted', async () => {
+    const controller = new AbortController()
+    const promise = joinRoom(
+      roomId,
+      'Chandan',
+      'session_456',
+      { signal: controller.signal },
+    )
+    const socket = MockWebSocket.instance
+
+    const rejection = expect(promise).rejects.toThrow(
+      'Room connection cancelled.',
+    )
+
+    controller.abort()
+    await rejection
+
+    expect(socket.close).toHaveBeenCalled()
+    expect(socket.onopen).toBeNull()
+    expect(socket.onmessage).toBeNull()
+    expect(socket.onerror).toBeNull()
+    expect(socket.onclose).toBeNull()
+  })
+
+  it('creates the provider for the main document using the same session ID', () => {
     const doc = {} as import('yjs').Doc
 
-    createDocumentProvider('room_123', doc, 'session_456')
+    createDocumentProvider(roomId, doc, 'session_456')
 
     expect(WebsocketProviderMock).toHaveBeenCalledWith(
       `${config.syncWsUrl}/room_123/docs`,
       'main',
       doc,
-      { params: { session_id: 'session_456' } },
+      {
+        params: {
+          session_id: 'session_456',
+        },
+      },
     )
   })
 })

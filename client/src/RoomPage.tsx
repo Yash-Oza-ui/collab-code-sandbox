@@ -1,19 +1,18 @@
 
 import { useEffect, useState } from 'react'
 import type { RefObject } from 'react'
-import type { editor as MonacoEditor } from 'monaco-editor'
 import type * as Y from 'yjs'
+import type { editor as MonacoEditor } from 'monaco-editor'
 import Editor from '@monaco-editor/react'
 import { MonacoBinding } from 'y-monaco'
-
 import DisplayNamePrompt from './DisplayNamePrompt'
 import { getRoomIdFromPath } from './roomId'
 import { useRoomDoc } from './roomDoc'
 import {
   createDocumentProvider,
-  getSessionId,
   joinRoom,
 } from './roomConnection'
+import { getSessionId } from './sessionId'
 
 export interface RoomPageProps {
   docRef?: RefObject<Y.Doc | null>
@@ -22,91 +21,98 @@ export interface RoomPageProps {
 
 export default function RoomPage(props: RoomPageProps = {}) {
   const { docRef: externalDocRef, onDisplayNameAccepted } = props
-
   const roomId = getRoomIdFromPath(window.location.pathname)
-
+  const isInvalidRoomId = !roomId || !/^[A-Za-z0-9_-]{1,64}$/.test(roomId)
   const [displayName, setDisplayName] = useState<string | null>(null)
-  const [connectionStatus, setConnectionStatus] = useState('disconnected')
-  const [connectionError, setConnectionError] = useState<string | null>(null)
-
-  const [documentProvider, setDocumentProvider] =
-    useState<ReturnType<typeof createDocumentProvider> | null>(null)
-
-  const [editorInstance, setEditorInstance] =
+  const [editor, setEditor] =
     useState<MonacoEditor.IStandaloneCodeEditor | null>(null)
-
-  const { docRef } = useRoomDoc(roomId, {
-    docRef: externalDocRef,
-  })
+  const [connectionStatus, setConnectionStatus] = useState<
+    'connecting' | 'connected' | 'not-found' | 'connection-error'
+  >('connecting')
+  const { docRef } = useRoomDoc(roomId, { docRef: externalDocRef })
 
   function handleDisplayNameAccepted(name: string) {
-    setConnectionError(null)
     setDisplayName(name)
     onDisplayNameAccepted?.(name)
   }
 
   useEffect(() => {
-    if (!roomId || !displayName) return
-    const activeRoomId = roomId
-    const activeDisplayName = displayName
+    const doc = docRef.current
+
+    if (isInvalidRoomId || !displayName || !doc || !editor) {
+      return
+    }
+
+    const validRoomId = roomId
+    const acceptedDisplayName = displayName
+    const roomDoc = doc
+    const roomEditor = editor
+
     let cancelled = false
+    const joinAbortController = new AbortController()
     let controlSocket: WebSocket | null = null
     let provider: ReturnType<typeof createDocumentProvider> | null = null
+    let binding: MonacoBinding | null = null
 
     async function connect() {
       try {
-        const doc = docRef.current
-
-        if (!doc) {
-          throw new Error('Room document is not ready.')
-        }
-
-        setConnectionStatus('connecting')
-        setConnectionError(null)
-
         const sessionId = getSessionId()
-
         const result = await joinRoom(
-          activeRoomId,
-          activeDisplayName,
+          validRoomId,
+          acceptedDisplayName,
           sessionId,
+          { signal: joinAbortController.signal },
         )
-        controlSocket = result.socket
 
         if (cancelled) {
-          controlSocket.close()
+          result.socket.close()
           return
         }
 
-        provider = createDocumentProvider(
-          activeRoomId,
-          doc,
-          sessionId,
+        controlSocket = result.socket
+
+        provider = createDocumentProvider(validRoomId, roomDoc, sessionId)
+
+        const model = roomEditor.getModel()
+        if (!model || !provider) return
+
+        binding = new MonacoBinding(
+          roomDoc.getText('monaco'),
+          model,
+          new Set([roomEditor]),
+          provider.awareness,
         )
 
+        provider.awareness.setLocalStateField('user', {
+          name: acceptedDisplayName,
+          color:
+            provider.awareness.getLocalState()?.user?.color ?? '#3B82F6',
+        })
+
         provider.on('status', ({ status }) => {
-          if (!cancelled) {
-            setConnectionStatus(status)
+          if (status === 'connected') {
+            setConnectionStatus('connected')
+          } else {
+            setConnectionStatus((current) =>
+              current === 'not-found' ? 'not-found' : 'connecting',
+            )
           }
         })
 
-        setDocumentProvider(provider)
+        provider.on('connection-close', (event) => {
+          if (event?.code === 4404) {
+            setConnectionStatus('not-found')
+          }
+        })
       } catch (error) {
-        provider?.destroy()
-        provider = null
+        if (cancelled) return
 
-        controlSocket?.close()
-        controlSocket = null
-
-        if (!cancelled) {
-          setDocumentProvider(null)
-          setConnectionStatus('disconnected')
-          setConnectionError(
-            error instanceof Error
-              ? error.message
-              : 'Room connection failed.',
-          )
-        }
+        setConnectionStatus(
+          error instanceof Error &&
+            error.message.toLowerCase().includes('not found')
+            ? 'not-found'
+            : 'connection-error',
+        )
       }
     }
 
@@ -114,92 +120,94 @@ export default function RoomPage(props: RoomPageProps = {}) {
 
     return () => {
       cancelled = true
+      joinAbortController.abort()
+      binding?.destroy()
       provider?.destroy()
       controlSocket?.close()
     }
-  }, [roomId, displayName, docRef])
+  }, [
+    roomId,
+    isInvalidRoomId,
+    displayName,
+    docRef,
+    editor,
+  ])
 
-  useEffect(() => {
-    if (!editorInstance || !documentProvider) return
 
-    const doc = docRef.current
-    const model = editorInstance.getModel()
-
-    if (!doc || !model) return
-
-    const binding = new MonacoBinding(
-      doc.getText('monaco'),
-      model,
-      new Set([editorInstance]),
-      documentProvider.awareness,
-    )
-
-    return () => {
-      binding.destroy()
-    }
-  }, [editorInstance, documentProvider, docRef])
-
-  if (!roomId) {
-    return (
-      <div className="room-page">
-        <p role="alert">
-          Invalid room link. Expected URL format: /room/{'{room_id}'}.
-        </p>
-      </div>
-    )
-  }
-
-  if (displayName === null) {
-    return (
-      <DisplayNamePrompt
-        onSubmit={handleDisplayNameAccepted}
-      />
-    )
+  if (!isInvalidRoomId && displayName === null) {
+    return <DisplayNamePrompt onSubmit={handleDisplayNameAccepted} />
   }
 
   return (
     <div className="room-page">
       <header className="room-header">
-        Room: {roomId}
-        {' · You: '}
-        {displayName}
-        {' · Connection: '}
-        {connectionStatus}
+        {roomId
+          ? `Room: ${roomId}`
+          : 'No room id in the URL (expected /room/{room_id})'}
+        {displayName ? ` · You: ${displayName}` : ''}
       </header>
 
-      {connectionError && (
-        <div>
-          <p role="alert">{connectionError}</p>
-          <button
-            type="button"
-            onClick={() => {
-              setDocumentProvider(null)
-              setConnectionError(null)
-              setDisplayName(null)
-              setConnectionStatus('disconnected')
+      <div className="room-editor" style={{ position: 'relative' }}>
+        {(isInvalidRoomId || connectionStatus !== 'connected') && (
+          <div
+            role={
+              isInvalidRoomId || connectionStatus === 'not-found'
+                ? 'alert'
+                : 'status'
+            }
+            style={{
+              position: 'absolute',
+              inset: 0,
+              zIndex: 10,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              background: '#ffffff',
+              padding: '24px',
+              textAlign: 'center',
             }}
           >
-            Try again
-          </button>
-        </div>
-      )}
+            {isInvalidRoomId ? (
+              <div>
+                <h2>Invalid room link</h2>
+                <p>Please check the room URL and try again.</p>
+              </div>
+            ) : connectionStatus === 'not-found' ? (
+              <div>
+                <h2>Room not found</h2>
+                <p>
+                  This room does not exist. Please check your invitation
+                  link or create a new room.
+                </p>
+              </div>
+            ) : connectionStatus === 'connection-error' ? (
+              <div>
+                <h2>Connection failed</h2>
+                <p>Unable to connect to the room. Please check your connection and try again.</p>
+              </div>
+            ) : (
+              <p>Connecting to room...</p>
+            )}
+          </div>
+        )}
 
-      {!connectionError && !documentProvider && (
-        <p role="status">Joining room...</p>
-      )}
-
-      {documentProvider && (
-        <div className="room-editor">
+        <div
+          style={{
+            height: '100%',
+            visibility:
+              connectionStatus === 'connected' ? 'visible' : 'hidden',
+          }}
+        >
           <Editor
             height="100%"
             defaultLanguage="plaintext"
             defaultValue=""
-            onMount={(editor) => {
-              setEditorInstance(editor)
+            onMount={(mountedEditor) => {
+              setEditor(mountedEditor)
             }}
           />
         </div>
-      )}
+      </div>
     </div>
   )
 }
