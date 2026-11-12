@@ -136,7 +136,7 @@ async def run_rule_based_analysis_with_ai_fallback(
     # 2. Central AI permission gate (FR12.2, FR35, T-18 v2 §19)
     # External AI calls require BOTH consent == True AND ai_enabled == True
     if consent is not True:
-        record_fallback(room_id or "default")
+        record_fallback(room_id)
         ai_step = {
             "status": "skipped",
             "error_code": "CONSENT_MISSING",
@@ -145,7 +145,7 @@ async def run_rule_based_analysis_with_ai_fallback(
             "verified_speedup_pct": None,
         }
     elif ai_enabled is not True:
-        record_fallback(room_id or "default")
+        record_fallback(room_id)
         ai_step = {
             "status": "skipped",
             "error_code": "AI_DISABLED",
@@ -176,7 +176,7 @@ async def run_rule_based_analysis_with_ai_fallback(
                 "verified_speedup_pct": None,
             }
         except ConsentMissingError:
-            record_fallback(room_id or "default")
+            record_fallback(room_id)
             ai_step = {
                 "status": "skipped",
                 "error_code": "CONSENT_MISSING",
@@ -185,7 +185,7 @@ async def run_rule_based_analysis_with_ai_fallback(
                 "verified_speedup_pct": None,
             }
         except AIDisabledError:
-            record_fallback(room_id or "default")
+            record_fallback(room_id)
             ai_step = {
                 "status": "skipped",
                 "error_code": "AI_DISABLED",
@@ -194,9 +194,9 @@ async def run_rule_based_analysis_with_ai_fallback(
                 "verified_speedup_pct": None,
             }
         except LLMTimeoutError:
-            record_fallback(room_id or "default")
             if reraise_ai_errors:
                 raise
+            record_fallback(room_id)
             ai_step = {
                 "status": "skipped",
                 "error_code": "PROVIDER_TIMEOUT",
@@ -205,9 +205,9 @@ async def run_rule_based_analysis_with_ai_fallback(
                 "verified_speedup_pct": None,
             }
         except LLMRateLimitError:
-            record_fallback(room_id or "default")
             if reraise_ai_errors:
                 raise
+            record_fallback(room_id)
             ai_step = {
                 "status": "skipped",
                 "error_code": "RATE_LIMITED_PROVIDER",
@@ -216,9 +216,9 @@ async def run_rule_based_analysis_with_ai_fallback(
                 "verified_speedup_pct": None,
             }
         except LLMProviderError:
-            record_fallback(room_id or "default")
             if reraise_ai_errors:
                 raise
+            record_fallback(room_id)
             ai_step = {
                 "status": "skipped",
                 "error_code": "PROVIDER_ERROR",
@@ -227,9 +227,9 @@ async def run_rule_based_analysis_with_ai_fallback(
                 "verified_speedup_pct": None,
             }
         except Exception:
-            record_fallback(room_id or "default")
             if reraise_ai_errors:
                 raise
+            record_fallback(room_id)
             ai_step = {
                 "status": "skipped",
                 "error_code": "PROVIDER_ERROR",

@@ -23,6 +23,8 @@ from fastapi.testclient import TestClient
 # Ensure service root is in sys.path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from app.cache import AnalysisCache, clear_analysis_cache, compute_cache_key
+from app.config import settings
 from app.counters import (
     UsageTracker,
     clear_room,
@@ -42,10 +44,12 @@ client = TestClient(app)
 
 @pytest.fixture(autouse=True)
 def clean_counter_state():
-    """Reset counters before and after each test."""
+    """Reset counters and cache before and after each test."""
     reset_counters()
+    clear_analysis_cache()
     yield
     reset_counters()
+    clear_analysis_cache()
 
 
 # ============================================================================
@@ -413,3 +417,247 @@ def test_thread_safety_concurrent_updates():
     assert total["total_tokens_used"] == expected_tokens
     assert total["total_cache_hits"] == expected_calls
     assert total["total_fallback_activations"] == expected_calls
+# ============================================================================
+# 8. Endpoint Cache Integration, Room Isolation, Error/Null Guards (PR #99)
+# ============================================================================
+
+
+def test_complexity_endpoint_cache_hit_skips_llm_and_records_hit():
+    """Repeated complexity request with equivalent normalized code hits cache, skips LLM, and records cache_hits."""
+    room_id = "room-cache-comp-01"
+    gemini_resp = MagicMock()
+    gemini_resp.status_code = 200
+    gemini_resp.json.return_value = {
+        "candidates": [{"content": {"parts": [{"text": "Use a hash set for O(n) lookup."}]}}],
+        "usageMetadata": {"totalTokenCount": 120},
+    }
+
+    payload_1 = {
+        "request_id": "req-cache-1",
+        "room_id": room_id,
+        "analysis_id": "ana-cache-1",
+        "request_type": "complexity",
+        "language": "python",
+        "consent": True,
+        "ai_enabled": True,
+        "code": "def f(arr):\n    for x in arr:\n        for y in arr:\n            pass",
+        "measurements": [
+            {"input_size": 100, "runtimes_ms": [1.0, 1.1]},
+            {"input_size": 200, "runtimes_ms": [4.0, 4.1]},
+        ],
+    }
+    # Formatting & comment-only change should normalize to the same SHA-256 key
+    payload_2 = {
+        **payload_1,
+        "request_id": "req-cache-2",
+        "analysis_id": "ana-cache-2",
+        "code": "# comment should be ignored\ndef f(arr):\n    for x in arr:\n        for y in arr:\n            pass\n\n",
+    }
+
+    with (
+        patch.object(settings, "LLM_API_KEY", "test-key"),
+        patch.object(settings, "LLM_MODEL", "gemini-1.5-flash"),
+        patch("httpx.AsyncClient.post", return_value=gemini_resp) as mock_post,
+    ):
+        r1 = client.post("/v1/analyses/complexity", json=payload_1)
+        assert r1.status_code == 200
+        assert r1.json()["ai_step"]["status"] == "ok"
+        assert r1.json()["ai_step"]["suggested_fix"] == "Use a hash set for O(n) lookup."
+        assert mock_post.call_count == 1
+
+        # Second call hits cache -> skips outbound LLM call
+        r2 = client.post("/v1/analyses/complexity", json=payload_2)
+        assert r2.status_code == 200
+        assert r2.json()["ai_step"]["status"] == "ok"
+        assert r2.json()["ai_step"]["suggested_fix"] == "Use a hash set for O(n) lookup."
+        assert mock_post.call_count == 1
+
+        # Consent=False must bypass cache and record fallback without returning cached suggestion
+        payload_no_consent = {**payload_1, "request_id": "req-cache-3", "consent": False}
+        r3 = client.post("/v1/analyses/complexity", json=payload_no_consent)
+        assert r3.status_code == 200
+        assert r3.json()["ai_step"]["status"] == "skipped"
+        assert r3.json()["ai_step"]["error_code"] == "CONSENT_MISSING"
+        assert r3.json()["ai_step"]["suggested_fix"] is None
+        assert mock_post.call_count == 1
+
+    room_usage = get_room_usage(room_id)
+    assert room_usage["model_calls"] == 1
+    assert room_usage["tokens_used"] == 120
+    assert room_usage["cache_hits"] == 1
+    assert room_usage["fallback_activations"] == 1
+
+    total = get_total_usage()
+    assert total["total_model_calls"] == 1
+    assert total["total_cache_hits"] == 1
+    assert total["total_fallback_activations"] == 1
+
+
+def test_crash_explanation_endpoint_cache_hit_skips_llm_and_records_hit():
+    """Repeated crash-explanation request hits cache, skips LLM, and records cache_hits."""
+    room_id = "room-cache-crash-01"
+    gemini_resp = MagicMock()
+    gemini_resp.status_code = 200
+    gemini_resp.json.return_value = {
+        "candidates": [{"content": {"parts": [{"text": "Buffer read exceeds allocated bounds at line 14."}]}}],
+        "usageMetadata": {"totalTokenCount": 95},
+    }
+
+    payload = {
+        "request_id": "req-crash-1",
+        "room_id": room_id,
+        "analysis_id": "ana-crash-1",
+        "request_type": "crash_explanation",
+        "language": "cpp",
+        "consent": True,
+        "ai_enabled": True,
+        "sanitizer_output": "==4210==ERROR: AddressSanitizer: heap-buffer-overflow\n    #0 0x401233 in f /solution.cpp:14",
+        "code_snippet": "int x = buf[i];",
+    }
+
+    with (
+        patch.object(settings, "LLM_API_KEY", "test-key"),
+        patch.object(settings, "LLM_MODEL", "gemini-1.5-flash"),
+        patch("httpx.AsyncClient.post", return_value=gemini_resp) as mock_post,
+    ):
+        r1 = client.post("/v1/analyses/crash-explanation", json=payload)
+        assert r1.status_code == 200
+        assert r1.json()["ai_step"]["status"] == "ok"
+        assert mock_post.call_count == 1
+
+        r2 = client.post("/v1/analyses/crash-explanation", json={**payload, "request_id": "req-crash-2"})
+        assert r2.status_code == 200
+        assert r2.json()["ai_step"]["status"] == "ok"
+        assert r2.json()["ai_step"]["explanation"] == r1.json()["ai_step"]["explanation"]
+        assert mock_post.call_count == 1
+
+    room_usage = get_room_usage(room_id)
+    assert room_usage["model_calls"] == 1
+    assert room_usage["tokens_used"] == 95
+    assert room_usage["cache_hits"] == 1
+
+
+def test_cache_clear_room_does_not_evict_other_room():
+    """Clearing cache for one room leaves identical-hash cache entries for other rooms intact."""
+    cache = AnalysisCache()
+    key = compute_cache_key("print(1)", "python", "complexity")
+    cache.set(key, {"suggested_fix": "fix"}, room_id="room-alpha")
+    cache.set(key, {"suggested_fix": "fix"}, room_id="room-beta")
+
+    cache.clear_room("room-alpha")
+
+    assert cache.get(key, room_id="room-alpha") is None
+    assert cache.get(key, room_id="room-beta") == {"suggested_fix": "fix"}
+    assert get_room_usage("room-alpha")["cache_hits"] == 0
+    assert get_room_usage("room-beta")["cache_hits"] == 1
+
+
+def test_explain_http_errors_do_not_increment_fallback_counter():
+    """POST /v1/explain returns HTTP 502/504/429 on AI errors without incrementing fallback_activations."""
+    room_id = "room-explain-err"
+    payload = {
+        "request_id": "req-explain-1",
+        "room_id": room_id,
+        "request_type": "explanation",
+        "language": "python",
+        "consent": True,
+        "ai_enabled": True,
+        "code": "x = 1 / 0",
+        "stderr": "ZeroDivisionError",
+        "exit_code": 1,
+        "execution_time_ms": 12.0,
+        "peak_memory_mb": 4.0,
+    }
+
+    bad_resp = MagicMock()
+    bad_resp.status_code = 502
+
+    with (
+        patch.object(settings, "LLM_API_KEY", "test-key"),
+        patch.object(settings, "LLM_MODEL", "gemini-1.5-flash"),
+        patch("httpx.AsyncClient.post", return_value=bad_resp),
+    ):
+        resp = client.post("/v1/explain", json=payload)
+        assert resp.status_code == 502
+
+    assert get_room_usage(room_id)["fallback_activations"] == 0
+    assert get_total_usage()["total_fallback_activations"] == 0
+
+
+@pytest.mark.anyio
+async def test_llm_client_handles_null_usage_and_null_token_fields():
+    """Provider JSON with explicit null usage/usageMetadata or null token subfields must not 500."""
+    client_instance = LLMClient()
+
+    gemini_null_usage = MagicMock()
+    gemini_null_usage.status_code = 200
+    gemini_null_usage.json.return_value = {
+        "candidates": [{"content": {"parts": [{"text": "Gemini null usage ok"}]}}],
+        "usageMetadata": None,
+    }
+
+    openai_null_fields = MagicMock()
+    openai_null_fields.status_code = 200
+    openai_null_fields.json.return_value = {
+        "choices": [{"message": {"content": "OpenAI null token fields ok"}}],
+        "usage": {
+            "total_tokens": None,
+            "prompt_tokens": None,
+            "completion_tokens": 17,
+        },
+    }
+
+    with patch("httpx.AsyncClient.post", side_effect=[gemini_null_usage, openai_null_fields]):
+        out1 = await client_instance.complete(
+            "p1", api_key="test-key", model="gemini-1.5-flash", room_id="room-null-1"
+        )
+        out2 = await client_instance.complete(
+            "p2", api_key="test-key", model="gpt-4o", room_id="room-null-2"
+        )
+
+    assert out1 == "Gemini null usage ok"
+    assert out2 == "OpenAI null token fields ok"
+    assert get_room_usage("room-null-1")["tokens_used"] == 0
+    assert get_room_usage("room-null-2")["tokens_used"] == 17
+
+
+@pytest.mark.anyio
+async def test_null_room_id_does_not_create_synthetic_default_room():
+    """Calls with room_id=None increment totals without creating a 'default' room entry."""
+    record_model_call(room_id=None, tokens=40)
+    record_cache_hit(room_id=None)
+    record_fallback(room_id=None)
+
+    client_instance = LLMClient()
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {
+        "candidates": [{"content": {"parts": [{"text": "No room id"}]}}],
+        "usageMetadata": {"totalTokenCount": 10},
+    }
+    with patch("httpx.AsyncClient.post", return_value=mock_resp):
+        await client_instance.complete("p", api_key="test-key", model="gemini-1.5-flash", room_id=None)
+
+    tracker = get_tracker()
+    assert "default" not in tracker._room_counters
+    total = get_total_usage()
+    assert total["rooms_tracked"] == 0
+    assert total["total_model_calls"] == 2
+    assert total["total_tokens_used"] == 50
+    assert total["total_cache_hits"] == 1
+    assert total["total_fallback_activations"] == 1
+
+
+def test_usage_tracker_sources_budget_and_cost_from_settings():
+    """UsageTracker falls back to app.config.settings when explicit overrides are omitted."""
+    with (
+        patch.object(settings, "MONTHLY_BUDGET_USD", 25.0),
+        patch.object(settings, "TOKEN_COST_PER_TOKEN", 0.001),
+    ):
+        tracker = UsageTracker()
+        tracker.record_model_call("room-cfg", tokens=20000)
+        usage = tracker.get_total_usage()
+        assert usage["monthly_budget_usd"] == 25.0
+        assert usage["monthly_spend_usd"] == 20.0
+        assert usage["alert_80_percent_triggered"] is True
+        assert usage["cost_cap_reached"] is False

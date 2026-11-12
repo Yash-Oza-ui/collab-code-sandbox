@@ -82,37 +82,48 @@ class AnalysisCache:
     def __init__(self, max_entries: int = 1000) -> None:
         self._lock = threading.Lock()
         self._max_entries = max_entries
-        self._cache: dict[str, dict[str, Any]] = {}
-        # Mapping of room_id to set of cache keys created within that room
-        self._room_keys: dict[str, set[str]] = {}
+        # Room-scoped cache entries keyed by (room_id or "", sha256_key) so clearing
+        # one room never deletes identical-hash entries belonging to another room.
+        self._cache: dict[tuple[str, str], dict[str, Any]] = {}
+        # Mapping of room_id to set of storage keys created within that room
+        self._room_keys: dict[str, set[tuple[str, str]]] = {}
+
+    @staticmethod
+    def _storage_key(key: str, room_id: Optional[str]) -> tuple[str, str]:
+        return (str(room_id) if room_id else "", key)
 
     def get(self, key: str, room_id: Optional[str] = None) -> Optional[dict[str, Any]]:
-        """Retrieve cached result by SHA-256 key and record a cache hit if found (FR40.1)."""
+        """Retrieve cached result by room-scoped SHA-256 key and record a cache hit (FR40.1)."""
+        storage_key = self._storage_key(key, room_id)
         with self._lock:
-            if key in self._cache:
-                if room_id:
-                    record_cache_hit(room_id)
-                return dict(self._cache[key])
+            if storage_key in self._cache:
+                record_cache_hit(room_id)
+                return dict(self._cache[storage_key])
             return None
 
     def set(self, key: str, value: dict[str, Any], room_id: Optional[str] = None) -> None:
-        """Store result in cache associated with SHA-256 key."""
+        """Store result in cache associated with room-scoped SHA-256 key."""
+        storage_key = self._storage_key(key, room_id)
         with self._lock:
-            # Simple eviction if max capacity is exceeded
-            if len(self._cache) >= self._max_entries:
+            if storage_key not in self._cache and len(self._cache) >= self._max_entries:
                 oldest_key = next(iter(self._cache))
                 del self._cache[oldest_key]
+                oldest_room = oldest_key[0]
+                if oldest_room in self._room_keys:
+                    self._room_keys[oldest_room].discard(oldest_key)
 
-            self._cache[key] = dict(value)
+            self._cache[storage_key] = dict(value)
             if room_id:
-                if room_id not in self._room_keys:
-                    self._room_keys[room_id] = set()
-                self._room_keys[room_id].add(key)
+                room_key = str(room_id)
+                if room_key not in self._room_keys:
+                    self._room_keys[room_key] = set()
+                self._room_keys[room_key].add(storage_key)
 
     def clear_room(self, room_id: str) -> None:
         """Remove cached keys created within a specific room (US-56)."""
+        room_key = str(room_id)
         with self._lock:
-            keys = self._room_keys.pop(room_id, None)
+            keys = self._room_keys.pop(room_key, None)
             if keys:
                 for k in keys:
                     self._cache.pop(k, None)

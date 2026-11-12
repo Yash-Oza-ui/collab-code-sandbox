@@ -199,31 +199,41 @@ class LLMClient:
             data = response.json()
             tokens = 0
             if is_gemini:
-                candidates = data.get("candidates", [])
+                candidates = data.get("candidates") or []
                 if not candidates:
                     raise ValueError("No candidates returned from Gemini API")
-                parts = candidates[0].get("content", {}).get("parts", [])
+                content = candidates[0].get("content") or {}
+                parts = content.get("parts") or []
                 if not parts or "text" not in parts[0]:
                     raise ValueError("No text part in Gemini candidate content")
-                usage_meta = data.get("usageMetadata", {})
-                tokens = usage_meta.get("totalTokenCount", 0)
+                usage_meta = data.get("usageMetadata") or {}
+                if not isinstance(usage_meta, dict):
+                    usage_meta = {}
+                tokens = int(usage_meta.get("totalTokenCount") or 0)
                 if not tokens:
-                    tokens = usage_meta.get("promptTokenCount", 0) + usage_meta.get("candidatesTokenCount", 0)
+                    tokens = int(usage_meta.get("promptTokenCount") or 0) + int(
+                        usage_meta.get("candidatesTokenCount") or 0
+                    )
                 output_text = parts[0]["text"]
             else:
-                choices = data.get("choices", [])
+                choices = data.get("choices") or []
                 if not choices:
                     raise ValueError("No choices returned from LLM provider")
-                output_text = choices[0].get("message", {}).get("content", "")
-                usage_meta = data.get("usage", {})
-                tokens = usage_meta.get("total_tokens", 0)
+                message = choices[0].get("message") or {}
+                output_text = message.get("content") or ""
+                usage_meta = data.get("usage") or {}
+                if not isinstance(usage_meta, dict):
+                    usage_meta = {}
+                tokens = int(usage_meta.get("total_tokens") or 0)
                 if not tokens:
-                    tokens = usage_meta.get("prompt_tokens", 0) + usage_meta.get("completion_tokens", 0)
+                    tokens = int(usage_meta.get("prompt_tokens") or 0) + int(
+                        usage_meta.get("completion_tokens") or 0
+                    )
 
             # Record model call with tokens extracted from provider response (FR40.1, US-75)
-            record_model_call(room_id=room_id or "default", tokens=tokens)
+            record_model_call(room_id=room_id, tokens=tokens)
             return output_text
-        except (json.JSONDecodeError, KeyError, IndexError, ValueError) as exc:
+        except (json.JSONDecodeError, KeyError, IndexError, ValueError, TypeError, AttributeError) as exc:
             logger.error("Failed to parse LLM provider response: %s", exc)
             raise LLMProviderError(
                 message="Upstream AI provider returned an unparseable response.",

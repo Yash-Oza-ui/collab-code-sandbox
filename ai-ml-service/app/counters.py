@@ -16,6 +16,8 @@ Supports per-room teardown (clear_room) for room lifecycle management (FR32, US-
 import threading
 from typing import Any, Optional
 
+from app.config import settings
+
 
 class UsageTracker:
     """Thread-safe counter tracker for AI/ML service usage metrics.
@@ -25,12 +27,12 @@ class UsageTracker:
 
     def __init__(
         self,
-        monthly_budget_usd: float = 10.0,
-        token_cost_per_token: float = 0.0000035,
+        monthly_budget_usd: Optional[float] = None,
+        token_cost_per_token: Optional[float] = None,
     ) -> None:
         self._lock = threading.Lock()
-        self.monthly_budget_usd = monthly_budget_usd
-        self.token_cost_per_token = token_cost_per_token
+        self._monthly_budget_override = monthly_budget_usd
+        self._token_cost_override = token_cost_per_token
 
         # Platform totals across all rooms and operations
         self._total_model_calls: int = 0
@@ -40,6 +42,26 @@ class UsageTracker:
 
         # Per-room counter mapping: room_id (str) -> dict of numeric metrics
         self._room_counters: dict[str, dict[str, int]] = {}
+
+    @property
+    def monthly_budget_usd(self) -> float:
+        if self._monthly_budget_override is not None:
+            return float(self._monthly_budget_override)
+        return float(getattr(settings, "MONTHLY_BUDGET_USD", 10.0))
+
+    @monthly_budget_usd.setter
+    def monthly_budget_usd(self, value: float) -> None:
+        self._monthly_budget_override = float(value)
+
+    @property
+    def token_cost_per_token(self) -> float:
+        if self._token_cost_override is not None:
+            return float(self._token_cost_override)
+        return float(getattr(settings, "TOKEN_COST_PER_TOKEN", 0.0000035))
+
+    @token_cost_per_token.setter
+    def token_cost_per_token(self, value: float) -> None:
+        self._token_cost_override = float(value)
 
     def _ensure_room(self, room_id: str) -> dict[str, int]:
         """Ensure an entry exists for the given room_id (must be called inside self._lock)."""
@@ -52,48 +74,51 @@ class UsageTracker:
             }
         return self._room_counters[room_id]
 
-    def record_model_call(self, room_id: str, tokens: int = 0) -> None:
+    def record_model_call(self, room_id: Optional[str] = None, tokens: int = 0) -> None:
         """Record an outbound LLM model call and token consumption (FR40.1, US-75).
 
         Args:
-            room_id: The room identifier where the call originated.
+            room_id: The room identifier where the call originated. When None or empty,
+                     updates platform totals without creating a synthetic room entry.
             tokens: The exact token count extracted from the LLM provider response.
                     Must NOT be estimated from user-written text (FR40.1).
         """
-        room_key = str(room_id)
         token_val = max(0, int(tokens)) if isinstance(tokens, (int, float)) else 0
 
         with self._lock:
             self._total_model_calls += 1
             self._total_tokens_used += token_val
 
-            room = self._ensure_room(room_key)
-            room["model_calls"] += 1
-            room["tokens_used"] += token_val
+            if room_id:
+                room = self._ensure_room(str(room_id))
+                room["model_calls"] += 1
+                room["tokens_used"] += token_val
 
-    def record_cache_hit(self, room_id: str) -> None:
+    def record_cache_hit(self, room_id: Optional[str] = None) -> None:
         """Record a cache hit for an analysis task (FR40.1, US-75).
 
         Args:
-            room_id: The room identifier where the cache hit occurred.
+            room_id: The room identifier where the cache hit occurred. When None or empty,
+                     updates platform totals without creating a synthetic room entry.
         """
-        room_key = str(room_id)
         with self._lock:
             self._total_cache_hits += 1
-            room = self._ensure_room(room_key)
-            room["cache_hits"] += 1
+            if room_id:
+                room = self._ensure_room(str(room_id))
+                room["cache_hits"] += 1
 
-    def record_fallback(self, room_id: str) -> None:
+    def record_fallback(self, room_id: Optional[str] = None) -> None:
         """Record a fallback / skipped AI step activation (FR40.1, US-75).
 
         Args:
-            room_id: The room identifier where the fallback occurred.
+            room_id: The room identifier where the fallback occurred. When None or empty,
+                     updates platform totals without creating a synthetic room entry.
         """
-        room_key = str(room_id)
         with self._lock:
             self._total_fallback_activations += 1
-            room = self._ensure_room(room_key)
-            room["fallback_activations"] += 1
+            if room_id:
+                room = self._ensure_room(str(room_id))
+                room["fallback_activations"] += 1
 
     def clear_room(self, room_id: str) -> bool:
         """Remove counters for a specific room when closed/deleted (US-56, FR32).
@@ -196,17 +221,17 @@ def set_tracker(tracker: UsageTracker) -> None:
     _default_tracker = tracker
 
 
-def record_model_call(room_id: str, tokens: int = 0) -> None:
+def record_model_call(room_id: Optional[str] = None, tokens: int = 0) -> None:
     """Record an outbound LLM call and tokens used (FR40.1, US-75)."""
     _default_tracker.record_model_call(room_id=room_id, tokens=tokens)
 
 
-def record_cache_hit(room_id: str) -> None:
+def record_cache_hit(room_id: Optional[str] = None) -> None:
     """Record a cache hit (FR40.1, US-75)."""
     _default_tracker.record_cache_hit(room_id=room_id)
 
 
-def record_fallback(room_id: str) -> None:
+def record_fallback(room_id: Optional[str] = None) -> None:
     """Record a fallback / skipped AI step activation (FR40.1, US-75)."""
     _default_tracker.record_fallback(room_id=room_id)
 

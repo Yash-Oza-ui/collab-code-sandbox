@@ -209,18 +209,30 @@ async def analyze_complexity(payload: ComplexityRequest, request: Request) -> Co
     # 1. Compute empirical complexity metrics from measurements (FR36.1, FR36.2)
     comp_metrics = estimate_complexity_from_measurements(payload.measurements)
 
-    # 2. Define the AI optimization fallback
+    # 2. Define the AI optimization fallback with normalized code cache (NFR5.2, FR40.1)
     async def ai_fallback() -> str:
+        cache = get_analysis_cache()
+        cache_key = compute_cache_key(
+            code=payload.code,
+            language=payload.language,
+            request_type="complexity",
+        )
+        cached = cache.get(cache_key, room_id=payload.room_id)
+        if cached is not None and "suggested_fix" in cached:
+            return str(cached["suggested_fix"])
+
         prompt = (
             f"Suggest an optimization fix for {payload.language} code:\n"
             f"```\n{payload.code}\n```"
         )
-        return await call_llm_with_consent(
+        suggestion = await call_llm_with_consent(
             prompt=prompt,
             consent=payload.consent,
             ai_enabled=payload.ai_enabled,
             room_id=payload.room_id,
         )
+        cache.set(cache_key, {"suggested_fix": suggestion}, room_id=payload.room_id)
+        return suggestion
 
     # 3. Rules-First Static Analysis with Central Consent/AI Gate (FR12.2, FR12.3, FR35)
     rule_analysis = await run_rule_based_analysis_with_ai_fallback(
@@ -323,35 +335,57 @@ async def explain_crash(payload: CrashExplanationRequest, request: Request) -> C
             suggested_fix=None,
         )
     else:
-        try:
-            explanation = await generate_explanation(
-                language=payload.language,
-                consent=payload.consent,
-                ai_enabled=payload.ai_enabled,
-                failure_kind="crash",
-                exit_code=139,
-                stderr=payload.sanitizer_output,
-                timed_out=False,
-                oom_killed=False,
-                code=payload.code_snippet,
-                request_id=payload.request_id,
-                room_id=payload.room_id,
-            )
+        cache = get_analysis_cache()
+        cache_key = compute_cache_key(
+            code=payload.code_snippet,
+            language=payload.language,
+            request_type="crash_explanation",
+            error_signature=f"{error_type}:{line_number}",
+        )
+        cached = cache.get(cache_key, room_id=payload.room_id)
+        if cached is not None and "explanation" in cached:
             ai_step = CrashAIStep(
                 status="ok",
                 error_code=None,
-                explanation=explanation,
-                suggested_fix=f"Add boundary check before line {line_number}.",
+                explanation=str(cached["explanation"]),
+                suggested_fix=cached.get("suggested_fix"),
             )
-        except Exception as e:
-            logger.warning("Crash explanation LLM call failed: %s", e)
-            record_fallback(payload.room_id)
-            ai_step = CrashAIStep(
-                status="skipped",
-                error_code="PROVIDER_ERROR",
-                explanation=None,
-                suggested_fix=None,
-            )
+        else:
+            try:
+                explanation = await generate_explanation(
+                    language=payload.language,
+                    consent=payload.consent,
+                    ai_enabled=payload.ai_enabled,
+                    failure_kind="crash",
+                    exit_code=139,
+                    stderr=payload.sanitizer_output,
+                    timed_out=False,
+                    oom_killed=False,
+                    code=payload.code_snippet,
+                    request_id=payload.request_id,
+                    room_id=payload.room_id,
+                )
+                suggested_fix = f"Add boundary check before line {line_number}."
+                cache.set(
+                    cache_key,
+                    {"explanation": explanation, "suggested_fix": suggested_fix},
+                    room_id=payload.room_id,
+                )
+                ai_step = CrashAIStep(
+                    status="ok",
+                    error_code=None,
+                    explanation=explanation,
+                    suggested_fix=suggested_fix,
+                )
+            except Exception as e:
+                logger.warning("Crash explanation LLM call failed: %s", e)
+                record_fallback(payload.room_id)
+                ai_step = CrashAIStep(
+                    status="skipped",
+                    error_code="PROVIDER_ERROR",
+                    explanation=None,
+                    suggested_fix=None,
+                )
 
     return CrashExplanationResponse(
         request_id=payload.request_id,
