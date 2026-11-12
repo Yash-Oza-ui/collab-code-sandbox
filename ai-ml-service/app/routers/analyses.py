@@ -21,7 +21,12 @@ from app.counters import (
     get_total_usage,
     record_fallback,
 )
-from app.llm import generate_explanation
+from app.llm import (
+    LLMProviderError,
+    LLMRateLimitError,
+    LLMTimeoutError,
+    generate_explanation,
+)
 from app.llm.client import call_llm_with_consent
 from app.rules.patterns import (
     detect_slow_patterns,
@@ -186,7 +191,7 @@ def estimate_complexity_from_measurements(measurements: list[MeasurementItem]) -
             "projected_timeout_input_size": timeout_n,
         }
     except Exception as e:
-        logger.warning("Error computing regression: %s", e)
+        logger.warning("Error computing regression: %s", type(e).__name__)
         return {
             "growth_rate": 0.0,
             "estimated_complexity": "O(1)",
@@ -205,6 +210,8 @@ async def analyze_complexity(payload: ComplexityRequest, request: Request) -> Co
     """Analyze time complexity using rules-first static analysis and AI fallback (US-17, US-65..US-67, FR12.3)."""
     request.state.request_id = payload.request_id
     request.state.room_id = payload.room_id
+    request.state.request_type = payload.request_type
+    request.state.language = payload.language
 
     # 1. Compute empirical complexity metrics from measurements (FR36.1, FR36.2)
     comp_metrics = estimate_complexity_from_measurements(payload.measurements)
@@ -245,6 +252,7 @@ async def analyze_complexity(payload: ComplexityRequest, request: Request) -> Co
     )
 
     ai_step = rule_analysis["ai_step"]
+    request.state.error_code = ai_step.get("error_code")
 
     # 4. Sandbox patch verification (FR36.3, US-66)
     if ai_step.get("status") == "ok":
@@ -293,9 +301,12 @@ async def explain_crash(payload: CrashExplanationRequest, request: Request) -> C
     """Explain sanitizer crash report for C/C++ code (US-73, US-74, T-18 v2 §16.4)."""
     request.state.request_id = payload.request_id
     request.state.room_id = payload.room_id
+    request.state.request_type = payload.request_type
+    request.state.language = payload.language
 
     # 1. DR5: Sanitizer crash explanation is supported for C and C++ only
     if payload.language not in ["c", "cpp"]:
+        request.state.error_code = "UNSUPPORTED_LANGUAGE"
         raise HTTPException(
             status_code=422,
             detail={
@@ -377,8 +388,35 @@ async def explain_crash(payload: CrashExplanationRequest, request: Request) -> C
                     explanation=explanation,
                     suggested_fix=suggested_fix,
                 )
+            except LLMTimeoutError:
+                logger.warning("Crash explanation LLM call timed out")
+                record_fallback(payload.room_id)
+                ai_step = CrashAIStep(
+                    status="skipped",
+                    error_code="PROVIDER_TIMEOUT",
+                    explanation=None,
+                    suggested_fix=None,
+                )
+            except LLMRateLimitError:
+                logger.warning("Crash explanation LLM call rate limited")
+                record_fallback(payload.room_id)
+                ai_step = CrashAIStep(
+                    status="skipped",
+                    error_code="RATE_LIMITED_PROVIDER",
+                    explanation=None,
+                    suggested_fix=None,
+                )
+            except LLMProviderError as e:
+                logger.warning("Crash explanation LLM provider error: %s", e.code)
+                record_fallback(payload.room_id)
+                ai_step = CrashAIStep(
+                    status="skipped",
+                    error_code=e.code,
+                    explanation=None,
+                    suggested_fix=None,
+                )
             except Exception as e:
-                logger.warning("Crash explanation LLM call failed: %s", e)
+                logger.warning("Crash explanation LLM call failed: %s", type(e).__name__)
                 record_fallback(payload.room_id)
                 ai_step = CrashAIStep(
                     status="skipped",
@@ -386,6 +424,8 @@ async def explain_crash(payload: CrashExplanationRequest, request: Request) -> C
                     explanation=None,
                     suggested_fix=None,
                 )
+
+    request.state.error_code = ai_step.error_code
 
     return CrashExplanationResponse(
         request_id=payload.request_id,
@@ -400,22 +440,31 @@ async def explain_crash(payload: CrashExplanationRequest, request: Request) -> C
 
 @router.get("/usage")
 @router.get("/analyses/usage")
-async def get_usage(room_id: Optional[str] = None) -> dict[str, Any]:
+async def get_usage(request: Request, room_id: Optional[str] = None) -> dict[str, Any]:
     """Return telemetry usage counters (Task 5, T-18 v2 §16.5)."""
+    request.state.request_type = "usage"
+    request.state.language = "none"
     if room_id:
+        request.state.room_id = room_id
         return get_room_usage(room_id)
     return get_total_usage()
 
 
 @router.get("/rooms/{room_id}/usage")
-async def get_room_usage_endpoint(room_id: str) -> dict[str, Any]:
+async def get_room_usage_endpoint(room_id: str, request: Request) -> dict[str, Any]:
     """Return telemetry usage counters for a specific room (US-75)."""
+    request.state.request_type = "usage"
+    request.state.language = "none"
+    request.state.room_id = room_id
     return get_room_usage(room_id)
 
 
 @router.delete("/rooms/{room_id}/state")
-async def clear_room_state(room_id: str) -> dict[str, Any]:
+async def clear_room_state(room_id: str, request: Request) -> dict[str, Any]:
     """Clean up room-scoped measurement history and counters when closed/deleted (US-56, FR32, T-18 §16.5)."""
+    request.state.request_type = "room_state_delete"
+    request.state.language = "none"
+    request.state.room_id = room_id
     clear_room(room_id)
     get_analysis_cache().clear_room(room_id)
     return {
