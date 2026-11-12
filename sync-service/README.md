@@ -12,7 +12,8 @@ Spring Boot WebSocket relay for real-time collaborative editing using Yjs CRDTs 
 - Clients in other rooms receive nothing (strict room isolation).
 - Binary frames (Yjs sync & update messages) are forwarded untouched without server-side parsing or buffering.
 - Yjs awareness frames (first byte `0x01`) are echoed back to the sender so a lone client in a room maintains its heartbeat and does not disconnect.
-- Internal HTTP broadcast endpoint (`POST /internal/rooms/{room_id}/messages`, protected by `X-Internal-Token`) broadcasts execution results and system events to all active WebSocket sessions in a room.
+- Internal HTTP broadcast endpoint (`POST /internal/rooms/{room_id}/messages`, protected by `X-Internal-Token`) broadcasts execution results and control messages to room members or targeted sessions via WebSocket control sessions.
+- Internal HTTP session lookup endpoint (`GET /internal/rooms/{room_id}/sessions/{session_id}`, protected by `X-Internal-Token`) provides session identity, role, execution permissions (`can_run`, `run_denied_reason`), and room settings (`mode`, `language`, `ai_enabled`) for `execution-service`.
 
 ---
 
@@ -45,8 +46,9 @@ Runs the full suite of integration tests in `RelayIntegrationTest.java`, coverin
 - Awareness frame echo to sender
 - Room boundary isolation
 - Session disconnect & cleanup
-- Internal HTTP broadcast delivery
-- Internal endpoint authentication (`X-Internal-Token`) and schema validation
+- Internal HTTP broadcast delivery and targeted session routing (`audience`)
+- Internal session lookup (`GET /internal/rooms/{room_id}/sessions/{session_id}`) and permission resolution
+- Internal endpoint authentication (`X-Internal-Token`) and T-17 V2.14 contract error codes (`INVALID_MESSAGE`, `UNAUTHORIZED`, `ROOM_NOT_FOUND`, `SESSION_NOT_FOUND`)
 - Malformed room ID and missing session ID rejection (status code 4400)
 
 ### Check Health Endpoint
@@ -95,7 +97,54 @@ Use `wscat` across three terminal windows to verify routing and room isolation:
 
 ---
 
-## 5. Known Limitations (Sprint 1)
+## 5. Internal API Endpoints (T-17 V2.10, V2.11, V2.14, T-20)
+
+Both internal endpoints are protected by the `X-Internal-Token` header.
+
+### 5.1 Session Lookup (`GET /internal/rooms/{room_id}/sessions/{session_id}`)
+Used by `execution-service` on every run request to authenticate the caller, determine their role and execution permissions, and inspect room configuration.
+
+- **Request**:
+  ```http
+  GET /internal/rooms/room-123/sessions/a0000000-0000-4000-8000-000000000001 HTTP/1.1
+  X-Internal-Token: <INTERNAL_API_TOKEN>
+  ```
+- **Response (`200 OK`)**:
+  ```json
+  {
+    "member_id": "m_1",
+    "display_name": "Alice",
+    "role": "host",
+    "mode": "pair",
+    "language": null,
+    "can_run": true,
+    "run_denied_reason": null,
+    "ai_enabled": true
+  }
+  ```
+- **Error Codes**:
+  - `401 Unauthorized` (`UNAUTHORIZED`): Missing or invalid `X-Internal-Token`.
+  - `404 Not Found` (`ROOM_NOT_FOUND`): Room does not exist.
+  - `404 Not Found` (`SESSION_NOT_FOUND`): Session has not joined the room.
+
+### 5.2 Internal Delivery (`POST /internal/rooms/{room_id}/messages`)
+Transmits control messages and run execution results from backend services to active WebSocket control sessions.
+
+- **Audience Routing**:
+  - `{"kind": "room"}` (default): Delivers to every active control socket in the room.
+  - `{"kind": "sessions", "session_ids": ["..."]}`: Targeted delivery to every open connection matching the given session IDs (e.g. multiple tabs of the same session in Open mode).
+  - The `audience` field is stripped before frames are forwarded across WebSocket connections.
+- **Frame Limits & Constraints**:
+  - Messages larger than 4 MiB are rejected with `400 INVALID_MESSAGE`.
+  - Only text control sockets (`docId == null`) receive internal messages; binary Yjs document sockets are untouched.
+- **Error Codes**:
+  - `400 Bad Request` (`INVALID_MESSAGE`): Non-JSON body, missing `type`, payload > 4 MiB, or malformed `audience`.
+  - `401 Unauthorized` (`UNAUTHORIZED`): Missing or invalid `X-Internal-Token`.
+  - `404 Not Found` (`ROOM_NOT_FOUND`): Target room does not exist.
+
+---
+
+## 6. Known Limitations (Sprint 1)
 
 > **No Server-Side Document State**:
 > In Sprint 1, `sync-service` is strictly a relay and maintains no document state in memory or persistence storage. If all users disconnect from a room, the room document is cleared from the server. A late joiner receives the current document state solely from active peers connected in that room. Persistent document storage and server-side resync will be evaluated and decided under **FR11** in Sprint 2.

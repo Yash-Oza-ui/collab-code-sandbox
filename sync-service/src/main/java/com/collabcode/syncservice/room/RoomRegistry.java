@@ -85,6 +85,8 @@ public class RoomRegistry {
      * originator. Used by the internal broadcast endpoint (section 5) which
      * must deliver to <em>every</em> connection including the caller's.
      *
+     * <p>Delivers to control-socket sessions only (sessions without {@code docId}).
+     *
      * @param roomId room to look up
      * @return snapshot list; empty (not null) when the room has no connections
      */
@@ -92,10 +94,43 @@ public class RoomRegistry {
         List<WebSocketSession> raw = rooms.getOrDefault(roomId, Collections.emptyList());
         List<WebSocketSession> result = new ArrayList<>(raw.size());
         for (WebSocketSession s : raw) {
-            if (s.isOpen()) {
+            if (s.isOpen() && s.getAttributes().get("docId") == null) {
                 result.add(s);
             }
         }
         return result;
+    }
+
+    /**
+     * Return all open control sessions in a room whose session_id matches any of
+     * the requested session IDs. Used by targeted internal broadcast (T-17 V2.10).
+     *
+     * @param roomId     room to look up
+     * @param sessionIds collection of target session IDs
+     * @return snapshot list of matching open control sessions
+     */
+    public List<WebSocketSession> getBySessionIds(String roomId, java.util.Collection<String> sessionIds) {
+        if (sessionIds == null || sessionIds.isEmpty()) {
+            return Collections.emptyList();
+        }
+        List<WebSocketSession> raw = rooms.getOrDefault(roomId, Collections.emptyList());
+        List<WebSocketSession> result = new ArrayList<>();
+        for (WebSocketSession s : raw) {
+            if (s.isOpen() && s.getAttributes().get("docId") == null) {
+                Object sessId = s.getAttributes().get("sessionId");
+                if (sessId != null && sessionIds.contains(sessId.toString())) {
+                    result.add(s);
+                }
+            }
+        }
+        return result;
+    }
+
+    /**
+     * Check if there are active connections currently in the room.
+     */
+    public boolean hasRoom(String roomId) {
+        List<WebSocketSession> list = rooms.get(roomId);
+        return list != null && !list.isEmpty();
     }
 }
