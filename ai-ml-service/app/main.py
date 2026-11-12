@@ -1,26 +1,27 @@
 """FastAPI entrypoint for ai-ml-service.
 
-Scaffold implementation for issue T-04 (Category C).
-Provides GET /health probe and routes conforming to docs/ai-ml-contract.md.
+Provides GET /health probe and routes conforming to docs/ai-ml-contract.md (T-18 v2).
 """
 
-from fastapi import FastAPI, Request
+import logging
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from fastapi.exceptions import RequestValidationError, HTTPException
 
 from app.config import settings
-from app.routers import explain
+from app.llm.client import ConsentMissingError
+from app.routers import analyses, explain
 
 app = FastAPI(
     title="Collab Code Sandbox — AI/ML Service",
-    description="Microservice for code review, failure explanation, and execution anomaly scoring.",
-    version="0.1.0",
+    description="Microservice for analysis tasks, complexity calculation, and failure explanation under T-18 v2 contract.",
+    version="0.2.0",
 )
-import logging
 
-# Configure basic logging to explicitly exclude request bodies
+# Configure basic logging to explicitly exclude request bodies (NFR8.2)
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger("ai_ml_service")
+
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
@@ -32,6 +33,22 @@ async def log_requests(request: Request, call_next):
         f"| Room: {getattr(request.state, 'room_id', 'unknown')}"
     )
     return response
+
+
+@app.exception_handler(ConsentMissingError)
+async def consent_missing_exception_handler(request: Request, exc: ConsentMissingError):
+    """Format consent missing errors into contract envelope (FR12.2, contract §5)."""
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "request_id": getattr(request.state, "request_id", None),
+            "error": {
+                "code": exc.code,
+                "message": exc.message,
+                "retry_after_seconds": exc.retry_after_seconds,
+            },
+        },
+    )
 
 
 @app.exception_handler(HTTPException)
@@ -79,10 +96,11 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 def health_check():
     """Liveness probe endpoint returning HTTP 200.
 
-    Conforms to docs/ai-ml-contract.md §4.1 and tests/integration/smoke.sh.
+    Conforms to docs/ai-ml-contract.md §4.1 and §14 (v2).
     """
-    return {"status": "ok", "version": "v0"}
+    return {"status": "ok", "version": "v2"}
 
 
 # Register API routers
+app.include_router(analyses.router, tags=["analyses"])
 app.include_router(explain.router)
