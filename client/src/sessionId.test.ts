@@ -1,10 +1,23 @@
-// @vitest-environment happy-dom
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { getSessionId } from './sessionId'
 
 describe('getSessionId', () => {
+  let storage: Map<string, string>
+
+  beforeEach(() => {
+    storage = new Map()
+
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) =>
+        storage.set(key, String(value)),
+      removeItem: (key: string) => storage.delete(key),
+      clear: () => storage.clear(),
+    })
+  })
+
   afterEach(() => {
-    localStorage.clear()
+    vi.unstubAllGlobals()
     vi.restoreAllMocks()
   })
 
