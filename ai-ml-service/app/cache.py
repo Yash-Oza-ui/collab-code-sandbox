@@ -1,11 +1,12 @@
-"""Normalized code cache and tokenizer-aware code normalizer (NFR5.2, NFR8.2, US-22, T-18 v2 Decision 11).
+"""Normalized code cache and tokenizer-aware code normalizer (NFR5.2, NFR8.2, US-22, US-56, FR40.1, T-18 v2 Decision 11).
 
 Implements:
 1. Tokenizer-aware per-language code normalization across C++, Python, C, Java, and JavaScript (DR1):
    - Removes comments without touching comment markers inside string literals.
    - Normalizes non-semantic whitespace and collapses blank lines.
-   - Preserves semantic Python indentation (INDENT/DEDENT levels).
-2. SHA-256 cache key calculation over (normalized_code, language, request_type, error_output).
+   - Preserves semantic Python indentation (INDENT/DEDENT levels) and docstrings.
+   - Preserves JavaScript ASI line breaks and statement boundaries.
+2. SHA-256 cache key calculation over (normalized_code, language, request_type, error_signature).
 3. Thread-safe in-memory AnalysisCache storing ONLY 64-character SHA-256 digests as keys.
    Never stores or logs raw user code or error text (NFR8.2).
 """
@@ -18,14 +19,9 @@ import threading
 import tokenize
 from typing import Any, Optional
 
-logger = logging.getLogger(__name__)
+from app.counters import record_cache_hit
 
-# Optional US-75 telemetry hook: record cache hits safely when counters module is present
-try:
-    from app.counters import record_cache_hit
-except ImportError:
-    def record_cache_hit(room_id: str) -> None:  # type: ignore[misc]
-        pass
+logger = logging.getLogger(__name__)
 
 
 def _normalize_python(code: str) -> str:
@@ -70,8 +66,6 @@ def _normalize_python(code: str) -> str:
 
         return "\n".join(lines).strip()
     except Exception:
-        # Fallback if code contains incomplete/unterminated literals or syntax errors:
-        # still preserve line indentation and strip line comments outside quotes safely.
         clean_lines: list[str] = []
         for line in code.splitlines():
             indent = len(line) - len(line.lstrip())
@@ -154,7 +148,6 @@ def _strip_comments_c_style(code: str, is_js: bool = False) -> str:
             i += 1
             continue
 
-        # Detect start of line or block comment outside strings
         if c == "/" and i + 1 < n:
             next_c = code[i + 1]
             if next_c == "/":
@@ -167,7 +160,6 @@ def _strip_comments_c_style(code: str, is_js: bool = False) -> str:
                 i += 2
                 continue
 
-        # Detect start of string literal (double quotes, single quotes, JS template backticks)
         if c in ('"', "'") or (is_js and c == "`"):
             in_str = c
             out.append(c)
@@ -193,13 +185,10 @@ def _normalize_c_style(code: str) -> str:
 
     for idx, part in enumerate(parts):
         if idx % 2 == 1:
-            # Literal token: keep exact string contents intact
             normalized_parts.append(part)
         else:
             sub = re.sub(r"\s+", " ", part)
-            # Collapse whitespace around structural punctuation
             sub = re.sub(r"\s*([;,\(\)\{\}\[\]])\s*", r"\1", sub)
-            # Standardize spacing around multi-char or single-char operators
             sub = re.sub(r"\s*([=+\-*/<>!&|]+)\s*", r" \1 ", sub)
             sub = re.sub(r"\s+", " ", sub).strip()
             if sub:
@@ -208,7 +197,6 @@ def _normalize_c_style(code: str) -> str:
     return " ".join(normalized_parts).strip()
 
 
-# ECMAScript restricted productions and ASI boundaries (ECMAScript §12.9, §13.1, NFR5.2, US-22)
 _JS_RESTRICTED_KEYWORDS = {"return", "throw", "break", "continue", "yield"}
 
 _JS_NO_ASI_AFTER = {
@@ -257,7 +245,6 @@ def _normalize_javascript(code: str) -> str:
     unified_items: list[tuple[bool, str]] = []
     for idx, part in enumerate(parts):
         if idx % 2 == 1:
-            # String or template literal: keep verbatim
             unified_items.append((True, part))
         else:
             if not part:
@@ -356,7 +343,6 @@ def normalize_code(code: str, language: str = "python") -> str:
     if lang in ("cpp", "c", "java"):
         return _normalize_c_style(code)
 
-    # Safe default fallback for unknown languages
     return _normalize_c_style(code)
 
 
@@ -365,95 +351,88 @@ def compute_cache_key(
     language: str,
     request_type: str = "complexity",
     error_output: str = "",
+    error_signature: str = "",
 ) -> str:
-    """Compute SHA-256 cache key over normalized code, language, request type, and error output (NFR5.2, Decision 11).
+    """Compute SHA-256 cache key over normalized code, language, request type, and error signature (NFR5.2, Decision 11).
 
     Returns a 64-character lowercase hexadecimal digest. Raw code is never stored or logged.
     """
+    err = (error_signature or error_output or "").strip()
     normalized = normalize_code(code, language=language)
-    norm_error = (error_output or "").strip()
 
     hasher = hashlib.sha256()
     hasher.update(normalized.encode("utf-8"))
-    hasher.update(b"\n")
+    hasher.update(b":")
     hasher.update((language or "").lower().encode("utf-8"))
-    hasher.update(b"\n")
+    hasher.update(b":")
     hasher.update((request_type or "").lower().encode("utf-8"))
-    hasher.update(b"\n")
-    hasher.update(norm_error.encode("utf-8"))
+    hasher.update(b":")
+    hasher.update(err.encode("utf-8"))
     return hasher.hexdigest()
 
 
 class AnalysisCache:
-    """Thread-safe in-memory cache holding SHA-256 hash keys only (NFR5.2, NFR8.2)."""
+    """Thread-safe in-memory cache for analysis results and AI suggestions (NFR5.2, NFR8.2, US-22, US-56, FR40.1)."""
 
     def __init__(self, max_entries: int = 1000) -> None:
         self._lock = threading.Lock()
         self._max_entries = max_entries
-        self._cache: dict[str, dict[str, Any]] = {}
-        self._room_keys: dict[str, set[str]] = {}
-        self._key_rooms: dict[str, set[str]] = {}
+        # Room-scoped cache entries keyed by (room_id or "", sha256_key) so clearing
+        # one room never deletes identical-hash entries belonging to another room.
+        self._cache: dict[tuple[str, str], dict[str, Any]] = {}
+        # Mapping of room_id to set of storage keys created within that room
+        self._room_keys: dict[str, set[tuple[str, str]]] = {}
 
-    def _track_room_unlocked(self, key: str, room_id: Optional[str]) -> None:
-        if room_id:
-            self._room_keys.setdefault(room_id, set()).add(key)
-            self._key_rooms.setdefault(key, set()).add(room_id)
+    @staticmethod
+    def _storage_key(key: str, room_id: Optional[str]) -> tuple[str, str]:
+        return (str(room_id) if room_id else "", key)
 
     def get(self, key: str, room_id: Optional[str] = None) -> Optional[dict[str, Any]]:
-        """Retrieve cached AI result by SHA-256 hash key without logging any code."""
+        """Retrieve cached result by room-scoped SHA-256 key and record a cache hit (FR40.1)."""
+        storage_key = self._storage_key(key, room_id)
         with self._lock:
-            if key in self._cache:
-                self._track_room_unlocked(key, room_id)
-                if room_id:
-                    record_cache_hit(room_id)
+            if storage_key in self._cache:
+                record_cache_hit(room_id)
                 logger.debug("Cache hit for key=%s room_id=%s", key[:12], room_id)
-                return dict(self._cache[key])
+                return dict(self._cache[storage_key])
             return None
 
     def set(self, key: str, value: dict[str, Any], room_id: Optional[str] = None) -> None:
-        """Store AI result under SHA-256 hash key (never stores raw code)."""
+        """Store result in cache associated with room-scoped SHA-256 key."""
+        storage_key = self._storage_key(key, room_id)
         with self._lock:
-            if key not in self._cache and len(self._cache) >= self._max_entries:
+            if storage_key not in self._cache and len(self._cache) >= self._max_entries:
                 oldest_key = next(iter(self._cache))
                 del self._cache[oldest_key]
-                rooms = self._key_rooms.pop(oldest_key, set())
-                for r in rooms:
-                    r_keys = self._room_keys.get(r)
-                    if r_keys is not None:
-                        r_keys.discard(oldest_key)
-                        if not r_keys:
-                            del self._room_keys[r]
+                oldest_room = oldest_key[0]
+                if oldest_room in self._room_keys:
+                    self._room_keys[oldest_room].discard(oldest_key)
 
-            self._cache[key] = dict(value)
-            self._track_room_unlocked(key, room_id)
+            self._cache[storage_key] = dict(value)
+            if room_id:
+                room_key = str(room_id)
+                self._room_keys.setdefault(room_key, set()).add(storage_key)
             logger.debug("Cache store for key=%s room_id=%s", key[:12], room_id)
 
     def clear_room(self, room_id: str) -> None:
-        """Delete all cached entries scoped to a specific room (US-56, FR32)."""
+        """Remove cached keys created within a specific room (US-56, FR32)."""
+        room_key = str(room_id)
         with self._lock:
-            keys = self._room_keys.pop(room_id, None)
+            keys = self._room_keys.pop(room_key, None)
             if keys:
                 for k in keys:
-                    rooms = self._key_rooms.get(k)
-                    if rooms is not None:
-                        rooms.discard(room_id)
-                        if not rooms:
-                            del self._key_rooms[k]
-                            self._cache.pop(k, None)
-                    else:
-                        self._cache.pop(k, None)
+                    self._cache.pop(k, None)
 
     def clear(self) -> None:
-        """Clear all cache entries."""
+        """Clear the entire cache."""
         with self._lock:
             self._cache.clear()
             self._room_keys.clear()
-            self._key_rooms.clear()
 
     def get_all_keys(self) -> list[str]:
-        """Return all stored keys for invariant testing (verifying hashes-only storage)."""
+        """Return all stored SHA-256 digest keys for invariant testing."""
         with self._lock:
-            return list(self._cache.keys())
+            return [k[1] for k in self._cache.keys()]
 
 
 # Default global cache instance

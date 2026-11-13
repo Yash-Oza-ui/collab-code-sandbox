@@ -1,0 +1,82 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AnalysesEntryRequest",
+  "description": "Client request to execution-service POST /v1/analyses (Decision 4, §15). Supports T-17 V2.8 source references (Pair inline or Open saved), a prior run_request_id reference, or an optional single-snippet code convenience field.",
+  "type": "object",
+  "properties": {
+    "request_id": { "type": "string", "format": "uuid" },
+    "room_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{22}$"
+    },
+    "task": {
+      "type": "string",
+      "enum": ["complexity", "slowdown", "failing_input", "crash_explanation"]
+    },
+    "language": {
+      "type": "string",
+      "enum": ["cpp", "python", "c", "java", "javascript"]
+    },
+    "consent": { "type": "boolean" },
+    "source": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "type": "string", "const": "inline" },
+            "files": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "properties": {
+                  "name": { "type": "string", "minLength": 1 },
+                  "content": { "type": "string" }
+                },
+                "required": ["name", "content"],
+                "additionalProperties": false
+              }
+            },
+            "entry": { "type": "string", "minLength": 1 }
+          },
+          "required": ["kind", "files", "entry"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "type": "string", "const": "saved" },
+            "target": { "type": "string", "const": "module" },
+            "module_id": { "type": "string", "minLength": 1 }
+          },
+          "required": ["kind", "target", "module_id"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "type": "string", "const": "saved" },
+            "target": { "type": "string", "const": "entry" },
+            "module_ids": {
+              "type": "array",
+              "minItems": 1,
+              "items": { "type": "string", "minLength": 1 }
+            }
+          },
+          "required": ["kind", "target"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "run_request_id": { "type": "string", "format": "uuid" },
+    "stdin": { "type": "string" },
+    "code": { "type": "string", "minLength": 1 }
+  },
+  "required": ["request_id", "room_id", "task", "language", "consent"],
+  "anyOf": [
+    { "required": ["source"] },
+    { "required": ["run_request_id"] },
+    { "required": ["code"] }
+  ],
+  "additionalProperties": false
+}

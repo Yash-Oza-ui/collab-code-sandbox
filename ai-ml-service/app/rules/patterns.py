@@ -24,6 +24,7 @@ from app.llm import (
     RoomRateLimitedError,
     call_llm_with_consent,
 )
+from app.counters import record_fallback
 from app.llm.client import LLMClient
 
 
@@ -129,8 +130,8 @@ async def run_rule_based_analysis_with_ai_fallback(
     Mandatory Order of Checks (US-22):
     1. Consent (US-17, FR12.2) -> CONSENT_MISSING (skipped AI step, 0 calls)
     2. Host AI Switch (FR35) -> AI_DISABLED (skipped AI step, 0 calls)
-    3. Room Hourly Rate Limit (NFR5.3) -> ROOM_RATE_LIMITED (skipped AI step, 0 calls)
-    4. Code Cache (NFR5.2, Decision 11) -> Cache Hit returns cached suggestion (does NOT count as call)
+    3. Code Cache (NFR5.2, Decision 11) -> Cache Hit returns cached suggestion (does NOT count as call)
+    4. Room Hourly Rate Limit (NFR5.3) -> ROOM_RATE_LIMITED (skipped AI step, 0 calls)
     5. Outbound AI Call: records call on rate limiter, calls LLM, stores result in cache.
     """
     # 1. AI-free rule-based analysis (always executes first)
@@ -138,6 +139,7 @@ async def run_rule_based_analysis_with_ai_fallback(
 
     # 2. Check 1: User Consent (FR12.2)
     if consent is not True:
+        record_fallback(room_id)
         ai_step = {
             "status": "skipped",
             "error_code": "CONSENT_MISSING",
@@ -147,6 +149,7 @@ async def run_rule_based_analysis_with_ai_fallback(
         }
     # 3. Check 2: Host AI Switch (FR35)
     elif ai_enabled is not True:
+        record_fallback(room_id)
         ai_step = {
             "status": "skipped",
             "error_code": "AI_DISABLED",
@@ -176,6 +179,7 @@ async def run_rule_based_analysis_with_ai_fallback(
             }
         # 5. Check 4: Room Hourly Rate Limit on outbound calls (NFR5.3, US-22)
         elif room_id and get_room_rate_limiter().is_rate_limited(room_id):
+            record_fallback(room_id)
             ai_step = {
                 "status": "skipped",
                 "error_code": "ROOM_RATE_LIMITED",
@@ -199,6 +203,7 @@ async def run_rule_based_analysis_with_ai_fallback(
                         consent=consent,
                         ai_enabled=ai_enabled,
                         client=client,
+                        room_id=room_id,
                     )
 
                 # Store in cache
@@ -216,6 +221,7 @@ async def run_rule_based_analysis_with_ai_fallback(
                     "verified_speedup_pct": None,
                 }
             except RoomRateLimitedError:
+                record_fallback(room_id)
                 ai_step = {
                     "status": "skipped",
                     "error_code": "ROOM_RATE_LIMITED",
@@ -224,6 +230,7 @@ async def run_rule_based_analysis_with_ai_fallback(
                     "verified_speedup_pct": None,
                 }
             except ConsentMissingError:
+                record_fallback(room_id)
                 ai_step = {
                     "status": "skipped",
                     "error_code": "CONSENT_MISSING",
@@ -232,6 +239,7 @@ async def run_rule_based_analysis_with_ai_fallback(
                     "verified_speedup_pct": None,
                 }
             except AIDisabledError:
+                record_fallback(room_id)
                 ai_step = {
                     "status": "skipped",
                     "error_code": "AI_DISABLED",
@@ -242,6 +250,7 @@ async def run_rule_based_analysis_with_ai_fallback(
             except LLMTimeoutError:
                 if reraise_ai_errors:
                     raise
+                record_fallback(room_id)
                 ai_step = {
                     "status": "skipped",
                     "error_code": "PROVIDER_TIMEOUT",
@@ -252,6 +261,7 @@ async def run_rule_based_analysis_with_ai_fallback(
             except LLMRateLimitError:
                 if reraise_ai_errors:
                     raise
+                record_fallback(room_id)
                 ai_step = {
                     "status": "skipped",
                     "error_code": "RATE_LIMITED_PROVIDER",
@@ -262,6 +272,7 @@ async def run_rule_based_analysis_with_ai_fallback(
             except LLMProviderError:
                 if reraise_ai_errors:
                     raise
+                record_fallback(room_id)
                 ai_step = {
                     "status": "skipped",
                     "error_code": "PROVIDER_ERROR",
@@ -272,6 +283,7 @@ async def run_rule_based_analysis_with_ai_fallback(
             except Exception:
                 if reraise_ai_errors:
                     raise
+                record_fallback(room_id)
                 ai_step = {
                     "status": "skipped",
                     "error_code": "PROVIDER_ERROR",
