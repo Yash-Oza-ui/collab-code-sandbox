@@ -68,6 +68,7 @@ async def call_llm_api(
     base_url: Optional[str] = None,
     timeout_seconds: Optional[float] = None,
     client: Optional[LLMClient] = None,
+    room_id: Optional[str] = None,
 ) -> str:
     """Call external LLM API routed through the central consent gate (FR12.2, FR35, US-17)."""
     return await call_llm_with_consent(
@@ -79,6 +80,7 @@ async def call_llm_api(
         model=model,
         base_url=base_url,
         timeout_seconds=timeout_seconds,
+        room_id=room_id,
     )
 
 
@@ -96,6 +98,7 @@ async def generate_explanation(
     api_key: Optional[str] = None,
     model: Optional[str] = None,
     llm_client: Optional[LLMClient] = None,
+    room_id: Optional[str] = None,
 ) -> str:
     """Generate a 3-sentence plain prose failure explanation using LLM.
 
@@ -131,6 +134,7 @@ async def generate_explanation(
         client=llm_client,
         api_key=api_key,
         model=model,
+        room_id=room_id,
     )
 
     explanation = enforce_sentence_limit(raw_output, max_sentences=3)
