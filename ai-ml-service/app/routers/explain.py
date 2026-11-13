@@ -1,7 +1,7 @@
 """Execution failure explainer router.
 
 Implements T-16 (FR13.1, EPIC 3) failure explanation prototype behind T-07 contract.
-Conforms to docs/ai-ml-contract.md §4.3, §5, FR12.3, and US-17 consent gating.
+Conforms to docs/ai-ml-contract.md §4.3, §5, FR12.3, US-17 consent gating, and US-76 relevant code extraction (FR40.2).
 """
 
 import logging
@@ -47,6 +47,14 @@ class ExplainRequest(BaseModel):
     timed_out: bool = False
     oom_killed: bool = False
     failure_kind: Optional[Literal["compile_error", "non_zero_exit", "timeout"]] = None
+    error_line: Optional[int] = Field(
+        default=None,
+        description="Optional 1-based error line for relevant section extraction (FR40.2).",
+    )
+    function_name: Optional[str] = Field(
+        default=None,
+        description="Optional target function name for relevant section extraction (FR40.2).",
+    )
 
 
 class AIStep(BaseModel):
@@ -68,7 +76,7 @@ class ExplainResponse(BaseModel):
 
 @router.post("/explain", response_model=ExplainResponse)
 async def explain_failure(payload: ExplainRequest, request: Request) -> ExplainResponse:
-    """Explain a failed run in plain prose using rules-first analysis and LLM API (FR12.3, FR13.1, T-16, US-17)."""
+    """Explain a failed run in plain prose using rules-first analysis and LLM API (FR12.3, FR13.1, T-16, US-17, US-76)."""
     # Publish validated metadata into request.state for the logging middleware.
     # Only safe, non-user-text metadata fields are stored — never code/stderr.
     request.state.request_id = payload.request_id
@@ -90,6 +98,8 @@ async def explain_failure(payload: ExplainRequest, request: Request) -> ExplainR
             code=payload.code,
             request_id=payload.request_id,
             room_id=payload.room_id,
+            error_line=payload.error_line,
+            function_name=payload.function_name,
         )
 
     try:
