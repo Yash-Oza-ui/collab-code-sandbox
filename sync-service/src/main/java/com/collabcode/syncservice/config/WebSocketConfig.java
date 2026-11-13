@@ -13,7 +13,6 @@ import org.springframework.web.socket.config.annotation.EnableWebSocket;
 import org.springframework.web.socket.config.annotation.WebSocketConfigurer;
 import org.springframework.web.socket.config.annotation.WebSocketHandlerRegistry;
 import org.springframework.web.socket.server.standard.ServletServerContainerFactoryBean;
-import com.collabcode.syncservice.room.RoomStore;
 
 /**
  * WebSocket configuration for sync-service (T-02, T-20).
@@ -43,7 +42,6 @@ public class WebSocketConfig implements WebSocketConfigurer {
     private final RoomService roomService;
     private final ModuleService moduleService;
     private final RoomRegistry roomRegistry;
-    private final RoomStore roomStore;
 
     public WebSocketConfig(RoomStore roomStore,
                            RoomService roomService,
@@ -53,7 +51,6 @@ public class WebSocketConfig implements WebSocketConfigurer {
         this.roomService = roomService;
         this.moduleService = moduleService;
         this.roomRegistry = roomRegistry;
-        this.roomStore = roomStore;
     }
 
     // -----------------------------------------------------------------------
