@@ -15,6 +15,8 @@ class Settings:
         self.LLM_MODEL: str = os.getenv("LLM_MODEL", "gemini-1.5-flash")
         self.LLM_BASE_URL: Optional[str] = os.getenv("LLM_BASE_URL")
         self.LLM_TIMEOUT_SECONDS: float = float(os.getenv("LLM_TIMEOUT_SECONDS", "10.0"))
+        self.MONTHLY_BUDGET_USD: float = float(os.getenv("MONTHLY_BUDGET_USD", "10.0"))
+        self.TOKEN_COST_PER_TOKEN: float = float(os.getenv("TOKEN_COST_PER_TOKEN", "0.0000035"))
 
     def __repr__(self) -> str:
         # Never print or log the actual API key (NFR8.2)

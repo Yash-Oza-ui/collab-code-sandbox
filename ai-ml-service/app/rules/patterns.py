@@ -17,6 +17,7 @@ from app.llm import (
     LLMTimeoutError,
     call_llm_with_consent,
 )
+from app.counters import record_fallback
 from app.llm.client import LLMClient
 
 
@@ -113,6 +114,7 @@ async def run_rule_based_analysis_with_ai_fallback(
     client: Optional[LLMClient] = None,
     ai_fallback: Optional[Any] = None,
     reraise_ai_errors: bool = False,
+    room_id: Optional[str] = None,
 ) -> dict[str, Any]:
     """Execute rule-based pattern checks first, followed by consent-gated AI assistance (US-67, FR12.3, FR35, T-18 v2).
 
@@ -134,6 +136,7 @@ async def run_rule_based_analysis_with_ai_fallback(
     # 2. Central AI permission gate (FR12.2, FR35, T-18 v2 §19)
     # External AI calls require BOTH consent == True AND ai_enabled == True
     if consent is not True:
+        record_fallback(room_id)
         ai_step = {
             "status": "skipped",
             "error_code": "CONSENT_MISSING",
@@ -142,6 +145,7 @@ async def run_rule_based_analysis_with_ai_fallback(
             "verified_speedup_pct": None,
         }
     elif ai_enabled is not True:
+        record_fallback(room_id)
         ai_step = {
             "status": "skipped",
             "error_code": "AI_DISABLED",
@@ -161,6 +165,7 @@ async def run_rule_based_analysis_with_ai_fallback(
                     consent=consent,
                     ai_enabled=ai_enabled,
                     client=client,
+                    room_id=room_id,
                 )
 
             ai_step = {
@@ -171,6 +176,7 @@ async def run_rule_based_analysis_with_ai_fallback(
                 "verified_speedup_pct": None,
             }
         except ConsentMissingError:
+            record_fallback(room_id)
             ai_step = {
                 "status": "skipped",
                 "error_code": "CONSENT_MISSING",
@@ -179,6 +185,7 @@ async def run_rule_based_analysis_with_ai_fallback(
                 "verified_speedup_pct": None,
             }
         except AIDisabledError:
+            record_fallback(room_id)
             ai_step = {
                 "status": "skipped",
                 "error_code": "AI_DISABLED",
@@ -189,6 +196,7 @@ async def run_rule_based_analysis_with_ai_fallback(
         except LLMTimeoutError:
             if reraise_ai_errors:
                 raise
+            record_fallback(room_id)
             ai_step = {
                 "status": "skipped",
                 "error_code": "PROVIDER_TIMEOUT",
@@ -199,6 +207,7 @@ async def run_rule_based_analysis_with_ai_fallback(
         except LLMRateLimitError:
             if reraise_ai_errors:
                 raise
+            record_fallback(room_id)
             ai_step = {
                 "status": "skipped",
                 "error_code": "RATE_LIMITED_PROVIDER",
@@ -209,6 +218,7 @@ async def run_rule_based_analysis_with_ai_fallback(
         except LLMProviderError:
             if reraise_ai_errors:
                 raise
+            record_fallback(room_id)
             ai_step = {
                 "status": "skipped",
                 "error_code": "PROVIDER_ERROR",
@@ -219,6 +229,7 @@ async def run_rule_based_analysis_with_ai_fallback(
         except Exception:
             if reraise_ai_errors:
                 raise
+            record_fallback(room_id)
             ai_step = {
                 "status": "skipped",
                 "error_code": "PROVIDER_ERROR",

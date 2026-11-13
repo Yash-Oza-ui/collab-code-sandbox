@@ -1,0 +1,46 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "CrashExplanationResponse",
+  "type": "object",
+  "properties": {
+    "request_id": { "type": "string" },
+    "analysis_id": { "type": "string" },
+    "task": { "type": "string", "enum": ["crash_explanation"] },
+    "error_type": { "type": "string" },
+    "line_number": { "type": "integer" },
+    "summary": { "type": "string" },
+    "ai_step": {
+      "type": "object",
+      "properties": {
+        "status": { "type": "string", "enum": ["ok", "skipped"] },
+        "error_code": {
+          "type": ["string", "null"],
+          "enum": [
+            "CONSENT_MISSING",
+            "AI_DISABLED",
+            "COST_CAP_REACHED",
+            "ROOM_RATE_LIMITED",
+            "RATE_LIMITED_PROVIDER",
+            "PROVIDER_ERROR",
+            "PROVIDER_TIMEOUT",
+            null
+          ]
+        },
+        "explanation": { "type": ["string", "null"] },
+        "suggested_fix": { "type": ["string", "null"] }
+      },
+      "required": ["status", "error_code", "explanation", "suggested_fix"],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "request_id",
+    "analysis_id",
+    "task",
+    "error_type",
+    "line_number",
+    "summary",
+    "ai_step"
+  ],
+  "additionalProperties": false
+}
