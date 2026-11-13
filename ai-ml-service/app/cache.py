@@ -259,7 +259,7 @@ def _scan_c_style_lexemes(
             if last_non_ws_tok == ")" and last_closed_paren_was_control:
                 is_regex_start = True
             elif last_non_ws_tok in (
-                "", "(", "[", "{", ";", ",", "=", ":", "?", "!", "&", "|",
+                "", "(", "[", "{", "}", ";", ",", "=", ":", "?", "!", "&", "|",
                 "+", "-", "*", "%", "^", "~", "<", ">",
                 "return", "throw", "yield", "await", "case", "delete", "void",
                 "typeof", "instanceof", "in", "do", "else"
@@ -344,7 +344,10 @@ def _scan_c_style_lexemes(
                 if is_js and last_non_ws_tok in ("if", "while", "for", "with"):
                     last_control_keyword = last_non_ws_tok
             else:
-                last_non_ws_tok = c
+                if last_non_ws_tok in ("+", "-") and c == last_non_ws_tok:
+                    last_non_ws_tok += c
+                else:
+                    last_non_ws_tok = c
                 if c != ")":
                     last_closed_paren_was_control = False
         i += 1

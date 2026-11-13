@@ -1060,12 +1060,45 @@ def test_comment_removal_aware_of_raw_strings_text_blocks_and_regex():
     js_div_paren = "(a + b) / 2;"
     js_div_id = "x / 2;"
     js_div_arr = "arr[0] / 2;"
+    js_div_inc = "x++ / y / z;"
+    js_div_dec = "x-- / y / z;"
     key_div_paren = compute_cache_key(js_div_paren, "javascript")
     key_div_id = compute_cache_key(js_div_id, "javascript")
     key_div_arr = compute_cache_key(js_div_arr, "javascript")
+    key_div_inc = compute_cache_key(js_div_inc, "javascript")
+    key_div_dec = compute_cache_key(js_div_dec, "javascript")
     assert compute_cache_key("( a + b )  /  2 ;", "javascript") == key_div_paren
     assert compute_cache_key("x  /  2 ;", "javascript") == key_div_id
     assert compute_cache_key("arr[ 0 ]  /  2 ;", "javascript") == key_div_arr
+    assert compute_cache_key("x++  /  y  /  z ;", "javascript") == key_div_inc
+    assert compute_cache_key("x--  /  y  /  z ;", "javascript") == key_div_dec
+
+
+def test_js_regex_after_control_block():
+    """Verify JavaScript regex detection recognizes '}' as regex-start context (US-22 regression)."""
+    # 1. Reviewer regression test: if (x) {} followed by regex
+    code1 = "if (x) {} /[//]/.test(y);"
+    code2 = "if (x) {} /[/*]/.test(y);"
+    code1_fmt = "if (x) {  }   /[//]/.test(y); // comment"
+
+    key1 = compute_cache_key(code1, "javascript")
+    key2 = compute_cache_key(code2, "javascript")
+    key1_fmt = compute_cache_key(code1_fmt, "javascript")
+
+    assert key1 != key2, (
+        "Different regex literals after a control block '}' must produce distinct cache keys"
+    )
+    assert key1 == key1_fmt, (
+        "Formatting variations around regex after a control block must yield identical cache keys"
+    )
+
+    # 2. Other block structures (while, for, function, class) followed by regex
+    assert compute_cache_key("while (x) {} /[//]/.test(y);", "javascript") != \
+           compute_cache_key("while (x) {} /[/*]/.test(y);", "javascript")
+    assert compute_cache_key("function f() {} /[//]/.test(y);", "javascript") != \
+           compute_cache_key("function f() {} /[/*]/.test(y);", "javascript")
+    assert compute_cache_key("class C {} /[//]/.test(y);", "javascript") != \
+           compute_cache_key("class C {} /[/*]/.test(y);", "javascript")
 
 
 def test_c_cpp_prefixed_string_and_char_literals_preserved():

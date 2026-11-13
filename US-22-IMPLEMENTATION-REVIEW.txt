@@ -6,7 +6,7 @@ Pull Request:   PR #103 (https://github.com/Yash-Oza-ui/collab-code-sandbox/pull
 Branch:         feature/US-22-ai-request-control
 Target Branch:  main
 Review Date:    November 13, 2026
-Test Status:    170/170 Tests Passing (100% Pass Rate)
+Test Status:    171/171 Tests Passing (100% Pass Rate)
 
 --------------------------------------------------------------------------------
 TABLE OF CONTENTS
@@ -352,13 +352,15 @@ Regression Tests Added:
 Following the resolution of Chandan's five primary review comments, a secondary
 in-depth automated review identified four additional areas for refinement:
 
---- Issue A: JavaScript Regex Detection in Control-Flow & Statement Contexts ---
+--- Issue A: JavaScript Regex Detection in Control-Flow, Control-Block & Statement Contexts ---
 Review Finding:
 The lexer scanner previously identified regex literals only after unary/binary
-operators or statement delimiters, missing control-flow closing parentheses:
+operators or statement delimiters, missing control-flow closing parentheses and
+block statements ending with `}`:
     `if (condition) /[//]/.test(value);`
-After `)`, the scanner did not permit `/` as a regex start, erroneously treating
-the character class `[//]` as a line comment.
+    `if (x) {} /[//]/.test(y);`
+After `)` or `}`, the scanner did not permit `/` as a regex start, erroneously
+treating the character class `[//]` as a line comment and stripping subsequent code.
 
 Fix Implemented:
 1. Implemented a paren nesting stack (`paren_stack`) in `_scan_c_style_lexemes`
@@ -367,17 +369,32 @@ Fix Implemented:
 2. When closing `)` matches a control structure, `last_closed_paren_was_control`
    is flagged `True`, allowing the immediately following `/` to be parsed as a
    regex literal.
-3. Conversely, expression parentheses (e.g. `(a + b) / 2`) maintain standard
+3. Added block delimiter `}` to the recognized regex-start token set. In ECMAScript,
+   block statements (`if (...) {}`, `for (...) {}`, `while (...) {}`, `function f() {}`,
+   `class C {}`, `try {} catch {}`) terminate statements without needing semicolons
+   (ASI), so any following `/` represents a statement-starting primary expression
+   (RegularExpressionLiteral).
+4. Added multi-character operator discrimination (`++` and `--`) in `last_non_ws_tok`
+   to ensure postfix increment/decrement expressions (e.g. `x++ / y / z;`) are
+   correctly preserved as arithmetic division rather than misidentified as regexes.
+5. Conversely, expression parentheses (e.g. `(a + b) / 2`) maintain standard
    division precedence without misinterpreting `/` as a regex start.
-4. Added support for statement-start contexts and additional JavaScript keywords
+6. Added support for statement-start contexts and additional JavaScript keywords
    (`do`, `else`).
 
 Regression Tests Added:
+- `test_js_regex_after_control_block()`:
+  - Proves that `if (x) {} /[//]/.test(y);` and `if (x) {} /[/*]/.test(y);`
+    preserve comment markers and produce distinct cache keys.
+  - Proves that `while (x) {}`, `function f() {}`, and `class C {}` blocks
+    followed by regex literals produce distinct cache keys.
+  - Proves that whitespace formatting variations around control-block regexes
+    yield identical cache keys.
 - Verified that `if (condition) /[//]/.test(value);` preserves the `//` sequence
-  and changes in the regex content produce distinct cache keys.
+  and changes in regex content produce distinct cache keys.
 - Verified that `while`, `for`, and statement-start regexes are correctly parsed.
-- Verified that JavaScript arithmetic division (`(a + b) / 2;`, `x / 2;`, `arr[0] / 2;`)
-  is never misidentified as regex literals.
+- Verified that JavaScript arithmetic division (`(a + b) / 2;`, `x / 2;`, `arr[0] / 2;`,
+  `x++ / y / z;`, `x-- / y / z;`) is never misidentified as regex literals.
 
 --- Issue B: C++ String and Character Literal Encoding Prefixes ---
 Review Finding:
@@ -457,12 +474,12 @@ introducing 5 conflicts when merging `origin/main` into `feature/US-22-ai-reques
 6. TEST SUITE & VERIFICATION RESULTS
 ================================================================================
 Full test suite executed with pytest 9.2.0 on Python 3.14.6:
-Total Collected Tests: 170
-Total Passing Tests:   170 (100%)
+Total Collected Tests: 171
+Total Passing Tests:   171 (100%)
 Total Failures:        0
 
 Test Module Breakdown:
-- `tests/test_cache_rate_limit.py`:               27 passed
+- `tests/test_cache_rate_limit.py`:               28 passed
   (Includes all normalization, caching, rate limiting, and new regression tests)
 - `tests/test_consent.py`:                        45 passed
   (Consent missing/false, AI switch disabled, provider errors, parameter validation)
@@ -486,7 +503,7 @@ Branch: `feature/US-22-ai-request-control`
 Pushed to: `origin/feature/US-22-ai-request-control`
 
 Commit History on Branch:
-- `f491c12`: fix(ai-ml): preserve C++ string prefixes and JS regex in control-flow contexts (US-22)
+- `5352b5a`: fix(ai-ml): preserve C++ string prefixes and JS regex in control-flow contexts (US-22)
 - `9350c39`: fix(ai-ml): address review comments on US-22 and resolve merge conflicts with origin/main
 - `3f705d4`: chore(merge): sync with origin/main
 - `63a1c3b`: chore(ai-ml): merge origin/main into feature/US-22-ai-request-control
@@ -550,10 +567,11 @@ When reviewing this implementation, verify the following key invariants:
        Verify that only 64-character SHA-256 hashes are stored as cache keys and
        no raw user source code or compiler diagnostics leak into logs.
 
-[x] 9. JavaScript Regex in Control Flow Contexts:
+[x] 9. JavaScript Regex in Control Flow & Block Contexts:
        Verify that `_scan_c_style_lexemes` preserves regex literals in control
-       statements (e.g. `if (c) /[//]/.test(v)`) while correctly evaluating
-       expression division (e.g. `(a + b) / 2`).
+       statements (`if (c) /[//]/.test(v)`), block endings (`if (x) {} /[//]/.test(y)`),
+       and statement starts, while correctly preserving expression division
+       (`(a + b) / 2`, `x++ / y / z`).
 
 [x] 10. C++ String & Char Literal Encoding Prefixes:
        Verify that `u8`, `u`, `U`, `L` prefixes remain bound to string/char
