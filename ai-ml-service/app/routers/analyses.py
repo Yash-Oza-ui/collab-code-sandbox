@@ -36,6 +36,7 @@ from app.rules.patterns import (
     detect_slow_patterns,
     run_rule_based_analysis_with_ai_fallback,
 )
+from app.section import extract_relevant_section
 
 logger = logging.getLogger(__name__)
 
@@ -211,7 +212,7 @@ def estimate_complexity_from_measurements(measurements: list[MeasurementItem]) -
 
 @router.post("/analyses/complexity", response_model=ComplexityResponse)
 async def analyze_complexity(payload: ComplexityRequest, request: Request) -> ComplexityResponse:
-    """Analyze time complexity using rules-first static analysis and AI fallback (US-17, US-65..US-67, FR12.3)."""
+    """Analyze time complexity using rules-first static analysis and AI fallback (US-17, US-65..US-67, FR12.3, US-76)."""
     request.state.request_id = payload.request_id
     request.state.room_id = payload.room_id
     request.state.request_type = payload.request_type
@@ -220,11 +221,18 @@ async def analyze_complexity(payload: ComplexityRequest, request: Request) -> Co
     # 1. Compute empirical complexity metrics from measurements (FR36.1, FR36.2)
     comp_metrics = estimate_complexity_from_measurements(payload.measurements)
 
-    # 2. Define the AI optimization fallback
+    # 2. Define the AI optimization fallback with relevant code extraction (FR40.2, US-76)
     async def ai_fallback() -> str:
+        detected_patterns = detect_slow_patterns(payload.code, language=payload.language)
+        target_line = detected_patterns[0]["line"] if detected_patterns else None
+        relevant_code = extract_relevant_section(
+            code=payload.code,
+            language=payload.language,
+            error_line=target_line,
+        )
         prompt = (
             f"Suggest an optimization fix for {payload.language} code:\n"
-            f"```\n{payload.code}\n```"
+            f"```\n{relevant_code}\n```"
         )
         return await call_llm_with_consent(
             prompt=prompt,
@@ -291,7 +299,7 @@ async def analyze_complexity(payload: ComplexityRequest, request: Request) -> Co
 
 @router.post("/analyses/crash-explanation", response_model=CrashExplanationResponse)
 async def explain_crash(payload: CrashExplanationRequest, request: Request) -> CrashExplanationResponse:
-    """Explain sanitizer crash report for C/C++ code (US-73, US-74, T-18 v2 §16.4)."""
+    """Explain sanitizer crash report for C/C++ code (US-73, US-74, US-76, T-18 v2 §16.4)."""
     request.state.request_id = payload.request_id
     request.state.room_id = payload.room_id
     request.state.request_type = payload.request_type
@@ -355,7 +363,7 @@ async def explain_crash(payload: CrashExplanationRequest, request: Request) -> C
                 explanation=str(cached["explanation"]),
                 suggested_fix=cached.get("suggested_fix"),
             )
-        elif get_room_rate_limiter().is_rate_limited(payload.room_id):
+        elif payload.room_id and not get_room_rate_limiter().check_and_reserve(payload.room_id):
             record_fallback(payload.room_id)
             ai_step = CrashAIStep(
                 status="skipped",
@@ -365,7 +373,6 @@ async def explain_crash(payload: CrashExplanationRequest, request: Request) -> C
             )
         else:
             try:
-                get_room_rate_limiter().record_call(payload.room_id)
                 explanation = await generate_explanation(
                     language=payload.language,
                     consent=payload.consent,
@@ -378,6 +385,8 @@ async def explain_crash(payload: CrashExplanationRequest, request: Request) -> C
                     code=payload.code_snippet,
                     request_id=payload.request_id,
                     room_id=payload.room_id,
+                    error_line=line_number,
+                    pre_sliced=True,
                 )
                 suggested_fix = f"Add boundary check before line {line_number}."
                 cache.set(

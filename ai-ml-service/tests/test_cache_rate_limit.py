@@ -857,3 +857,350 @@ def test_privacy_audit_no_code_in_logs_during_caching_and_throttling(caplog):
 
     captured_logs = caplog.text
     assert canary not in captured_logs, "User code canary was leaked to logs"
+
+
+# ============================================================================
+# 6. Chandan Review Regression Tests (PR #103, US-22)
+# ============================================================================
+
+
+def test_c_cpp_preprocessor_boundaries_preserved():
+    """Verify C/C++ preprocessor directives preserve line boundaries and continuation lines (US-22)."""
+    # 1. Chandan's regression example: #define X 1\nX vs #define X 1 X
+    code_directive_then_code = "#define X 1\nX"
+    code_directive_single_line = "#define X 1 X"
+    code_directive_continuation = "#define X \\\n    1\nX"
+    code_directive_continuation_spaces = "#define X    \\\n        1\nX"
+    code_directive_reformatted = "#   define   X    1  // comment\n    X"
+
+    key_two_lines = compute_cache_key(code_directive_then_code, "cpp")
+    key_single_line = compute_cache_key(code_directive_single_line, "cpp")
+    key_cont = compute_cache_key(code_directive_continuation, "cpp")
+    key_cont_spaces = compute_cache_key(code_directive_continuation_spaces, "cpp")
+    key_reformatted = compute_cache_key(code_directive_reformatted, "cpp")
+
+    assert key_two_lines != key_single_line, (
+        "#define X 1\\nX and #define X 1 X have different semantics and must produce different cache keys"
+    )
+    assert key_two_lines == key_cont, (
+        "Preprocessor line continuation #define X \\\\\\n1 must normalize identically to #define X 1\\nX"
+    )
+    assert key_two_lines == key_cont_spaces, (
+        "Whitespace differences in continuation lines must produce identical cache keys"
+    )
+    assert key_two_lines == key_reformatted, (
+        "Indentation and comment variations in directive must produce identical cache keys"
+    )
+
+    # 2. Multiple preprocessor directives
+    multi_directives = "#include <iostream>\n#include <vector>\nint main() { return 0; }"
+    multi_directives_single_line = "#include <iostream> #include <vector>\nint main() { return 0; }"
+    multi_directives_blank_lines = "#include <iostream>\n\n\n#include <vector>\n\nint main() { return 0; }"
+
+    key_multi = compute_cache_key(multi_directives, "cpp")
+    key_multi_single = compute_cache_key(multi_directives_single_line, "cpp")
+    key_multi_blank = compute_cache_key(multi_directives_blank_lines, "cpp")
+
+    assert key_multi != key_multi_single, (
+        "Multiple directives on separate lines must not collapse to single line"
+    )
+    assert key_multi == key_multi_blank, (
+        "Extra blank lines between directives must normalize identically"
+    )
+
+
+def test_c_cpp_operator_token_boundaries_preserved():
+    """Verify operator token boundaries are preserved and not merged across adjacent operators (US-22)."""
+    # 1. Chandan's regression example: a + ++b vs a++ + b
+    cpp_binary_then_pre_inc = "a + ++b"
+    cpp_post_inc_then_binary = "a++ + b"
+    cpp_binary_then_unary = "a + +b"
+    cpp_post_inc_then_pre_inc = "a++ + ++b"
+    cpp_all_binary_unary = "a + + + b"
+
+    key_b_pre = compute_cache_key(cpp_binary_then_pre_inc, "cpp")
+    key_post_b = compute_cache_key(cpp_post_inc_then_binary, "cpp")
+    key_b_unary = compute_cache_key(cpp_binary_then_unary, "cpp")
+    key_post_pre = compute_cache_key(cpp_post_inc_then_pre_inc, "cpp")
+    key_all = compute_cache_key(cpp_all_binary_unary, "cpp")
+
+    assert key_b_pre != key_post_b, "a + ++b and a++ + b must produce different cache keys"
+    assert key_b_pre != key_b_unary, "a + ++b and a + +b must produce different cache keys"
+    assert key_post_b != key_b_unary, "a++ + b and a + +b must produce different cache keys"
+    assert key_post_pre != key_b_pre, "a++ + ++b and a + ++b must produce different cache keys"
+    assert key_b_unary != key_all, "a + +b and a + + + b must produce different cache keys"
+
+    # Formatting variations must still hit cache
+    assert compute_cache_key("a   +   ++  b", "cpp") == key_b_pre
+    assert compute_cache_key("a++   +   b", "cpp") == key_post_b
+    assert compute_cache_key("a   +   +  b", "cpp") == key_b_unary
+
+    # 2. Subtraction and decrement operators
+    cpp_sub_pre_dec = "a - --b"
+    cpp_post_dec_sub = "a-- - b"
+    cpp_sub_unary_neg = "a - -b"
+
+    key_sub_pre = compute_cache_key(cpp_sub_pre_dec, "cpp")
+    key_post_sub = compute_cache_key(cpp_post_dec_sub, "cpp")
+    key_sub_neg = compute_cache_key(cpp_sub_unary_neg, "cpp")
+
+    assert key_sub_pre != key_post_sub, "a - --b and a-- - b must produce different cache keys"
+    assert key_sub_pre != key_sub_neg, "a - --b and a - -b must produce different cache keys"
+    assert compute_cache_key("a   -   --  b", "cpp") == key_sub_pre
+
+    # 3. Pointer dereference and increment
+    key_ptr_pre1 = compute_cache_key("* ++p", "cpp")
+    key_ptr_pre2 = compute_cache_key("*++p", "cpp")
+    key_ptr_add = compute_cache_key("* + +p", "cpp")
+
+    assert key_ptr_pre1 == key_ptr_pre2, "* ++p and *++p must normalize identically"
+    assert key_ptr_pre1 != key_ptr_add, "* ++p and * + +p must produce different cache keys"
+
+    # 4. Bitwise AND vs Logical AND
+    assert compute_cache_key("& &x", "cpp") != compute_cache_key("&& x", "cpp")
+
+    # 5. Shift vs comparison
+    assert compute_cache_key("a < < b", "cpp") != compute_cache_key("a << b", "cpp")
+    assert compute_cache_key("a > > b", "cpp") != compute_cache_key("a >> b", "cpp")
+
+    # 6. Assignment vs equality
+    assert compute_cache_key("a = = b", "cpp") != compute_cache_key("a == b", "cpp")
+    assert compute_cache_key("a + = b", "cpp") != compute_cache_key("a += b", "cpp")
+
+
+def test_comment_removal_aware_of_raw_strings_text_blocks_and_regex():
+    """Verify comment-like content inside C++ raw strings, Java text blocks, and JS regex is preserved (US-22)."""
+    # 1. C++ raw string literal
+    cpp_raw1 = 'const char* s = R"(// not a comment /* still not */ "quotes")";'
+    cpp_raw2 = 'const char* s = R"(// CHANGED /* still not */ "quotes")";'
+    cpp_raw1_reformatted = 'const char*   s  =  R"(// not a comment /* still not */ "quotes")"  ; // trailing'
+
+    key_cpp_raw1 = compute_cache_key(cpp_raw1, "cpp")
+    key_cpp_raw2 = compute_cache_key(cpp_raw2, "cpp")
+    key_cpp_raw1_fmt = compute_cache_key(cpp_raw1_reformatted, "cpp")
+
+    assert key_cpp_raw1 != key_cpp_raw2, "Changing comment-like text inside C++ raw string must change cache key"
+    assert key_cpp_raw1 == key_cpp_raw1_fmt, "Reformatting outside C++ raw string must yield identical cache key"
+
+    # 2. Java text block (triple double quotes)
+    java_block1 = (
+        'String block = """\n'
+        '    // not a comment\n'
+        '    /* nor is this */\n'
+        '    int x = 10;\n'
+        '""";'
+    )
+    java_block2 = (
+        'String block = """\n'
+        '    // CHANGED\n'
+        '    /* nor is this */\n'
+        '    int x = 10;\n'
+        '""";'
+    )
+    java_block1_reformatted = (
+        'String   block   =   """\n'
+        '    // not a comment\n'
+        '    /* nor is this */\n'
+        '    int x = 10;\n'
+        '"""  ;  // trailing comment'
+    )
+
+    key_java1 = compute_cache_key(java_block1, "java")
+    key_java2 = compute_cache_key(java_block2, "java")
+    key_java1_fmt = compute_cache_key(java_block1_reformatted, "java")
+
+    assert key_java1 != key_java2, "Changing comment-like text inside Java text block must change cache key"
+    assert key_java1 == key_java1_fmt, "Reformatting outside Java text block must yield identical cache key"
+
+    # 3. JavaScript regular expression literals with [//] and [/*]
+    js_regex1 = "const re = /[//]/;"
+    js_regex2 = "const re = /[/*]/;"
+    js_regex1_reformatted = "const   re  =  /[//]/  ; // trailing comment"
+    js_regex_flags1 = "const re = /[a-z]/g;"
+    js_regex_flags2 = "const re = /[a-z]/i;"
+
+    key_js_reg1 = compute_cache_key(js_regex1, "javascript")
+    key_js_reg2 = compute_cache_key(js_regex2, "javascript")
+    key_js_reg1_fmt = compute_cache_key(js_regex1_reformatted, "javascript")
+    key_js_flags1 = compute_cache_key(js_regex_flags1, "javascript")
+    key_js_flags2 = compute_cache_key(js_regex_flags2, "javascript")
+
+    assert key_js_reg1 != key_js_reg2, (
+        "/[//]/ and /[/*]/ must produce different cache keys"
+    )
+    assert key_js_reg1 == key_js_reg1_fmt, (
+        "Reformatting outside JS regex literal must produce identical cache key"
+    )
+    assert key_js_flags1 != key_js_flags2, (
+        "Different regex flags must produce different cache keys"
+    )
+
+
+def test_sanitizer_output_differentiates_crash_explanation_cache_key():
+    """Verify different sanitizer outputs produce different cache keys even with identical error_type and line (US-22)."""
+    code = "int val = buffer[index];"
+    err_sig = "heap-buffer-overflow:14"
+
+    sanitizer_output_read = (
+        "==4210==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x602000000010\n"
+        "READ of size 4 at 0x602000000010 thread T0\n"
+        "    #0 0x401233 in process /workspace/solution.cpp:14"
+    )
+    sanitizer_output_write = (
+        "==4210==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x602000000050\n"
+        "WRITE of size 8 at 0x602000000050 thread T1\n"
+        "    #0 0x401233 in process /workspace/solution.cpp:14"
+    )
+
+    key_read = compute_cache_key(
+        code=code,
+        language="cpp",
+        request_type="crash_explanation",
+        error_signature=err_sig,
+        error_output=sanitizer_output_read,
+    )
+    key_write = compute_cache_key(
+        code=code,
+        language="cpp",
+        request_type="crash_explanation",
+        error_signature=err_sig,
+        error_output=sanitizer_output_write,
+    )
+
+    assert key_read != key_write, (
+        "Different sanitizer outputs with the same error type and line must produce DIFFERENT cache keys"
+    )
+
+    # Endpoint verification: different sanitizer output triggers distinct LLM call
+    room = "room-sanitizer-diff-001"
+    req_read = {
+        "request_id": "req-crash-1",
+        "room_id": room,
+        "analysis_id": "an-c1",
+        "request_type": "crash_explanation",
+        "language": "cpp",
+        "consent": True,
+        "ai_enabled": True,
+        "sanitizer_output": sanitizer_output_read,
+        "code_snippet": code,
+    }
+    req_write = {
+        "request_id": "req-crash-2",
+        "room_id": room,
+        "analysis_id": "an-c2",
+        "request_type": "crash_explanation",
+        "language": "cpp",
+        "consent": True,
+        "ai_enabled": True,
+        "sanitizer_output": sanitizer_output_write,
+        "code_snippet": code,
+    }
+
+    mock_llm = AsyncMock(return_value="Crash caused by out of bounds buffer access.")
+    with patch("app.llm.client.LLMClient.complete", mock_llm):
+        res1 = client.post("/v1/analyses/crash-explanation", json=req_read)
+        assert res1.status_code == 200
+        assert res1.json()["ai_step"]["status"] == "ok"
+        assert mock_llm.call_count == 1
+
+        # Request 2 has identical error type & line (heap-buffer-overflow:14), but different sanitizer output:
+        # Must NOT hit the cache from Request 1! Must make a second LLM call!
+        res2 = client.post("/v1/analyses/crash-explanation", json=req_write)
+        assert res2.status_code == 200
+        assert res2.json()["ai_step"]["status"] == "ok"
+        assert mock_llm.call_count == 2, (
+            "Different sanitizer output must NOT reuse the previous crash explanation cache entry"
+        )
+
+        # Repeating Request 1 must hit cache and NOT invoke LLM a 3rd time
+        res1_repeat = client.post("/v1/analyses/crash-explanation", json=req_read)
+        assert res1_repeat.status_code == 200
+        assert res1_repeat.json()["ai_step"]["status"] == "ok"
+        assert mock_llm.call_count == 2, "Identical request must hit cache"
+
+
+def test_atomic_rate_limiter_check_and_reserve_concurrency():
+    """Verify RoomRateLimiter.check_and_reserve operates atomically under high concurrency (US-22)."""
+    import concurrent.futures
+
+    limiter = RoomRateLimiter(window_seconds=3600.0)
+    room = "room-concurrency-test"
+    quota = 5
+    num_threads = 50
+
+    results: list[bool] = []
+
+    def attempt_reserve() -> bool:
+        return limiter.check_and_reserve(room, limit=quota)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
+        futures = [executor.submit(attempt_reserve) for _ in range(num_threads)]
+        for f in concurrent.futures.as_completed(futures):
+            results.append(f.result())
+
+    success_count = sum(1 for r in results if r is True)
+    rejected_count = sum(1 for r in results if r is False)
+
+    assert success_count == quota, f"Expected exactly {quota} reservations, got {success_count}"
+    assert rejected_count == num_threads - quota, f"Expected {num_threads - quota} rejections, got {rejected_count}"
+    assert limiter.get_count(room) == quota, f"Recorded count in limiter must be {quota}"
+
+
+def test_endpoint_concurrency_at_quota_boundary():
+    """Verify concurrent requests at quota boundary return HTTP 200 with skipped ROOM_RATE_LIMITED (US-22)."""
+    import concurrent.futures
+
+    room = "room-endpoint-quota-boundary"
+    quota = 3
+    num_requests = 12
+
+    # Clear room state
+    client.delete(f"/v1/rooms/{room}/state")
+
+    mock_llm = AsyncMock(return_value="Suggested optimization fix.")
+
+    def send_request(idx: int) -> dict:
+        req = {
+            "request_id": f"req-concurrent-{idx}",
+            "room_id": room,
+            "analysis_id": f"an-concurrent-{idx}",
+            "request_type": "complexity",
+            "language": "python",
+            "consent": True,
+            "ai_enabled": True,
+            "code": f"def func_{idx}():\n    for i in range(10):\n        for j in range(10):\n            x = {idx}\n",
+            "measurements": [
+                {"input_size": 10, "runtimes_ms": [1.0, 1.1]},
+                {"input_size": 20, "runtimes_ms": [4.0, 4.2]},
+            ],
+        }
+        res = client.post("/v1/analyses/complexity", json=req)
+        return {"status_code": res.status_code, "body": res.json()}
+
+    with patch.object(settings, "ROOM_HOURLY_LIMIT", quota):
+        with patch("app.llm.client.LLMClient.complete", mock_llm):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=num_requests) as executor:
+                futures = [executor.submit(send_request, i) for i in range(num_requests)]
+                responses = [f.result() for f in concurrent.futures.as_completed(futures)]
+
+    # All requests must return HTTP 200
+    for r in responses:
+        assert r["status_code"] == 200, f"Expected HTTP 200, got {r['status_code']}"
+
+    ok_responses = [r for r in responses if r["body"]["ai_step"]["status"] == "ok"]
+    skipped_responses = [r for r in responses if r["body"]["ai_step"]["status"] == "skipped"]
+
+    assert len(ok_responses) == quota, (
+        f"Expected exactly {quota} successful AI steps, got {len(ok_responses)}"
+    )
+    assert len(skipped_responses) == num_requests - quota, (
+        f"Expected {num_requests - quota} skipped AI steps, got {len(skipped_responses)}"
+    )
+
+    for r in skipped_responses:
+        assert r["body"]["ai_step"]["error_code"] == "ROOM_RATE_LIMITED", (
+            f"Expected error_code ROOM_RATE_LIMITED, got {r['body']['ai_step']['error_code']}"
+        )
+
+    # Verify limiter count matches quota
+    assert get_room_rate_limiter().get_count(room) == quota

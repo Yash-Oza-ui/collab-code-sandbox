@@ -177,8 +177,8 @@ async def run_rule_based_analysis_with_ai_fallback(
                 "verified": False,
                 "verified_speedup_pct": None,
             }
-        # 5. Check 4: Room Hourly Rate Limit on outbound calls (NFR5.3, US-22)
-        elif room_id and get_room_rate_limiter().is_rate_limited(room_id):
+        # 5. Check 4: Atomic Room Hourly Rate Limit Check-and-Reserve on outbound calls (NFR5.3, US-22)
+        elif room_id and not get_room_rate_limiter().check_and_reserve(room_id):
             record_fallback(room_id)
             ai_step = {
                 "status": "skipped",
@@ -188,12 +188,8 @@ async def run_rule_based_analysis_with_ai_fallback(
                 "verified_speedup_pct": None,
             }
         else:
-            # 6. Check 5: Cache Miss within Quota -> Execute Outbound AI Call
+            # 6. Check 5: Cache Miss within Quota -> Call slot atomically reserved, execute Outbound AI Call
             try:
-                # Record the call against the room rate limit
-                if room_id:
-                    get_room_rate_limiter().record_call(room_id)
-
                 if ai_fallback is not None:
                     ai_suggestion = await ai_fallback() if callable(ai_fallback) else await ai_fallback
                 else:

@@ -29,6 +29,33 @@ class RoomRateLimiter:
         self._room_timestamps[room_id] = valid
         return valid
 
+    def check_and_reserve(
+        self,
+        room_id: Optional[str],
+        limit: Optional[int] = None,
+        now: Optional[float] = None,
+    ) -> bool:
+        """Atomically check room quota and reserve a call slot under the same lock (NFR5.3, US-22).
+
+        Returns True if a slot was available and has been recorded.
+        Returns False if the quota has been reached (rate limited).
+        """
+        if not room_id:
+            return True
+
+        max_allowed = limit if limit is not None else settings.ROOM_HOURLY_LIMIT
+        if max_allowed <= 0:
+            return False
+
+        current_time = now if now is not None else time.time()
+        with self._lock:
+            valid = self._cleanup_unlocked(room_id, current_time)
+            if len(valid) >= max_allowed:
+                return False
+            valid.append(current_time)
+            self._room_timestamps[room_id] = valid
+            return True
+
     def is_rate_limited(
         self,
         room_id: Optional[str],
