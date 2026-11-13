@@ -215,3 +215,37 @@ The extraction limits are named configuration parameters in `app.config.Settings
 | `SECTION_FALLBACK_LINES` | `SECTION_FALLBACK_LINES` | `20` | Bounded line count used when no function name or error line is found |
 
 **Fallback Guarantee:** If no target function is found or no error line can be resolved, the extractor sends a small bounded snippet (`SECTION_FALLBACK_LINES`, default 20 lines) and **never falls back to the full file**.
+
+## AI Usage Counters and Telemetry (US-75, FR40.1, T-18 v2)
+
+### Storage Decision: In-Memory Storage
+We selected **thread-safe in-memory storage** (`UsageTracker` protected by `threading.Lock`) for usage counters over SQLite for the following architectural reasons:
+1. **Low Latency & High Concurrency:** Eliminates disk I/O latency and SQLite locking contention on asynchronous analysis pipelines.
+2. **Room Lifecycle Management (US-56, FR32):** In-memory dictionaries enable instantaneous per-room eviction via `clear_room(room_id)` when a room is deleted or closed, leaving overall platform telemetry intact.
+3. **Data Minimization & Privacy (NFR8.2):** Guarantees zero persistence of raw execution strings, prompts, or code on disk; counters store primitive integers, room identifiers, and dollar spend values only.
+
+### Counter Interface (`app.counters`)
+- `record_model_call(room_id: str, tokens: int = 0)`: Records an outbound model call and token usage extracted directly from upstream LLM provider responses (Gemini `usageMetadata.totalTokenCount` or OpenAI `usage.total_tokens`). Tokens are never estimated from user-written code.
+- `record_cache_hit(room_id: str)`: Records a cache hit when a request matches a normalized SHA-256 code key.
+- `record_fallback(room_id: str)`: Records an AI fallback or skipped step activation (`CONSENT_MISSING`, `AI_DISABLED`, `PROVIDER_TIMEOUT`, `RATE_LIMITED_PROVIDER`, `PROVIDER_ERROR`).
+- `clear_room(room_id: str) -> bool`: Removes room-scoped counter state.
+- `get_room_usage(room_id: str) -> dict`: Returns usage metrics for an individual room.
+- `get_total_usage() -> dict`: Returns overall aggregate metrics matching the T-18 v2 contract.
+
+### Telemetry Endpoints
+- `GET /v1/usage`: Returns aggregate platform counters:
+  ```json
+  {
+    "total_model_calls": 24,
+    "total_tokens_used": 8450,
+    "total_cache_hits": 41,
+    "total_fallback_activations": 2,
+    "monthly_spend_usd": 0.0296,
+    "monthly_budget_usd": 10.0,
+    "alert_80_percent_triggered": false,
+    "cost_cap_reached": false,
+    "rooms_tracked": 3
+  }
+  ```
+- `GET /v1/rooms/{room_id}/usage`: Returns metrics scoped to a specific room.
+- `DELETE /v1/rooms/{room_id}/state`: Clears room-scoped counters and cache entries when closed or deleted (US-56).
