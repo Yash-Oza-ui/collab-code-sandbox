@@ -1036,6 +1036,75 @@ def test_comment_removal_aware_of_raw_strings_text_blocks_and_regex():
     )
 
 
+    # 4. JavaScript regex in statement-start and control-flow contexts
+    js_if_regex = "if (condition) /[//]/.test(value);"
+    js_if_regex_changed = "if (condition) /[/*]/.test(value);"
+    js_if_regex_fmt = "if  ( condition )   /[//]/.test(value)  ;  // trailing"
+    js_while_regex = "while (condition) /[//]/.test(value);"
+    js_for_regex = "for (;;) /[//]/.test(value);"
+    js_stmt_start = "/[//]/.test(value);"
+
+    key_js_if = compute_cache_key(js_if_regex, "javascript")
+    key_js_if_changed = compute_cache_key(js_if_regex_changed, "javascript")
+    key_js_if_fmt = compute_cache_key(js_if_regex_fmt, "javascript")
+    key_js_while = compute_cache_key(js_while_regex, "javascript")
+    key_js_for = compute_cache_key(js_for_regex, "javascript")
+    key_js_start = compute_cache_key(js_stmt_start, "javascript")
+
+    assert key_js_if != key_js_if_changed, "Changing regex in if-condition must change cache key"
+    assert key_js_if == key_js_if_fmt, "Formatting around if-condition regex must yield identical cache key"
+    assert key_js_if != key_js_while, "Different control structures must produce different cache keys"
+    assert key_js_while != key_js_for, "while vs for regex must produce different cache keys"
+
+    # 5. JavaScript division must NOT be misidentified as regex
+    js_div_paren = "(a + b) / 2;"
+    js_div_id = "x / 2;"
+    js_div_arr = "arr[0] / 2;"
+    key_div_paren = compute_cache_key(js_div_paren, "javascript")
+    key_div_id = compute_cache_key(js_div_id, "javascript")
+    key_div_arr = compute_cache_key(js_div_arr, "javascript")
+    assert compute_cache_key("( a + b )  /  2 ;", "javascript") == key_div_paren
+    assert compute_cache_key("x  /  2 ;", "javascript") == key_div_id
+    assert compute_cache_key("arr[ 0 ]  /  2 ;", "javascript") == key_div_arr
+
+
+def test_c_cpp_prefixed_string_and_char_literals_preserved():
+    """Verify C++ string and character literal encoding prefixes (u8, u, U, L) are preserved (US-22)."""
+    # 1. UTF-8 string prefix: u8"hello" vs identifier u8 followed by "hello"
+    cpp_u8_literal = 'auto s = u8"hello";'
+    cpp_u8_separated = 'auto s = u8 "hello";'
+    cpp_u8_literal_fmt = 'auto   s=u8"hello"  ; // comment'
+
+    key_u8_lit = compute_cache_key(cpp_u8_literal, "cpp")
+    key_u8_sep = compute_cache_key(cpp_u8_separated, "cpp")
+    key_u8_fmt = compute_cache_key(cpp_u8_literal_fmt, "cpp")
+
+    assert key_u8_lit != key_u8_sep, (
+        'u8"hello" (UTF-8 literal) and u8 "hello" (identifier u8 + string) have different semantics and must produce different cache keys'
+    )
+    assert key_u8_lit == key_u8_fmt, (
+        'Formatting variations around u8"hello" must yield identical cache keys'
+    )
+
+    # 2. Wide string prefix: L"wide" vs L "wide"
+    cpp_L_literal = 'const wchar_t* w = L"wide";'
+    cpp_L_separated = 'const wchar_t* w = L "wide";'
+    assert compute_cache_key(cpp_L_literal, "cpp") != compute_cache_key(cpp_L_separated, "cpp")
+
+    # 3. UTF-16 and UTF-32 string prefixes: u"utf16", U"utf32"
+    assert compute_cache_key('auto s = u"utf16";', "cpp") != compute_cache_key('auto s = u "utf16";', "cpp")
+    assert compute_cache_key('auto s = U"utf32";', "cpp") != compute_cache_key('auto s = U "utf32";', "cpp")
+
+    # 4. Character literal prefixes: u8'a', u'a', U'a', L'a'
+    assert compute_cache_key("char c = u8'a';", "cpp") != compute_cache_key("char c = u8 'a';", "cpp")
+    assert compute_cache_key("char16_t c = u'a';", "cpp") != compute_cache_key("char16_t c = u 'a';", "cpp")
+    assert compute_cache_key("char32_t c = U'a';", "cpp") != compute_cache_key("char32_t c = U 'a';", "cpp")
+    assert compute_cache_key("wchar_t c = L'a';", "cpp") != compute_cache_key("wchar_t c = L 'a';", "cpp")
+
+    # 5. Formatted variations of prefixed char literals produce identical keys
+    assert compute_cache_key("char16_t   c=u'a'  ;", "cpp") == compute_cache_key("char16_t c = u'a';", "cpp")
+
+
 def test_sanitizer_output_differentiates_crash_explanation_cache_key():
     """Verify different sanitizer outputs produce different cache keys even with identical error_type and line (US-22)."""
     code = "int val = buffer[index];"

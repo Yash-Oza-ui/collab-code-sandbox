@@ -83,13 +83,14 @@ AI steps across all analysis endpoints enforce the controlled execution sequence
 1. **Consent & Host AI Switch Gates (`US-17`, `FR35`):** External AI calls never execute unless both `consent=true` and `ai_enabled=true` in the request. Otherwise, rule-based / deterministic results still return HTTP 200 with a skipped `ai_step` (`CONSENT_MISSING` or `AI_DISABLED`).
 2. **Normalized SHA-256 Code Cache (`app/cache.py`, `NFR5.2`, `NFR8.2`):**
    - Supported DR1 languages (`python`, `cpp`, `c`, `java`, `javascript`) are normalized before hashing:
-     - **Python:** Tokenized via standard-library `tokenize`; removes `#` comments, standalone docstrings, and excess whitespace/blank lines while preserving string literals and semantic `INDENT`/`DEDENT` structure.
-     - **C / C++ / Java / JavaScript:** Character-scanner strips `//` and `/* */` comments while preserving string/character/template literals verbatim and normalizing punctuation/operator whitespace.
-   - Cache key formula: `SHA-256(normalized_code + "\n" + language + "\n" + request_type + "\n" + error_output)`.
+     - **Python:** Tokenized via standard-library `tokenize`; removes `#` comments and excess whitespace/blank lines while strictly preserving semantic docstrings, string literals, and `INDENT`/`DEDENT` block structure.
+     - **C / C++ / Java / JavaScript:** Character-scanner strips `//` and `/* */` comments while strictly preserving string/character/template literals, C++ raw strings (`R"(...)"`), C++ string prefixes (`u8`, `u`, `U`, `L`), Java text blocks (`"""..."""`), and JavaScript regular-expression literals (`/[//]/`). Strictly preserves C/C++ preprocessor directive boundaries (`#define X 1\nX`) and operator token boundaries (`a + ++b` vs `a++ + b`).
+   - Cache key formula: `SHA-256(normalized_code + ":" + language + ":" + request_type + ":" + error_signature + ":" + error_output)`.
    - Only the 64-character hexadecimal digest is stored in `AnalysisCache`; no source code or stderr is persisted or logged.
    - Cache hits return immediately without invoking the LLM or consuming room rate-limit quota.
 3. **Per-Room Hourly Rate Limiting (`app/limiter.py`, `NFR5.3`, `DR3`):**
    - `RoomRateLimiter` tracks outbound LLM call timestamps per `room_id` over a rolling 1-hour window against `ROOM_HOURLY_LIMIT` (default: `20`).
+   - Uses atomic `check_and_reserve(room_id)` under thread lock to prevent race conditions during concurrent requests.
    - Over-limit requests return HTTP 200 with AI-free findings intact and `ai_step: { "status": "skipped", "error_code": "ROOM_RATE_LIMITED" }`.
 4. **Room State Cleanup (`US-56`, `FR32`):**
    - `DELETE /v1/rooms/{room_id}/state` evicts room-scoped cache keys and resets that room's rate-limit counters.

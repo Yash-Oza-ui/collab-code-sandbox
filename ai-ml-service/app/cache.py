@@ -121,6 +121,9 @@ def _scan_c_style_lexemes(
     lexemes: list[tuple[bool, str]] = []
     code_buf: list[str] = []
     last_non_ws_tok = ""
+    paren_stack: list[Optional[str]] = []
+    last_control_keyword: Optional[str] = None
+    last_closed_paren_was_control: bool = False
 
     def flush_code() -> None:
         if code_buf:
@@ -150,39 +153,66 @@ def _scan_c_style_lexemes(
             last_non_ws_tok = "literal"
             continue
 
-        # 2. C++ raw string: R"delim(...)delim"
+        # 2. C/C++ string/char literals with optional encoding prefixes (u8, u, U, L) and raw strings (R)
         if not is_js:
             prefix_match = None
             if code[i] == "R" and i + 1 < n and code[i + 1] == '"':
-                prefix_match = (1, i + 1)
+                prefix_match = ("raw", 1, i + 1)
             elif i + 2 < n and code[i:i + 2] in ("LR", "uR", "UR") and code[i + 2] == '"':
-                prefix_match = (2, i + 2)
+                prefix_match = ("raw", 2, i + 2)
             elif i + 3 < n and code[i:i + 3] == "u8R" and code[i + 3] == '"':
-                prefix_match = (3, i + 3)
+                prefix_match = ("raw", 3, i + 3)
+            elif i + 2 < n and code[i:i + 2] == "u8" and code[i + 2] == '"':
+                prefix_match = ("str", 2, i + 2)
+            elif code[i] in ("u", "U", "L") and i + 1 < n and code[i + 1] == '"':
+                prefix_match = ("str", 1, i + 1)
+            elif i + 2 < n and code[i:i + 2] == "u8" and code[i + 2] == "'":
+                prefix_match = ("char", 2, i + 2)
+            elif code[i] in ("u", "U", "L") and i + 1 < n and code[i + 1] == "'":
+                prefix_match = ("char", 1, i + 1)
 
             if prefix_match and (i == 0 or not (code[i - 1].isalnum() or code[i - 1] == "_")):
-                plen, qidx = prefix_match
-                line_end = code.find("\n", qidx + 1)
-                if line_end == -1:
-                    line_end = n
-                paren_idx = code.find("(", qidx + 1, min(line_end, qidx + 18))
-                if paren_idx != -1:
-                    delim = code[qidx + 1:paren_idx]
-                    if len(delim) <= 16 and all(ch not in " ()\\\t\r\n" for ch in delim):
-                        flush_code()
-                        target_close = f"){delim}\""
-                        raw_buf = [code[i:paren_idx + 1]]
-                        i = paren_idx + 1
-                        while i < n:
-                            if code[i:i + len(target_close)] == target_close:
-                                raw_buf.append(target_close)
-                                i += len(target_close)
-                                break
-                            raw_buf.append(code[i])
-                            i += 1
-                        lexemes.append((True, "".join(raw_buf)))
-                        last_non_ws_tok = "literal"
-                        continue
+                kind, plen, qidx = prefix_match
+                if kind == "raw":
+                    line_end = code.find("\n", qidx + 1)
+                    if line_end == -1:
+                        line_end = n
+                    paren_idx = code.find("(", qidx + 1, min(line_end, qidx + 18))
+                    if paren_idx != -1:
+                        delim = code[qidx + 1:paren_idx]
+                        if len(delim) <= 16 and all(ch not in " ()\\\t\r\n" for ch in delim):
+                            flush_code()
+                            target_close = f"){delim}\""
+                            raw_buf = [code[i:paren_idx + 1]]
+                            i = paren_idx + 1
+                            while i < n:
+                                if code[i:i + len(target_close)] == target_close:
+                                    raw_buf.append(target_close)
+                                    i += len(target_close)
+                                    break
+                                raw_buf.append(code[i])
+                                i += 1
+                            lexemes.append((True, "".join(raw_buf)))
+                            last_non_ws_tok = "literal"
+                            continue
+                elif kind in ("str", "char"):
+                    flush_code()
+                    delim = code[qidx]
+                    lit_buf = [code[i:qidx + 1]]
+                    i = qidx + 1
+                    while i < n:
+                        ch = code[i]
+                        if ch == "\\" and i + 1 < n:
+                            lit_buf.append(code[i:i + 2])
+                            i += 2
+                            continue
+                        lit_buf.append(ch)
+                        i += 1
+                        if ch == delim:
+                            break
+                    lexemes.append((True, "".join(lit_buf)))
+                    last_non_ws_tok = "literal"
+                    continue
 
         # 3. Standard string literals: "..." and '...'
         if c in ('"', "'"):
@@ -225,12 +255,18 @@ def _scan_c_style_lexemes(
 
         # 5. JavaScript regex literal: /pattern/flags
         if is_js and c == "/" and i + 1 < n and code[i + 1] not in ("/", "*"):
-            if last_non_ws_tok in (
+            is_regex_start = False
+            if last_non_ws_tok == ")" and last_closed_paren_was_control:
+                is_regex_start = True
+            elif last_non_ws_tok in (
                 "", "(", "[", "{", ";", ",", "=", ":", "?", "!", "&", "|",
                 "+", "-", "*", "%", "^", "~", "<", ">",
                 "return", "throw", "yield", "await", "case", "delete", "void",
-                "typeof", "instanceof", "in"
+                "typeof", "instanceof", "in", "do", "else"
             ):
+                is_regex_start = True
+
+            if is_regex_start:
                 flush_code()
                 reg = ["/"]
                 i += 1
@@ -258,6 +294,7 @@ def _scan_c_style_lexemes(
                     i += 1
                 lexemes.append((True, "".join(reg)))
                 last_non_ws_tok = "literal"
+                last_closed_paren_was_control = False
                 continue
 
         # 6. Comments
@@ -286,6 +323,17 @@ def _scan_c_style_lexemes(
                 code_buf.append(" ")
             continue
 
+        if is_js:
+            if c == "(":
+                paren_stack.append(last_control_keyword)
+                last_control_keyword = None
+            elif c == ")":
+                if paren_stack:
+                    k = paren_stack.pop()
+                    last_closed_paren_was_control = (k in ("if", "while", "for", "with"))
+                else:
+                    last_closed_paren_was_control = False
+
         code_buf.append(c)
         if not c.isspace():
             if c.isalnum() or c in ("_", "$"):
@@ -293,8 +341,12 @@ def _scan_c_style_lexemes(
                     last_non_ws_tok += c
                 else:
                     last_non_ws_tok = c
+                if is_js and last_non_ws_tok in ("if", "while", "for", "with"):
+                    last_control_keyword = last_non_ws_tok
             else:
                 last_non_ws_tok = c
+                if c != ")":
+                    last_closed_paren_was_control = False
         i += 1
 
     flush_code()
@@ -346,6 +398,8 @@ def _normalize_c_tokens(tokens: list[tuple[bool, str]]) -> str:
         if is_lit:
             if out and (out[-1][-1].isalnum() or out[-1][-1] in ("_", "$")):
                 out.append(" ")
+            elif out and (out[-1] in _C_OP_MULTI or out[-1] in _C_OP_SINGLE):
+                out.append(" ")
             out.append(tok)
             continue
 
@@ -364,11 +418,13 @@ def _normalize_c_tokens(tokens: list[tuple[bool, str]]) -> str:
         prev_is_punct = (prev in _C_STRUCTURAL_PUNCT)
         tok_is_punct = (tok in _C_STRUCTURAL_PUNCT)
 
+        prev_is_lit = bool(prev.startswith(('"', "'", "`", "R\"", "u8", "u\"", "U\"", "L\"", "u'", "U'", "L'")) or prev.endswith(('"', "'", "`")))
+
         if prev_is_word and tok_is_word:
             out.append(" ")
-        elif (prev_is_word or prev.startswith(('"', "'", "R\"", '"""'))) and tok_is_op:
+        elif (prev_is_word or prev_is_lit) and tok_is_op:
             out.append(" ")
-        elif prev_is_op and (tok_is_word or tok.startswith(('"', "'", "R\"", '"""'))):
+        elif prev_is_op and tok_is_word:
             out.append(" ")
         elif prev_is_op and tok_is_op:
             out.append(" ")
