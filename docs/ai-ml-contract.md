@@ -53,6 +53,59 @@
     - [11.6 Java Review Example (`POST /v1/review`)](#116-java-review-example-post-v1review)
     - [11.7 C Explanation Example (`POST /v1/example`)](#117-c-explanation-example-post-v1example)
   - [12. Open Items (v0)](#12-open-items-v0)
+- [Part 2: Version 2 Contract (T-18)](#part-2-version-2-contract-t-18)
+  - [13. Scope and Replaced v0 Rules](#13-scope-and-replaced-v0-rules)
+    - [13.1 v0 Rules Replaced by Version 2](#131-v0-rules-replaced-by-version-2)
+  - [14. Backlog v2 Contract Decisions (§6.2)](#14-backlog-v2-contract-decisions-62)
+  - [15. Execution-Service Entry Point (`POST /v1/analyses`)](#15-execution-service-entry-point-post-v1analyses)
+    - [15.1 Request Body](#151-request-body)
+    - [15.2 Response 202 Accepted](#152-response-202-accepted)
+  - [16. ai-ml-service Endpoints (Decision 5)](#16-ai-ml-service-endpoints-decision-5)
+    - [16.1 Prince's Section: Task 1 — Time Complexity and Verified Optimizations (`POST /v1/analyses/complexity`)](#161-princes-section-task-1--time-complexity-and-verified-optimizations-post-v1analysescomplexity)
+      - [Purpose \& Behaviour](#purpose--behaviour)
+      - [Request Example (Task 1)](#request-example-task-1)
+      - [Response 200 OK Example (Task 1 — Success with Verified Patch)](#response-200-ok-example-task-1--success-with-verified-patch)
+      - [Response 200 OK Example (Task 1 — Rules-First Analysis, AI Step Avoided, US-67)](#response-200-ok-example-task-1--rules-first-analysis-ai-step-avoided-us-67)
+      - [Response 200 OK Example (Task 1 — Blocked AI Step / Consent Missing)](#response-200-ok-example-task-1--blocked-ai-step--consent-missing)
+      - [Response 200 OK Example (Task 1 — Blocked AI Step / AI Disabled by Host)](#response-200-ok-example-task-1--blocked-ai-step--ai-disabled-by-host)
+      - [Response 200 OK Example (Task 1 — Blocked AI Step / Cost Cap Reached)](#response-200-ok-example-task-1--blocked-ai-step--cost-cap-reached)
+    - [16.2 Prince's Section: Task 2 — Slowdown Detection in Run History (`POST /v1/analyses/slowdown`)](#162-princes-section-task-2--slowdown-detection-in-run-history-post-v1analysesslowdown)
+      - [Purpose \& Behaviour](#purpose--behaviour-1)
+      - [Request Example (Task 2)](#request-example-task-2)
+      - [Response 200 OK Example (Task 2 — Regression Detected)](#response-200-ok-example-task-2--regression-detected)
+      - [Response 200 OK Example (Task 2 — Normal Performance)](#response-200-ok-example-task-2--normal-performance)
+      - [Response 200 OK Example (Task 2 — Baseline Establishing, Sample Count \< 3)](#response-200-ok-example-task-2--baseline-establishing-sample-count--3)
+      - [Response 200 OK Example (Task 2 — Regression Detected, AI Step Skipped / AI Disabled)](#response-200-ok-example-task-2--regression-detected-ai-step-skipped--ai-disabled)
+    - [16.3 Chandan's Section: Task 3 — Failing Inputs \& Delta Minimization (`POST /v1/analyses/failing-input`)](#163-chandans-section-task-3--failing-inputs--delta-minimization-post-v1analysesfailing-input)
+      - [Purpose \& Behaviour](#purpose--behaviour-2)
+      - [Request Fields](#request-fields)
+      - [Request Example](#request-example)
+      - [Response 200 OK — Failing Input Found](#response-200-ok--failing-input-found)
+      - [Response 200 OK — No Failure Found](#response-200-ok--no-failure-found)
+      - [Delta-Minimization Status](#delta-minimization-status)
+      - [Consent and Host AI Switch (Decisions 8 and 10; FR12, FR35, CR06, CR12)](#consent-and-host-ai-switch-decisions-8-and-10-fr12-fr35-cr06-cr12)
+      - [Open Integration Items (must remain visible in the PR)](#open-integration-items-must-remain-visible-in-the-pr)
+    - [16.3.1 Consent/Host-Switch Examples](#1631-consenthost-switch-examples)
+    - [16.4 Digvijay's Section: Task 4 — C/C++ Crash Explanation (`POST /v1/analyses/crash-explanation`)](#164-digvijays-section-task-4--cc-crash-explanation-post-v1analysescrash-explanation)
+      - [Purpose \& Behaviour](#purpose--behaviour-3)
+      - [Request Example (Task 4)](#request-example-task-4)
+      - [Response 200 OK Example (Task 4)](#response-200-ok-example-task-4)
+    - [16.5 Digvijay's Section: Task 5 — Telemetry Counters (`GET /v1/usage`) \& Room Lifecycle (`DELETE /v1/rooms/{room_id}/state`)](#165-digvijays-section-task-5--telemetry-counters-get-v1usage--room-lifecycle-delete-v1roomsroom_idstate)
+      - [`GET /v1/usage` (Response 200 OK)](#get-v1usage-response-200-ok)
+      - [`DELETE /v1/rooms/{room_id}/state` (Response 200 OK)](#delete-v1roomsroom_idstate-response-200-ok)
+  - [17. Delivery \& Client-Facing Messages (`analysis-result`, Decision 6)](#17-delivery--client-facing-messages-analysis-result-decision-6)
+    - [17.1 Audience Rules (CR08, T-17 Decision 10)](#171-audience-rules-cr08-t-17-decision-10)
+    - [17.2 WebSocket Message Payload Example (Task 1 — Complexity)](#172-websocket-message-payload-example-task-1--complexity)
+    - [17.3 WebSocket Message Payload Example (Task 2 — Slowdown)](#173-websocket-message-payload-example-task-2--slowdown)
+  - [18. Repeated and Batch Runs (Decision 7)](#18-repeated-and-batch-runs-decision-7)
+    - [18.1 Request Example](#181-request-example)
+    - [18.2 Response 200 OK Example](#182-response-200-ok-example)
+  - [19. Gating: Consent \& Host AI Switch (Decisions 8 \& 10)](#19-gating-consent--host-ai-switch-decisions-8--10)
+    - [19.1 Unprocessable Request Error Envelope](#191-unprocessable-request-error-envelope)
+  - [20. Normalized Code Caching (Decision 11, NFR5.2)](#20-normalized-code-caching-decision-11-nfr52)
+  - [21. Privacy-Compliant Telemetry Logging (Decision 12, NFR8.1, NFR8.2, US-25)](#21-privacy-compliant-telemetry-logging-decision-12-nfr81-nfr82-us-25)
+  - [22. Confirmations for Prince's Part (Tasks 1 \& 2)](#22-confirmations-for-princes-part-tasks-1--2)
+  - [23. Changes](#23-changes)
 
 ---
 
@@ -1127,16 +1180,38 @@ Data minimization rule: Every call sends only the relevant code section or funct
 
 ### 16.3 Chandan's Section: Task 3 — Failing Inputs & Delta Minimization (`POST /v1/analyses/failing-input`)
 
-**Traceability:** FR38.1 to FR38.5, CR15, NFR14, US-70, US-71, US-72  
+**Traceability:** FR38.1 to FR38.5, CR15, NFR14, US-70 to US-72
 **Endpoint:** `POST /v1/analyses/failing-input`  
+**Caller:** `execution-service` only (Decision 5)
 **`request_type`:** `"failing_input"`
+**Schemas:** `docs/schemas/failing-input-request.json`, `docs/schemas/failing-input-response.json`
+**Examples:** `docs/examples/v2-analysis-failing-input-request.json`, `docs/examples/v2-analysis-failing-input-response.json`, `docs/examples/v2-analysis-failing-input-consent-missing.json`, `docs/examples/v2-analysis-failing-input-ai-disabled.json`
 
 #### Purpose & Behaviour
-1. **Edge-Case Generation (FR38.3, US-70):** Tests edge cases: empty input, $n=1$, bounds, duplicates, negative numbers.
-2. **Delta Reduction (FR38.5, US-72):** When an input fails, simplifies and removes parts of the input while preserving the failure to find a minimal reproducing example.
-3. **Save as Test Case (FR38.2, US-72):** Produces a standardized test case object ready for persistence.
 
-#### Request Example (Task 3)
+1. **Generate deterministic edge cases first (FR38.3, US-70):** The service starts with deterministic edge cases supported by the problem/input format: empty input, (n=1), maximum bounds, duplicates, and valid negative values. It may use a cached AI-generated test-generation script for additional randomized inputs. The exact input grammar/constraints are not defined by the current common request envelope; see the open integration item below.
+2. **Execute as one test batch (FR38.4, CR15):** All generated test inputs are submitted as one `test_batch` request to `execution-service` through the internal-run boundary in Decision 7. The batch uses one new Docker container; each test runs sequentially in a separate process with the normal per-test limits, and the batch is subject to the configured aggregate budget and run cap (NFR14). The container is destroyed after the batch. AI/ML service does not launch containers itself.
+3. **Determine whether an input fails (FR38.1):**
+   - `wrong_output` is reported only when a trusted brute-force reference solution is available and the candidate output differs from the reference output.
+   - Without a trusted reference solution, the service reports only observable `crash` or `timeout` failures. It must not infer wrong output from the candidate output alone.
+4. **Minimize the failing input (FR38.5, US-72):** Once a failing input is found, the service repeatedly removes or simplifies parts of it and reruns the candidate while preserving the same failure condition. It returns the smallest failing input found within the configured aggregate budget. If the budget expires, it returns the best known reproducing input with `minimization_status: "budget_exhausted"`; it must not claim that input is minimal.
+5. **Return a save-ready test case (FR38.2, US-72):** When a reproducible failing input is available, return a `test_case` object and set `can_save_as_test_case: true`. This means the result is eligible to be saved; it does **not** mean that it has already been saved. Saving occurs only after an explicit user action. The storage endpoint/model is not defined by the current repository contract and must be agreed with the owner of test-case persistence before implementation. No persistence is claimed by this endpoint.
+
+#### Request Fields
+
+The request contains all common fields from §16 plus:
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `code` | string | Yes | Relevant source code under analysis (FR40.2). |
+| `reference_solution` | string | No | Optional reference source supplied internally by execution-service only when obtained from an authoritative, server-controlled source. An arbitrary client-provided solution must never be treated as trusted. Availability and ownership of the authoritative source are unresolved. If no trusted source is available, omit this field and perform crash and timeout detection only. Reference source code must never be sent to an external AI provider. |
+
+The `room_id` pattern is intentionally 22 characters for server-created T-17 V2.1 rooms. `RoomIds.generate()` encodes 128 random bits as unpadded Base64URL, and `RoomControllerTest` checks the 22-character format. The older generic T-06 relay validator accepts 1 to 64 characters, but Task 3 receives server-created room IDs; this schema does not redefine the generic relay grammar.
+
+The caller does not send `failing_input`, `failure_type`, `expected_output`, or `actual_output`: these are discovered by the analysis and belong in the result, not in the request. No `param_type` field is defined because the repository has no agreed input-type vocabulary.
+
+#### Request Example
+
 ```json
 {
   "request_id": "3e4f5a6b-7c8d-9e0f-1a2b-3c4d5e6f7a8b",
@@ -1146,29 +1221,32 @@ Data minimization rule: Every call sends only the relevant code section or funct
   "language": "python",
   "consent": true,
   "ai_enabled": true,
-  "failing_input": "15, 88, 42, -999, 104, 33, 0, 7",
-  "failure_type": "wrong_output",
-  "expected_output": "88",
-  "actual_output": "-999",
-  "param_type": "integer_array"
+  "code": "values = list(map(int, input().split()))\\nprint(max(values))"
 }
 ```
 
-#### Response 200 OK Example (Task 3)
+#### Response 200 OK — Failing Input Found
+
+The endpoint response is the Task 3 payload. The execution-service wraps it in the T-17/T-18 `analysis-result` message (§17); the WebSocket envelope is not duplicated here.
+
 ```json
 {
   "request_id": "3e4f5a6b-7c8d-9e0f-1a2b-3c4d5e6f7a8b",
   "analysis_id": "4f5a6b7c-8d9e-0f1a-2b3c-4d5e6f7a8b9c",
   "task": "failing_input",
-  "original_input_length": 31,
-  "minimized_input": "-999",
-  "minimized_input_length": 4,
-  "failure_type": "wrong_output",
+  "failure_found": true,
+  "failure_type": "crash",
+  "original_input": "",
+  "minimized_input": "",
+  "expected_output": null,
+  "actual_output": null,
+  "tests_executed": 5,
+  "minimization_status": "completed",
   "test_case": {
-    "input": "-999",
-    "expected_output": "88",
-    "is_saved_test_case": true,
-    "action": "SAVE_AS_TEST_CASE"
+    "input": "",
+    "expected_output": null,
+    "failure_type": "crash",
+    "language": "python"
   },
   "can_save_as_test_case": true,
   "ai_step": {
@@ -1178,7 +1256,133 @@ Data minimization rule: Every call sends only the relevant code section or funct
 }
 ```
 
+#### Response 200 OK — No Failure Found
+
+```json
+{
+  "request_id": "3e4f5a6b-7c8d-9e0f-1a2b-3c4d5e6f7a8b",
+  "analysis_id": "4f5a6b7c-8d9e-0f1a-2b3c-4d5e6f7a8b9c",
+  "task": "failing_input",
+  "failure_found": false,
+  "failure_type": null,
+  "original_input": null,
+  "minimized_input": null,
+  "expected_output": null,
+  "actual_output": null,
+  "tests_executed": 5,
+  "minimization_status": "not_applicable",
+  "test_case": null,
+  "can_save_as_test_case": false,
+  "ai_step": {
+    "status": "skipped",
+    "error_code": null
+  }
+}
+```
+
+**Response consistency requirements:**
+
+- When `failure_found` is `true`, `failure_type` must identify the detected failure and `test_case` must contain the corresponding failing test.
+- The top-level `failure_type` must match `test_case.failure_type`.
+- `test_case.input` must equal `minimized_input`.
+- For `wrong_output`, both `expected_output` and `actual_output` must be strings, and `test_case.expected_output` must be a string.
+- For `crash` and `timeout`, expected and actual output may be `null` when they are unavailable.
+- When `failure_found` is `false`, failure-related fields must follow the no-failure response schema.
+- A result must not claim `completed` unless the minimization search finished within its configured budget.
+
+#### Delta-Minimization Status
+
+| Value | Meaning |
+|---|---|
+| `completed` | The minimization search finished within budget. The best reproducing input found may equal the original input when no smaller candidate preserves the failure. |
+| `budget_exhausted` | The aggregate budget expired; the returned input is the best known reproducer, not guaranteed minimal. |
+| `not_applicable` | No failing input was found, so minimization did not run. |
+
+The success, consent-missing, and AI-disabled examples use an empty input that already reproduces the crash. No smaller input exists, so `original_input` and `minimized_input` are both `""`. Here, `completed` means the minimization search finished within budget; it does not mean the input must have changed.
+
+
+#### Consent and Host AI Switch (Decisions 8 and 10; FR12, FR35, CR06, CR12)
+
+- The request must carry both `consent` and `ai_enabled` as booleans on every call. The client supplies session consent; execution-service obtains the Host switch from sync-service and forwards it.
+- An external AI step is permitted only when **both** values are `true`. Missing or false values fail closed.
+- The deterministic edge-case generation, sandbox test batch, failure classification, and delta minimization are AI-free and continue when either gate is false. Only the optional AI-generated/random test-generation step is skipped.
+- A skipped AI step is represented in the HTTP 200 Task 3 response as `ai_step: { "status": "skipped", "error_code": "CONSENT_MISSING" }` or `AI_DISABLED`. Do not return HTTP 403 for these normal blocked-step outcomes. Genuine malformed requests use the shared `INVALID_REQUEST` error envelope (422), as specified by the assembled contract.
+- If both gates are false, use `CONSENT_MISSING` as the primary blocked reason; do not expose multiple error codes in a single `ai_step`.
+
+**Blocked response example — consent missing:** `docs/examples/v2-analysis-failing-input-consent-missing.json`.
+**Blocked response example — Host AI switch disabled:** `docs/examples/v2-analysis-failing-input-ai-disabled.json`.
+
+**Execution-result contract status:** The existing T-06 execution-result fields (`stdout`, `stderr`, `exit_code`, `execution_time_ms`, `peak_memory_mb`, `timed_out`, `oom_killed`, `failure_kind`, `output_truncated`, and `message`) provide a baseline for individual executions. They are not a confirmed `test_batch` response schema. The eventual batch response must provide an execution outcome for every submitted input, including an input identifier and relevant execution metadata. Candidate-program executions and, when an authoritative trusted reference is available, reference-program executions must be coordinated within the same batch lifecycle using separate processes without shared mutable state. The exact internal request and response structures remain pending agreement with execution-service.
+
+#### Open Integration Items (must remain visible in the PR)
+
+1. **Execution-side test-batch schema:** Jay confirmed the proposed integration architecture: `POST /internal/runs`, authenticated with `X-Internal-Token`, using `purpose: "test_batch"`. execution-service owns Docker/container lifecycle. The batch uses one new container and executes each test sequentially as a separate process. However, the exact internal request and response fields remain unconfirmed. This PR does not invent those fields.
+2. **Trusted reference ownership:** Jay confirmed that arbitrary client-provided reference code must not be trusted. The authoritative source, ownership, and execution-service retrieval mechanism remain unresolved. Until an authoritative server-controlled source is confirmed, the Task 3 implementation must support crash and timeout detection without claiming wrong-output detection. Reference source code must never be sent to an external AI provider.
+3. **Input grammar and bounds:** The common envelope does not currently describe the stdin grammar or valid bounds needed to construct all deterministic edge cases. Confirm whether this metadata is available from the task/problem or must be supplied by a separate agreed field. Do not infer it from arbitrary source code.
+4. **Test-case persistence:** FR38.2 requires an explicit Save as Test Case action that stores the test. No existing test-case persistence API/model was found in the inspected contract. The response here only supplies a save-ready object; the persistence owner must define the save operation and storage location.
+5. **Client display confirmation:** Het must confirm the user-facing representation/action and that the result is consumed through the §17 `analysis-result` message.
+
 ---
+
+### 16.3.1 Consent/Host-Switch Examples
+
+**Consent missing — deterministic Task 3 work still completes; optional AI step is skipped:**
+
+```json
+{
+  "request_id": "3e4f5a6b-7c8d-9e0f-1a2b-3c4d5e6f7a8b",
+  "analysis_id": "4f5a6b7c-8d9e-0f1a-2b3c-4d5e6f7a8b9c",
+  "task": "failing_input",
+  "failure_found": true,
+  "failure_type": "crash",
+  "original_input": "",
+  "minimized_input": "",
+  "expected_output": null,
+  "actual_output": null,
+  "tests_executed": 5,
+  "minimization_status": "completed",
+  "test_case": {
+    "input": "",
+    "expected_output": null,
+    "failure_type": "crash",
+    "language": "python"
+  },
+  "can_save_as_test_case": true,
+  "ai_step": {
+    "status": "skipped",
+    "error_code": "CONSENT_MISSING"
+  }
+}
+```
+
+**Host AI switch disabled — deterministic Task 3 work still completes; optional AI step is skipped:**
+
+```json
+{
+  "request_id": "3e4f5a6b-7c8d-9e0f-1a2b-3c4d5e6f7a8b",
+  "analysis_id": "4f5a6b7c-8d9e-0f1a-2b3c-4d5e6f7a8b9c",
+  "task": "failing_input",
+  "failure_found": true,
+  "failure_type": "crash",
+  "original_input": "",
+  "minimized_input": "",
+  "expected_output": null,
+  "actual_output": null,
+  "tests_executed": 5,
+  "minimization_status": "completed",
+  "test_case": {
+    "input": "",
+    "expected_output": null,
+    "failure_type": "crash",
+    "language": "python"
+  },
+  "can_save_as_test_case": true,
+  "ai_step": {
+    "status": "skipped",
+    "error_code": "AI_DISABLED"
+  }
+}
+```
 
 ### 16.4 Digvijay's Section: Task 4 — C/C++ Crash Explanation (`POST /v1/analyses/crash-explanation`)
 
