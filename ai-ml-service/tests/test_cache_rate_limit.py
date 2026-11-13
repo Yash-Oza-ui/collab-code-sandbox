@@ -117,8 +117,8 @@ def test_python_normalization_string_literals_with_comment_markers_preserved():
     assert key1 == key3, "Inline comment after string literal must be stripped"
 
 
-def test_python_normalization_standalone_docstrings_stripped():
-    """Verify standalone Python triple-quoted docstrings/block comments are stripped while assigned strings remain."""
+def test_python_normalization_docstrings_preserved():
+    """Verify Python docstrings are strictly preserved during normalization (runtime observable via __doc__, NFR5.2, US-22)."""
     with_doc = (
         'def square(n):\n'
         '    """Compute square of n."""\n'
@@ -128,10 +128,29 @@ def test_python_normalization_standalone_docstrings_stripped():
         'def square(n):\n'
         '    return n * n\n'
     )
+    different_doc = (
+        'def square(n):\n'
+        '    """Different docstring."""\n'
+        '    return n * n\n'
+    )
+    with_doc_reformatted = (
+        '# Module level comment\n'
+        'def square(n):\n'
+        '    # Inside function comment\n'
+        '    """Compute square of n."""\n'
+        '\n\n'
+        '    return n * n\n'
+    )
     assigned_triple1 = 's = """hello # keep"""\nreturn s\n'
     assigned_triple2 = 's = """hello # changed"""\nreturn s\n'
 
-    assert compute_cache_key(with_doc, "python") == compute_cache_key(without_doc, "python")
+    # Docstring vs no docstring must yield DIFFERENT cache keys
+    assert compute_cache_key(with_doc, "python") != compute_cache_key(without_doc, "python")
+    # Different docstrings must yield DIFFERENT cache keys
+    assert compute_cache_key(with_doc, "python") != compute_cache_key(different_doc, "python")
+    # Formatting/comment changes around the same docstring must yield IDENTICAL cache keys (cache hit)
+    assert compute_cache_key(with_doc, "python") == compute_cache_key(with_doc_reformatted, "python")
+    # Assigned multiline strings remain distinct
     assert compute_cache_key(assigned_triple1, "python") != compute_cache_key(assigned_triple2, "python")
 
 
@@ -206,6 +225,64 @@ def test_java_and_javascript_normalization():
     js1 = "const fn = () => { /* comment */ return `// template string`; };"
     js2 = "const fn = () => {\n  return `// template string`;\n}; // trailing"
     assert compute_cache_key(js1, "javascript") == compute_cache_key(js2, "javascript")
+
+
+def test_javascript_asi_and_statement_boundaries_preserved():
+    """Verify JavaScript line breaks affecting program semantics (ASI) are preserved (NFR5.2, US-22)."""
+    # 1. Chandan's regression example: return\n x vs return x
+    js_return_newline = (
+        "function f() {\n"
+        "    return\n"
+        "    x;\n"
+        "}"
+    )
+    js_return_same_line = (
+        "function f() {\n"
+        "    return x;\n"
+        "}"
+    )
+    js_return_newline_reformatted = (
+        "function f() {\n"
+        "\n"
+        "    // Comment before return\n"
+        "    return\n"
+        "    // Comment between return and x\n"
+        "    x;\n"
+        "\n"
+        "}"
+    )
+
+    key_ret_nl = compute_cache_key(js_return_newline, "javascript")
+    key_ret_same = compute_cache_key(js_return_same_line, "javascript")
+    key_ret_nl_fmt = compute_cache_key(js_return_newline_reformatted, "javascript")
+
+    assert key_ret_nl != key_ret_same, "return\\nx and return x have different semantics and must produce different cache keys"
+    assert key_ret_nl == key_ret_nl_fmt, "Formatting/comment variations of return\\nx must produce identical cache keys"
+
+    # 2. Statements without semicolons must NOT be merged into invalid syntax
+    js_no_semi1 = "let a = 1\nlet b = 2"
+    js_no_semi2 = "let a = 1\n\n// inline comment\nlet b = 2"
+    js_no_semi_diff = "let a = 2\nlet b = 1"
+
+    key_ns1 = compute_cache_key(js_no_semi1, "javascript")
+    key_ns2 = compute_cache_key(js_no_semi2, "javascript")
+    key_ns_diff = compute_cache_key(js_no_semi_diff, "javascript")
+
+    assert key_ns1 == key_ns2, "Blank lines and comments between non-semicolon statements must yield identical cache keys"
+    assert key_ns1 != key_ns_diff, "Semantic value change in non-semicolon statements must alter cache key"
+
+    # 3. Restricted keywords: throw/break with newline
+    js_throw_nl = "function g() {\n    throw\n    new Error('fail');\n}"
+    js_throw_same = "function g() {\n    throw new Error('fail');\n}"
+    assert compute_cache_key(js_throw_nl, "javascript") != compute_cache_key(js_throw_same, "javascript")
+
+    js_break_nl = "while(true) {\n    break\n    loop1;\n}"
+    js_break_same = "while(true) {\n    break loop1;\n}"
+    assert compute_cache_key(js_break_nl, "javascript") != compute_cache_key(js_break_same, "javascript")
+
+    # 4. Multi-line comment with newline acts as LineTerminator in JS ASI
+    js_block_comment_nl = "function f() {\n    return /*\n    */ x;\n}"
+    assert compute_cache_key(js_block_comment_nl, "javascript") == key_ret_nl
 
 
 # ============================================================================

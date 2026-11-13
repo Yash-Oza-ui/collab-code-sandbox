@@ -28,19 +28,8 @@ except ImportError:
         pass
 
 
-def _is_standalone_docstring(tokens_on_line: list[tuple[int, str]]) -> bool:
-    """Return True if a logical statement line consists solely of a triple-quoted docstring/block comment."""
-    if len(tokens_on_line) != 1:
-        return False
-    tok_type, tok_str = tokens_on_line[0]
-    if tok_type != tokenize.STRING:
-        return False
-    stripped = tok_str.lstrip("rRuUfFbB")
-    return stripped.startswith('"""') or stripped.startswith("'''")
-
-
 def _normalize_python(code: str) -> str:
-    """Normalize Python code using standard-library tokenize (preserves indentation and strings)."""
+    """Normalize Python code using standard-library tokenize (preserves indentation, strings, and docstrings)."""
     if not code or not code.strip():
         return ""
 
@@ -61,8 +50,7 @@ def _normalize_python(code: str) -> str:
                 continue
             if tok_type == tokenize.NEWLINE:
                 if curr_line:
-                    if not _is_standalone_docstring(curr_line):
-                        lines.append(indent_str + " ".join(s for _, s in curr_line))
+                    lines.append(indent_str + " ".join(s for _, s in curr_line))
                     curr_line = []
                 continue
             if tok_type == tokenize.INDENT:
@@ -74,7 +62,7 @@ def _normalize_python(code: str) -> str:
                 indent_str = "    " * indent_level
                 continue
             if tok_type == tokenize.ENDMARKER:
-                if curr_line and not _is_standalone_docstring(curr_line):
+                if curr_line:
                     lines.append(indent_str + " ".join(s for _, s in curr_line))
                 break
 
@@ -119,7 +107,11 @@ def _strip_python_line_comment(line: str) -> str:
 
 
 def _strip_comments_c_style(code: str, is_js: bool = False) -> str:
-    """Character-scanner routine stripping // and /* */ comments while ignoring string literals."""
+    """Character-scanner routine stripping // and /* */ comments while ignoring string literals.
+
+    In JavaScript, a multi-line comment containing at least one line break acts as a LineTerminator
+    for Automatic Semicolon Insertion (ECMAScript §12.9.1).
+    """
     i = 0
     n = len(code)
     out: list[str] = []
@@ -127,6 +119,7 @@ def _strip_comments_c_style(code: str, is_js: bool = False) -> str:
     in_str: Optional[str] = None
     in_line_comment = False
     in_block_comment = False
+    block_had_newline = False
 
     while i < n:
         c = code[i]
@@ -139,9 +132,12 @@ def _strip_comments_c_style(code: str, is_js: bool = False) -> str:
             continue
 
         if in_block_comment:
+            if c == "\n":
+                block_had_newline = True
             if c == "*" and i + 1 < n and code[i + 1] == "/":
                 in_block_comment = False
-                out.append(" ")
+                out.append("\n" if (is_js and block_had_newline) else " ")
+                block_had_newline = False
                 i += 2
                 continue
             i += 1
@@ -167,6 +163,7 @@ def _strip_comments_c_style(code: str, is_js: bool = False) -> str:
                 continue
             elif next_c == "*":
                 in_block_comment = True
+                block_had_newline = False
                 i += 2
                 continue
 
@@ -183,18 +180,13 @@ def _strip_comments_c_style(code: str, is_js: bool = False) -> str:
     return "".join(out)
 
 
-def _normalize_c_style(code: str, is_js: bool = False) -> str:
-    """Normalize C, C++, Java, or JavaScript code while preserving string literals verbatim."""
+def _normalize_c_style(code: str) -> str:
+    """Normalize C, C++, or Java code while preserving string literals verbatim."""
     if not code or not code.strip():
         return ""
 
-    no_comments = _strip_comments_c_style(code, is_js=is_js)
-
-    # Split text preserving string literals (double, single, backtick) untouched
-    if is_js:
-        split_pattern = r'("(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|`(?:\\.|[^`\\])*`)'
-    else:
-        split_pattern = r'("(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\')'
+    no_comments = _strip_comments_c_style(code, is_js=False)
+    split_pattern = r'("(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\')'
 
     parts = re.split(split_pattern, no_comments)
     normalized_parts: list[str] = []
@@ -216,13 +208,142 @@ def _normalize_c_style(code: str, is_js: bool = False) -> str:
     return " ".join(normalized_parts).strip()
 
 
+# ECMAScript restricted productions and ASI boundaries (ECMAScript §12.9, §13.1, NFR5.2, US-22)
+_JS_RESTRICTED_KEYWORDS = {"return", "throw", "break", "continue", "yield"}
+
+_JS_NO_ASI_AFTER = {
+    ";", "{", "(", "[", ",", ":", "?", ".", "=>",
+    "=", "+=", "-=", "*=", "/=", "%=", "**=",
+    "==", "===", "!=", "!==", "<", ">", "<=", ">=",
+    "&&", "||", "??",
+    "+", "-", "*", "/", "%", "**",
+    "&", "|", "^", "~", "!", "typeof", "void", "delete", "in", "instanceof", "new",
+}
+
+_JS_NO_ASI_BEFORE = {
+    ";", "}", ")", "]", ",", ":", "?", ".", "=>",
+    "=", "+=", "-=", "*=", "/=", "%=", "**=",
+    "==", "===", "!=", "!==", "<", ">", "<=", ">=",
+    "&&", "||", "??",
+    "*", "/", "%", "**",
+    "&", "|", "^", "~", "in", "instanceof",
+}
+
+_JS_KEYWORD_NEEDS_SPACE = {
+    "var", "let", "const", "function", "return", "throw", "case", "new",
+    "typeof", "delete", "void", "in", "instanceof", "yield", "await",
+}
+
+_JS_TOKEN_RE = re.compile(
+    r'(\n(?:[ \t]*\n)*)'                        # 1: newline(s)
+    r'|([a-zA-Z_$][a-zA-Z0-9_$]*)'               # 2: word / identifier / keyword
+    r'|(\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)'         # 3: number
+    r'|(===|!==|==|!=|<=|>=|&&|\|\||\?\?|=>|\+\+|--|\+=|-=|\*=|/=|%=|\*\*=|<<=|>>=|>>>=|\.\.\.)' # 4: multi-char ops
+    r'|([;,\(\)\{\}\[\]:\?\.\+\-\*\/%&\|\^~!=<>])' # 5: single-char punct
+    r'|([ \t]+)'                                 # 6: horizontal whitespace
+    r'|(\S)'                                     # 7: fallback for any other char
+)
+
+
+def _normalize_javascript(code: str) -> str:
+    """Normalize JavaScript code while strictly preserving semantic line breaks (ASI, NFR5.2, US-22)."""
+    if not code or not code.strip():
+        return ""
+
+    no_comments = _strip_comments_c_style(code, is_js=True)
+    split_pattern = r'("(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|`(?:\\.|[^`\\])*`)'
+    parts = re.split(split_pattern, no_comments)
+
+    unified_items: list[tuple[bool, str]] = []
+    for idx, part in enumerate(parts):
+        if idx % 2 == 1:
+            # String or template literal: keep verbatim
+            unified_items.append((True, part))
+        else:
+            if not part:
+                continue
+            for m in _JS_TOKEN_RE.finditer(part):
+                nl, word, num, multi_op, punct, hws, other = m.groups()
+                if nl:
+                    unified_items.append((False, "\n"))
+                elif word:
+                    unified_items.append((False, word))
+                elif num:
+                    unified_items.append((False, num))
+                elif multi_op:
+                    unified_items.append((False, multi_op))
+                elif punct:
+                    unified_items.append((False, punct))
+                elif other:
+                    unified_items.append((False, other))
+
+    out_tokens: list[str] = []
+    n = len(unified_items)
+
+    for i, (is_lit, tok) in enumerate(unified_items):
+        if is_lit:
+            out_tokens.append(tok)
+            continue
+
+        if tok != "\n":
+            out_tokens.append(tok)
+            continue
+
+        prev_tok = None
+        for j in range(i - 1, -1, -1):
+            if unified_items[j][1] != "\n":
+                prev_tok = unified_items[j][1]
+                break
+
+        next_tok = None
+        for j in range(i + 1, n):
+            if unified_items[j][1] != "\n":
+                next_tok = unified_items[j][1]
+                break
+
+        if prev_tok is None or next_tok is None:
+            continue
+
+        is_semantic = False
+        if prev_tok in _JS_RESTRICTED_KEYWORDS:
+            is_semantic = True
+        elif next_tok in ("++", "--"):
+            is_semantic = True
+        elif prev_tok not in _JS_NO_ASI_AFTER and next_tok not in _JS_NO_ASI_BEFORE:
+            is_semantic = True
+
+        if is_semantic:
+            if not out_tokens or out_tokens[-1] != "\n":
+                out_tokens.append("\n")
+
+    res: list[str] = []
+    for i, t in enumerate(out_tokens):
+        if t == "\n":
+            res.append("\n")
+            continue
+        if i > 0:
+            prev = out_tokens[i - 1]
+            if prev != "\n":
+                prev_is_word = bool(re.match(r"^[a-zA-Z0-9_$]+$", prev))
+                t_is_word = bool(re.match(r"^[a-zA-Z0-9_$]+$", t))
+                if prev_is_word and t_is_word:
+                    res.append(" ")
+                elif prev in _JS_KEYWORD_NEEDS_SPACE and t not in (";", ",", ")", "]", "}"):
+                    res.append(" ")
+                elif t in ("in", "instanceof"):
+                    res.append(" ")
+        res.append(t)
+
+    return "".join(res).strip()
+
+
 def normalize_code(code: str, language: str = "python") -> str:
     """Normalize source code across all five DR1 languages (NFR5.2, Decision 11).
 
     Supported languages:
-    - python: Tokenized via Python `tokenize`, keeping semantic indentation and strings.
+    - python: Tokenized via Python `tokenize`, keeping semantic indentation, strings, and docstrings.
     - cpp / c / java: C-style comment scanner and punctuation/whitespace normalizer keeping strings intact.
-    - javascript: C-style + backtick template literal-aware normalizer.
+    - javascript: Semantic line-break and ASI-aware normalizer preserving template literals and statement boundaries.
     """
     if not code:
         return ""
@@ -231,12 +352,12 @@ def normalize_code(code: str, language: str = "python") -> str:
     if lang == "python":
         return _normalize_python(code)
     if lang == "javascript":
-        return _normalize_c_style(code, is_js=True)
+        return _normalize_javascript(code)
     if lang in ("cpp", "c", "java"):
-        return _normalize_c_style(code, is_js=False)
+        return _normalize_c_style(code)
 
     # Safe default fallback for unknown languages
-    return _normalize_c_style(code, is_js=False)
+    return _normalize_c_style(code)
 
 
 def compute_cache_key(
