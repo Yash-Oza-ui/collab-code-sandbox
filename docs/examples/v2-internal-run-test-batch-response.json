@@ -1,0 +1,46 @@
+{
+  "request_id": "3e4f5a6b-7c8d-9e0f-1a2b-3c4d5e6f7a8b",
+  "purpose": "test_batch",
+  "batch_results": [
+    {
+      "input": "",
+      "status": "crash",
+      "stdout": "",
+      "stderr": "ValueError: max() arg is an empty sequence",
+      "exit_code": 1,
+      "execution_time_ms": 35.2
+    },
+    {
+      "input": "1",
+      "status": "pass",
+      "stdout": "1\n",
+      "stderr": "",
+      "exit_code": 0,
+      "execution_time_ms": 32.1
+    },
+    {
+      "input": "1 2 3",
+      "status": "pass",
+      "stdout": "3\n",
+      "stderr": "",
+      "exit_code": 0,
+      "execution_time_ms": 33.4
+    },
+    {
+      "input": "10 -5 20",
+      "status": "pass",
+      "stdout": "20\n",
+      "stderr": "",
+      "exit_code": 0,
+      "execution_time_ms": 34.0
+    },
+    {
+      "input": "999999999",
+      "status": "pass",
+      "stdout": "999999999\n",
+      "stderr": "",
+      "exit_code": 0,
+      "execution_time_ms": 31.8
+    }
+  ]
+}
