@@ -13,6 +13,7 @@ Implements:
 
 import hashlib
 import io
+import json
 import logging
 import re
 import threading
@@ -670,8 +671,9 @@ def compute_cache_key(
     request_type: str = "complexity",
     error_output: str = "",
     error_signature: str = "",
+    cache_context: Optional[dict[str, Any]] = None,
 ) -> str:
-    """Compute SHA-256 cache key over normalized code, language, request type, error signature, and error output (NFR5.2, Decision 11).
+    """Compute SHA-256 cache key over normalized code, language, request type, error signature, error output, and context (NFR5.2, Decision 11).
 
     Returns a 64-character lowercase hexadecimal digest. Raw code is never stored or logged (NFR8.2).
     """
@@ -687,6 +689,16 @@ def compute_cache_key(
     hasher.update((error_signature or "").strip().encode("utf-8"))
     hasher.update(b":")
     hasher.update((error_output or "").strip().encode("utf-8"))
+
+    # Canonical representation of additional prompt-relevant context.
+    context_json = json.dumps(
+        cache_context or {},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    hasher.update(b":context:")
+    hasher.update(context_json.encode("utf-8"))
     return hasher.hexdigest()
 
 

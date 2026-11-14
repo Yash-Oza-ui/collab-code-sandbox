@@ -1457,3 +1457,86 @@ def test_crash_explanation_concurrency_at_quota_boundary():
 
     # Verify limiter count matches quota
     assert get_room_rate_limiter().get_count(room) == quota
+
+
+def test_explain_cache_separates_execution_failure_context():
+    """Different execution failures must not reuse the same AI explanation (US-22)."""
+    room = "room-explain-failure-context"
+    base_request = {
+        "room_id": room,
+        "request_type": "explanation",
+        "language": "python",
+        "consent": True,
+        "ai_enabled": True,
+        "code": "while True:\n    pass\n",
+        "stderr": "",
+        "execution_time_ms": 1000.0,
+        "peak_memory_mb": 20.0,
+    }
+    timeout_request = {
+        **base_request,
+        "request_id": "timeout-1",
+        "failure_kind": "timeout",
+        "exit_code": -1,
+        "timed_out": True,
+        "oom_killed": False,
+    }
+    oom_request = {
+        **base_request,
+        "request_id": "oom-1",
+        "failure_kind": "non_zero_exit",
+        "exit_code": 137,
+        "timed_out": False,
+        "oom_killed": True,
+    }
+    timeout_repeat = {
+        **base_request,
+        "request_id": "timeout-2",
+        "failure_kind": "timeout",
+        "exit_code": -1,
+        "timed_out": True,
+        "oom_killed": False,
+        "code": "while  True :\n    pass # formatted\n",
+    }
+    oom_repeat = {
+        **base_request,
+        "request_id": "oom-2",
+        "failure_kind": "non_zero_exit",
+        "exit_code": 137,
+        "timed_out": False,
+        "oom_killed": True,
+    }
+
+    mock_llm = AsyncMock(side_effect=[
+        "Infinite loop caused execution timeout.",
+        "Process exceeded memory limit and was killed (OOM).",
+    ])
+
+    with patch("app.llm.client.LLMClient.complete", mock_llm):
+        # 1. Timeout failure — cache miss (calls LLM)
+        res1 = client.post("/v1/explain", json=timeout_request)
+        assert res1.status_code == 200
+        assert res1.json()["ai_step"]["status"] == "ok"
+        assert res1.json()["explanation"] == "Infinite loop caused execution timeout."
+        assert mock_llm.call_count == 1
+
+        # 2. OOM failure with identical code & stderr — must be a cache miss (calls LLM again)
+        res2 = client.post("/v1/explain", json=oom_request)
+        assert res2.status_code == 200
+        assert res2.json()["ai_step"]["status"] == "ok"
+        assert res2.json()["explanation"] == "Process exceeded memory limit and was killed (OOM)."
+        assert mock_llm.call_count == 2, "Different execution failure conditions must NOT reuse cached explanation"
+
+        # 3. Repeat timeout failure with formatting change — must be a cache hit (does NOT call LLM)
+        res3 = client.post("/v1/explain", json=timeout_repeat)
+        assert res3.status_code == 200
+        assert res3.json()["ai_step"]["status"] == "ok"
+        assert res3.json()["explanation"] == "Infinite loop caused execution timeout."
+        assert mock_llm.call_count == 2, "Identical failure context with formatting change must hit cache"
+
+        # 4. Repeat OOM failure — must be a cache hit (does NOT call LLM)
+        res4 = client.post("/v1/explain", json=oom_repeat)
+        assert res4.status_code == 200
+        assert res4.json()["ai_step"]["status"] == "ok"
+        assert res4.json()["explanation"] == "Process exceeded memory limit and was killed (OOM)."
+        assert mock_llm.call_count == 2, "Identical OOM failure context must hit cache"

@@ -116,6 +116,14 @@ async def explain_failure(payload: ExplainRequest, request: Request) -> ExplainR
             room_id=payload.room_id,
             request_type=payload.request_type,
             error_output=payload.stderr,
+            cache_context={
+                "failure_kind": payload.failure_kind,
+                "exit_code": payload.exit_code,
+                "timed_out": payload.timed_out,
+                "oom_killed": payload.oom_killed,
+                "error_line": payload.error_line,
+                "function_name": payload.function_name,
+            },
         )
 
         slow_patterns = rule_analysis.get("slow_patterns", [])

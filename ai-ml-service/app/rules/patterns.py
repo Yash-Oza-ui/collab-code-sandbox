@@ -124,6 +124,7 @@ async def run_rule_based_analysis_with_ai_fallback(
     room_id: Optional[str] = None,
     request_type: str = "complexity",
     error_output: str = "",
+    cache_context: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """Execute rule-based pattern checks first, followed by controlled AI assistance (US-22, US-67, FR12.3, FR35, T-18 v2).
 
@@ -165,6 +166,7 @@ async def run_rule_based_analysis_with_ai_fallback(
             language=language,
             request_type=request_type,
             error_output=error_output,
+            cache_context=cache_context,
         )
         cached_result = get_analysis_cache().get(cache_key, room_id=room_id)
 
