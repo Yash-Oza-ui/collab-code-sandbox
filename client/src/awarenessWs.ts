@@ -234,6 +234,8 @@ export interface ConnectAwarenessWsOptions {
   onJoined?: (msg: JoinedMessage) => void
   onJoinRefused?: (msg: JoinRefusedMessage) => void
   onRoster?: (msg: RosterMessage) => void
+  onError?: (event: Event) => void
+  onClose?: (event: CloseEvent) => void
 }
 
 export interface AwarenessWsConnection {
@@ -265,6 +267,8 @@ export function connectAwarenessWs(
     onJoined,
     onJoinRefused,
     onRoster,
+    onError,
+    onClose,
   } = options
 
   if (!WebSocketClass) {
@@ -276,15 +280,13 @@ export function connectAwarenessWs(
     }
   }
 
+  let controlWs: WebSocket | null = null
   let docWs: WebSocket | null = null
   let isDestroyed = false
-
-  // 1. Establish Control Socket connection
-  const controlUrl = buildControlWebSocketUrl(syncWsUrl, roomId, sessionId)
-  const controlWs = new WebSocketClass(controlUrl)
+  let pendingJoin: { name: string; token?: string } | null = null
 
   const sendJoin = (name: string, token?: string) => {
-    if (controlWs.readyState === WS_OPEN) {
+    if (controlWs && controlWs.readyState === WS_OPEN) {
       const payload: Record<string, string> = {
         type: 'join',
         display_name: name,
@@ -293,12 +295,6 @@ export function connectAwarenessWs(
         payload.owner_token = token
       }
       controlWs.send(JSON.stringify(payload))
-    }
-  }
-
-  controlWs.onopen = () => {
-    if (displayName) {
-      sendJoin(displayName, ownerToken)
     }
   }
 
@@ -312,7 +308,7 @@ export function connectAwarenessWs(
 
   // 2. Open Document Socket upon receiving 'joined'
   const openDocumentSocket = () => {
-    if (isDestroyed) return
+    if (isDestroyed || docWs) return
     const docUrl = buildDocumentWebSocketUrl(syncWsUrl, roomId, docId, sessionId)
     docWs = new WebSocketClass(docUrl)
     docWs.binaryType = 'arraybuffer'
@@ -351,29 +347,64 @@ export function connectAwarenessWs(
     }
   }
 
-  controlWs.onmessage = (event: MessageEvent) => {
-    if (typeof event.data === 'string') {
-      try {
-        const msg = JSON.parse(event.data) as { type?: string }
-        if (msg.type === 'joined') {
-          onJoined?.(msg as JoinedMessage)
-          openDocumentSocket()
-        } else if (msg.type === 'join-refused') {
-          onJoinRefused?.(msg as JoinRefusedMessage)
-        } else if (msg.type === 'roster') {
-          onRoster?.(msg as RosterMessage)
-        }
-      } catch {
-        // ignore non-json control frames
+  const initControlSocket = (): WebSocket | null => {
+    if (isDestroyed) return null
+    const controlUrl = buildControlWebSocketUrl(syncWsUrl, roomId, sessionId)
+    const ws = new WebSocketClass(controlUrl)
+
+    ws.onopen = () => {
+      if (pendingJoin) {
+        sendJoin(pendingJoin.name, pendingJoin.token)
+      } else if (displayName) {
+        sendJoin(displayName, ownerToken)
       }
     }
+
+    ws.onmessage = (event: MessageEvent) => {
+      if (typeof event.data === 'string') {
+        try {
+          const msg = JSON.parse(event.data) as { type?: string }
+          if (msg.type === 'joined') {
+            onJoined?.(msg as JoinedMessage)
+            openDocumentSocket()
+          } else if (msg.type === 'join-refused') {
+            onJoinRefused?.(msg as JoinRefusedMessage)
+          } else if (msg.type === 'roster') {
+            onRoster?.(msg as RosterMessage)
+          }
+        } catch {
+          // ignore non-json control frames
+        }
+      }
+    }
+
+    ws.onerror = (event: Event) => {
+      onError?.(event)
+    }
+
+    ws.onclose = (event: CloseEvent) => {
+      onClose?.(event)
+    }
+
+    return ws
   }
 
+  controlWs = initControlSocket()
+
   const join = (name: string, token?: string) => {
-    if (controlWs.readyState === WS_OPEN) {
+    if (isDestroyed) return
+    pendingJoin = { name, token }
+
+    const activeControlWs = controlWs
+    if (!activeControlWs || activeControlWs.readyState === WS_CLOSED || activeControlWs.readyState === WS_CLOSING) {
+      controlWs = initControlSocket()
+      return
+    }
+
+    if (activeControlWs.readyState === WS_OPEN) {
       sendJoin(name, token)
-    } else if (typeof controlWs.addEventListener === 'function') {
-      controlWs.addEventListener(
+    } else if (typeof activeControlWs.addEventListener === 'function') {
+      activeControlWs.addEventListener(
         'open',
         () => {
           sendJoin(name, token)
@@ -381,9 +412,9 @@ export function connectAwarenessWs(
         { once: true },
       )
     } else {
-      const prevOnOpen = controlWs.onopen
-      controlWs.onopen = (ev: Event) => {
-        prevOnOpen?.call(controlWs, ev)
+      const prevOnOpen = activeControlWs.onopen
+      activeControlWs.onopen = (ev: Event) => {
+        prevOnOpen?.call(activeControlWs, ev)
         sendJoin(name, token)
       }
     }
@@ -391,28 +422,33 @@ export function connectAwarenessWs(
 
   const destroy = () => {
     isDestroyed = true
+    pendingJoin = null
     if (onDocAwarenessUpdate) {
       awareness.off('update', onDocAwarenessUpdate)
       onDocAwarenessUpdate = null
     }
 
     if (docWs) {
-      if (docWs.readyState === WS_OPEN) {
+      const activeDocWs = docWs
+      if (activeDocWs.readyState === WS_OPEN) {
         try {
-          removeAwarenessStates(awareness, [awareness.clientID], docWs)
-          sendBinary(docWs, encodeAwarenessMessage(awareness, [awareness.clientID]))
+          removeAwarenessStates(awareness, [awareness.clientID], activeDocWs)
+          sendBinary(activeDocWs, encodeAwarenessMessage(awareness, [awareness.clientID]))
         } catch {
           // ignore send error during closing
         }
-        docWs.close()
-      } else if (docWs.readyState === WS_CONNECTING) {
-        docWs.close()
+        activeDocWs.close()
+      } else if (activeDocWs.readyState === WS_CONNECTING) {
+        activeDocWs.close()
       }
       docWs = null
     }
 
-    if (controlWs.readyState === WS_OPEN || controlWs.readyState === WS_CONNECTING) {
-      controlWs.close()
+    if (controlWs) {
+      if (controlWs.readyState === WS_OPEN || controlWs.readyState === WS_CONNECTING) {
+        controlWs.close()
+      }
+      controlWs = null
     }
   }
 

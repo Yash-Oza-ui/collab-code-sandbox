@@ -3,7 +3,7 @@ import { act } from 'react'
 import type { RefObject } from 'react'
 import { createRoot } from 'react-dom/client'
 import type { Awareness } from 'y-protocols/awareness'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import RoomPage from './RoomPage'
 import { USER_COLORS } from './userColor'
 
@@ -13,10 +13,241 @@ vi.mock('@monaco-editor/react', () => ({
 
 ;(globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true
 
-describe('RoomPage display-name and colour presence', () => {
+class MockCloseEvent extends Event {
+  code: number
+  reason: string
+  constructor(type: string, init?: { code?: number; reason?: string }) {
+    super(type)
+    this.code = init?.code ?? 1000
+    this.reason = init?.reason ?? ''
+  }
+}
+
+const SafeCloseEvent =
+  typeof CloseEvent !== 'undefined'
+    ? CloseEvent
+    : (MockCloseEvent as unknown as typeof CloseEvent)
+
+interface RelayMember {
+  sessionId: string
+  displayName: string
+}
+
+class T20Relay {
+  rooms = new Map<string, Map<string, RelayMember>>()
+  controlSockets = new Map<RelaySocket, { roomId: string; sessionId: string }>()
+  docSockets = new Map<RelaySocket, { roomId: string; docId: string; sessionId: string }>()
+  refuseNames = new Set<string>()
+
+  parseUrl(url: string) {
+    const u = new URL(url.replace(/^ws/, 'http'))
+    const sessionId = u.searchParams.get('session_id') || ''
+    const docMatch = u.pathname.match(/\/ws\/rooms\/([^/]+)\/docs\/([^/]+)$/)
+    if (docMatch) {
+      return { type: 'doc' as const, roomId: docMatch[1], docId: docMatch[2], sessionId }
+    }
+    const controlMatch = u.pathname.match(/\/ws\/rooms\/([^/]+)$/)
+    if (controlMatch) {
+      return { type: 'control' as const, roomId: controlMatch[1], sessionId }
+    }
+    return null
+  }
+
+  handleOpen(ws: RelaySocket) {
+    const parsed = this.parseUrl(ws.url)
+    if (!parsed) {
+      ws.close(4400, 'Malformed URL')
+      return
+    }
+    if (parsed.type === 'control') {
+      this.controlSockets.set(ws, { roomId: parsed.roomId, sessionId: parsed.sessionId })
+      if (!this.rooms.has(parsed.roomId)) {
+        this.rooms.set(parsed.roomId, new Map())
+      }
+    } else {
+      const room = this.rooms.get(parsed.roomId)
+      if (!room?.has(parsed.sessionId)) {
+        ws.close(4406, 'Not joined')
+        return
+      }
+      this.docSockets.set(ws, {
+        roomId: parsed.roomId,
+        docId: parsed.docId,
+        sessionId: parsed.sessionId,
+      })
+    }
+  }
+
+  handleText(ws: RelaySocket, text: string) {
+    const meta = this.controlSockets.get(ws)
+    if (!meta) return
+    try {
+      const msg = JSON.parse(text)
+      if (msg.type === 'join') {
+        if (this.refuseNames.has(msg.display_name)) {
+          ws.receiveText(
+            JSON.stringify({
+              type: 'join-refused',
+              reason: 'NAME_TAKEN',
+              message: 'That display name is already in use in this room.',
+            }),
+          )
+          ws.close(1000, 'Join refused')
+          return
+        }
+
+        const room = this.rooms.get(meta.roomId) ?? new Map()
+        this.rooms.set(meta.roomId, room)
+        room.set(meta.sessionId, {
+          sessionId: meta.sessionId,
+          displayName: msg.display_name,
+        })
+        ws.receiveText(
+          JSON.stringify({
+            type: 'joined',
+            member_id: meta.sessionId,
+            role: 'Guest',
+            mode: 'COLLAB',
+            permissions: { can_edit: true, can_run: true },
+          }),
+        )
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  handleBinary(ws: RelaySocket, data: Uint8Array) {
+    const meta = this.docSockets.get(ws)
+    if (!meta) return
+    const isAwareness = data.length > 0 && data[0] === 1
+
+    for (const [client, clientMeta] of this.docSockets.entries()) {
+      if (
+        client !== ws &&
+        clientMeta.roomId === meta.roomId &&
+        clientMeta.docId === meta.docId &&
+        client.readyState === 1
+      ) {
+        client.receiveBinary(data)
+      }
+    }
+
+    if (isAwareness && ws.readyState === 1) {
+      ws.receiveBinary(data)
+    }
+  }
+
+  handleClose(ws: RelaySocket) {
+    this.controlSockets.delete(ws)
+    this.docSockets.delete(ws)
+  }
+}
+
+class RelaySocket {
+  readyState = 0
+  binaryType = 'arraybuffer'
+  url: string
+  onopen: ((e: Event) => void) | null = null
+  onmessage: ((e: MessageEvent) => void) | null = null
+  onclose: ((e: CloseEvent) => void) | null = null
+  onerror: ((e: Event) => void) | null = null
+  private listeners: Record<string, Set<(e: Event) => void>> = {}
+  protected relay: T20Relay
+
+  constructor(url: string, relay: T20Relay) {
+    this.url = url
+    this.relay = relay
+    queueMicrotask(() => {
+      this.readyState = 1
+      this.relay.handleOpen(this)
+      if (this.readyState === 1) {
+        const ev = new Event('open')
+        this.onopen?.(ev)
+        this.dispatchEvent('open', ev)
+      }
+    })
+  }
+
+  addEventListener(type: string, listener: (e: Event) => void, options?: { once?: boolean }) {
+    if (!this.listeners[type]) this.listeners[type] = new Set()
+    if (options?.once) {
+      const onceWrapper = (e: Event) => {
+        this.removeEventListener(type, onceWrapper)
+        listener(e)
+      }
+      this.listeners[type].add(onceWrapper)
+    } else {
+      this.listeners[type].add(listener)
+    }
+  }
+
+  removeEventListener(type: string, listener: (e: Event) => void) {
+    this.listeners[type]?.delete(listener)
+  }
+
+  dispatchEvent(type: string, ev: Event) {
+    this.listeners[type]?.forEach((fn) => fn(ev))
+  }
+
+  send(data: unknown) {
+    if (data instanceof Uint8Array || data instanceof ArrayBuffer) {
+      const uint8 = data instanceof ArrayBuffer ? new Uint8Array(data) : data
+      this.relay.handleBinary(this, uint8)
+      return
+    }
+    setTimeout(() => {
+      if (this.readyState !== 1) return
+      if (typeof data === 'string') {
+        this.relay.handleText(this, data)
+      }
+    }, 10)
+  }
+
+  receiveText(text: string) {
+    if (this.readyState !== 1) return
+    const ev = new MessageEvent('message', { data: text })
+    this.onmessage?.(ev)
+    this.dispatchEvent('message', ev)
+  }
+
+  receiveBinary(data: Uint8Array) {
+    if (this.readyState !== 1) return
+    const buf = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength)
+    const ev = new MessageEvent('message', { data: buf })
+    this.onmessage?.(ev)
+    this.dispatchEvent('message', ev)
+  }
+
+  close(code = 1000, reason = '') {
+    if (this.readyState === 3) return
+    this.readyState = 3
+    this.relay.handleClose(this)
+    const ev = new SafeCloseEvent('close', { code, reason })
+    this.onclose?.(ev as CloseEvent)
+    this.dispatchEvent('close', ev)
+  }
+}
+
+function createRelaySocketClass(relay: T20Relay): typeof WebSocket {
+  return class extends RelaySocket {
+    constructor(url: string) {
+      super(url, relay)
+    }
+  } as unknown as typeof WebSocket
+}
+
+describe('RoomPage display-name and colour presence join lifecycle', () => {
   let container: HTMLDivElement | null = null
   let root: ReturnType<typeof createRoot> | null = null
   let originalPathname = '/'
+  let relay: T20Relay
+
+  beforeEach(() => {
+    relay = new T20Relay()
+    originalPathname = window.location.pathname
+    window.history.replaceState({}, '', '/room/room-lifecycle-demo')
+  })
 
   afterEach(async () => {
     if (root) {
@@ -29,49 +260,7 @@ describe('RoomPage display-name and colour presence', () => {
     delete (window as unknown as { awareness?: unknown }).awareness
   })
 
-  it('requires a display name before rendering the room editor, then sets colour badge and awareness', async () => {
-    originalPathname = window.location.pathname
-    window.history.replaceState({}, '', '/room/room-demo')
-    container = document.createElement('div')
-    document.body.appendChild(container)
-    root = createRoot(container)
-
-    await act(async () => {
-      root?.render(<RoomPage />)
-    })
-
-    expect(container.textContent).toContain('Choose your display name')
-    expect(container.querySelector('[data-testid="mock-monaco-editor"]')).toBeNull()
-
-    const input = container.querySelector<HTMLInputElement>('#display-name')!
-    const form = container.querySelector<HTMLFormElement>('form')!
-
-    await act(async () => {
-      input.value = 'Chandan'
-      form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
-    })
-
-    expect(container.querySelector('[data-testid="mock-monaco-editor"]')).not.toBeNull()
-    expect(container.textContent).toContain('You: Chandan')
-
-    // US-05: check user colour dot in room header badge
-    const badge = container.querySelector('[data-testid="room-user-badge"]')
-    const dot = container.querySelector<HTMLElement>('[data-testid="room-user-color-dot"]')
-    expect(badge).not.toBeNull()
-    expect(dot).not.toBeNull()
-    expect(dot?.style.backgroundColor).toBeTruthy()
-
-    // US-05 DoD #5: check awareness exposed on window has name and colour
-    const windowAwareness = (window as unknown as { awareness?: Awareness }).awareness
-    expect(windowAwareness).toBeDefined()
-    const localState = windowAwareness?.getLocalState() as { user?: { name: string; color: string } }
-    expect(localState?.user?.name).toBe('Chandan')
-    expect(localState?.user?.color).toBeTruthy()
-  })
-
-  it('calls onDisplayNameAccepted with both display name and assigned colour', async () => {
-    originalPathname = window.location.pathname
-    window.history.replaceState({}, '', '/room/room-demo')
+  it('successful join: keeps editor hidden until joined, then displays editor, badge, and awareness', async () => {
     container = document.createElement('div')
     document.body.appendChild(container)
     root = createRoot(container)
@@ -82,9 +271,152 @@ describe('RoomPage display-name and colour presence', () => {
     await act(async () => {
       root?.render(
         <RoomPage
+          wsOptions={{
+            WebSocketClass: createRelaySocketClass(relay),
+            sessionId: '10000000-0000-4000-8000-000000000001',
+          }}
           onDisplayNameAccepted={(name, color) => {
             acceptedName = name
             acceptedColor = color ?? ''
+          }}
+        />,
+      )
+    })
+
+    // Initial state: DisplayNamePrompt rendered, editor hidden
+    expect(container.textContent).toContain('Choose your display name')
+    expect(container.querySelector('[data-testid="mock-monaco-editor"]')).toBeNull()
+
+    const input = container.querySelector<HTMLInputElement>('#display-name')!
+    const form = container.querySelector<HTMLFormElement>('form')!
+
+    // User submits name
+    await act(async () => {
+      input.value = 'Chandan'
+      form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+    })
+
+    // While join request is pending (before relay delivers joined): editor remains hidden, button shows loading state
+    const submitBtn = container.querySelector<HTMLButtonElement>('button')!
+    expect(submitBtn.disabled).toBe(true)
+    expect(submitBtn.textContent).toBe('Joining room...')
+    expect(container.querySelector('[data-testid="mock-monaco-editor"]')).toBeNull()
+
+    // Wait for asynchronous relay handshake (10ms send delay + handling)
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 35))
+    })
+
+    // Server returned 'joined': Editor is now visible!
+    expect(container.querySelector('[data-testid="mock-monaco-editor"]')).not.toBeNull()
+    expect(container.textContent).toContain('You: Chandan')
+
+    // US-05: check user colour dot in room header badge
+    const badge = container.querySelector('[data-testid="room-user-badge"]')
+    const dot = container.querySelector<HTMLElement>('[data-testid="room-user-color-dot"]')
+    expect(badge).not.toBeNull()
+    expect(dot).not.toBeNull()
+    expect(dot?.style.backgroundColor).toBeTruthy()
+
+    // Callback called
+    expect(acceptedName).toBe('Chandan')
+    expect(USER_COLORS).toContain(acceptedColor)
+
+    // US-05 DoD #5: check awareness exposed on window has name and colour
+    const windowAwareness = (window as unknown as { awareness?: Awareness }).awareness
+    expect(windowAwareness).toBeDefined()
+    const localState = windowAwareness?.getLocalState() as { user?: { name: string; color: string } }
+    expect(localState?.user?.name).toBe('Chandan')
+    expect(localState?.user?.color).toBe(acceptedColor)
+  })
+
+  it('refused join: keeps editor hidden on join-refused, shows error alert, and allows retry', async () => {
+    relay.refuseNames.add('TakenAlice')
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    root = createRoot(container)
+
+    await act(async () => {
+      root?.render(
+        <RoomPage
+          wsOptions={{
+            WebSocketClass: createRelaySocketClass(relay),
+            sessionId: '20000000-0000-4000-8000-000000000002',
+          }}
+        />,
+      )
+    })
+
+    const input = container.querySelector<HTMLInputElement>('#display-name')!
+    const form = container.querySelector<HTMLFormElement>('form')!
+
+    // Submit taken name
+    await act(async () => {
+      input.value = 'TakenAlice'
+      form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+    })
+
+    // Wait for relay refusal response
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 35))
+    })
+
+    // Editor MUST remain hidden
+    expect(container.querySelector('[data-testid="mock-monaco-editor"]')).toBeNull()
+
+    // Clear and useful error message shown in alert
+    const alert = container.querySelector('[role="alert"]')
+    expect(alert).not.toBeNull()
+    expect(alert?.textContent).toContain('That display name is already in use in this room.')
+
+    // Document socket was NEVER opened for refused join
+    expect(relay.docSockets.size).toBe(0)
+
+    // Awareness user presence was not set
+    const windowAwareness = (window as unknown as { awareness?: Awareness }).awareness
+    const localState = windowAwareness?.getLocalState() as { user?: unknown } | undefined
+    expect(localState?.user).toBeUndefined()
+
+    // User can correct the problem and retry
+    const retryInput = container.querySelector<HTMLInputElement>('#display-name')!
+    const retryForm = container.querySelector<HTMLFormElement>('form')!
+
+    await act(async () => {
+      retryInput.value = 'FreshAlice'
+      retryForm.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+    })
+
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 35))
+    })
+
+    // Retry succeeded: Editor becomes visible, doc socket opened
+    expect(container.querySelector('[data-testid="mock-monaco-editor"]')).not.toBeNull()
+    expect(container.textContent).toContain('You: FreshAlice')
+    expect(relay.docSockets.size).toBe(1)
+  })
+
+  it('connection failure: keeps editor hidden and communicates failure if socket drops before join', async () => {
+    class DroppingRelay extends T20Relay {
+      override handleText(ws: RelaySocket) {
+        // Drop connection abruptly without replying joined
+        ws.close(4404, 'Room not found')
+      }
+    }
+
+    const dropRelay = new DroppingRelay()
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    root = createRoot(container)
+
+    await act(async () => {
+      root?.render(
+        <RoomPage
+          wsOptions={{
+            WebSocketClass: createRelaySocketClass(dropRelay),
+            sessionId: '30000000-0000-4000-8000-000000000003',
           }}
         />,
       )
@@ -94,17 +426,24 @@ describe('RoomPage display-name and colour presence', () => {
     const form = container.querySelector<HTMLFormElement>('form')!
 
     await act(async () => {
-      input.value = 'Alice'
+      input.value = 'Charlie'
       form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
     })
 
-    expect(acceptedName).toBe('Alice')
-    expect(USER_COLORS).toContain(acceptedColor)
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 35))
+    })
+
+    // Editor must not be visible
+    expect(container.querySelector('[data-testid="mock-monaco-editor"]')).toBeNull()
+
+    // UI communicates failure in alert
+    const alert = container.querySelector('[role="alert"]')
+    expect(alert).not.toBeNull()
+    expect(alert?.textContent).toContain('Room not found (4404)')
   })
 
   it('assigns a distinct colour when awareness already contains other participant colours', async () => {
-    originalPathname = window.location.pathname
-    window.history.replaceState({}, '', '/room/room-demo')
     container = document.createElement('div')
     document.body.appendChild(container)
     root = createRoot(container)
@@ -112,10 +451,18 @@ describe('RoomPage display-name and colour presence', () => {
     const awarenessRef: RefObject<Awareness | null> = { current: null }
 
     await act(async () => {
-      root?.render(<RoomPage awarenessRef={awarenessRef} />)
+      root?.render(
+        <RoomPage
+          awarenessRef={awarenessRef}
+          wsOptions={{
+            WebSocketClass: createRelaySocketClass(relay),
+            sessionId: '40000000-0000-4000-8000-000000000004',
+          }}
+        />,
+      )
     })
 
-    // Simulate an existing peer already holding USER_COLORS[0]
+    // Simulate an existing peer in awareness holding USER_COLORS[0]
     const awareness = awarenessRef.current
     expect(awareness).not.toBeNull()
     awareness!.states.set(999, {
@@ -130,6 +477,10 @@ describe('RoomPage display-name and colour presence', () => {
       form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
     })
 
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 35))
+    })
+
     const localState = awareness!.getLocalState() as { user?: { name: string; color: string } }
     expect(localState.user?.name).toBe('Bob')
     // Must not collide with Alice's colour
@@ -137,231 +488,24 @@ describe('RoomPage display-name and colour presence', () => {
     expect(localState.user?.color).toBe(USER_COLORS[1])
   })
 
-  it('cleans up window.awareness and destroys instance when unmounted', async () => {
-    originalPathname = window.location.pathname
-    window.history.replaceState({}, '', '/room/room-demo')
-    container = document.createElement('div')
-    document.body.appendChild(container)
-    root = createRoot(container)
-
-    const awarenessRef: RefObject<Awareness | null> = { current: null }
-
-    await act(async () => {
-      root?.render(<RoomPage awarenessRef={awarenessRef} />)
-    })
-
-    const awareness = awarenessRef.current
-    expect(awareness).not.toBeNull()
-    expect((window as unknown as { awareness?: Awareness }).awareness).toBe(awareness)
-
-    await act(async () => {
-      root?.unmount()
-      root = null
-    })
-
-    expect((window as unknown as { awareness?: Awareness }).awareness).toBeUndefined()
-    expect(awarenessRef.current).toBeNull()
-  })
-
-  it('synchronizes Alice and Bob presence between two connected RoomPage instances over relay', async () => {
-    interface RelayMember {
-      sessionId: string
-      displayName: string
-    }
-
-    class T20Relay {
-      rooms = new Map<string, Map<string, RelayMember>>()
-      controlSockets = new Map<RelaySocket, { roomId: string; sessionId: string }>()
-      docSockets = new Map<RelaySocket, { roomId: string; docId: string; sessionId: string }>()
-
-      parseUrl(url: string) {
-        const u = new URL(url.replace(/^ws/, 'http'))
-        const sessionId = u.searchParams.get('session_id') || ''
-        const docMatch = u.pathname.match(/\/ws\/rooms\/([^/]+)\/docs\/([^/]+)$/)
-        if (docMatch) {
-          return { type: 'doc' as const, roomId: docMatch[1], docId: docMatch[2], sessionId }
-        }
-        const controlMatch = u.pathname.match(/\/ws\/rooms\/([^/]+)$/)
-        if (controlMatch) {
-          return { type: 'control' as const, roomId: controlMatch[1], sessionId }
-        }
-        return null
-      }
-
-      handleOpen(ws: RelaySocket) {
-        const parsed = this.parseUrl(ws.url)
-        if (!parsed) return
-        if (parsed.type === 'control') {
-          this.controlSockets.set(ws, { roomId: parsed.roomId, sessionId: parsed.sessionId })
-          if (!this.rooms.has(parsed.roomId)) {
-            this.rooms.set(parsed.roomId, new Map())
-          }
-        } else {
-          const room = this.rooms.get(parsed.roomId)
-          if (!room?.has(parsed.sessionId)) {
-            ws.close(4406, 'Not joined')
-            return
-          }
-          this.docSockets.set(ws, {
-            roomId: parsed.roomId,
-            docId: parsed.docId,
-            sessionId: parsed.sessionId,
-          })
-        }
-      }
-
-      handleText(ws: RelaySocket, text: string) {
-        const meta = this.controlSockets.get(ws)
-        if (!meta) return
-        try {
-          const msg = JSON.parse(text)
-          if (msg.type === 'join') {
-            const room = this.rooms.get(meta.roomId) ?? new Map()
-            this.rooms.set(meta.roomId, room)
-            room.set(meta.sessionId, {
-              sessionId: meta.sessionId,
-              displayName: msg.display_name,
-            })
-            // Reply joined
-            ws.receiveText(
-              JSON.stringify({
-                type: 'joined',
-                member_id: meta.sessionId,
-                role: 'Guest',
-                mode: 'COLLAB',
-                permissions: { can_edit: true, can_run: true },
-              }),
-            )
-          }
-        } catch {
-          // ignore
-        }
-      }
-
-      handleBinary(ws: RelaySocket, data: Uint8Array) {
-        const meta = this.docSockets.get(ws)
-        if (!meta) return
-        const isAwareness = data.length > 0 && data[0] === 1
-
-        for (const [client, clientMeta] of this.docSockets.entries()) {
-          if (
-            client !== ws &&
-            clientMeta.roomId === meta.roomId &&
-            clientMeta.docId === meta.docId &&
-            client.readyState === 1
-          ) {
-            client.receiveBinary(data)
-          }
-        }
-
-        if (isAwareness && ws.readyState === 1) {
-          ws.receiveBinary(data)
-        }
-      }
-
-      handleClose(ws: RelaySocket) {
-        this.controlSockets.delete(ws)
-        this.docSockets.delete(ws)
-      }
-    }
-
-    const relay = new T20Relay()
-
-    class RelaySocket {
-      readyState = 1
-      binaryType = 'arraybuffer'
-      url: string
-      onopen: ((e: Event) => void) | null = null
-      onmessage: ((e: MessageEvent) => void) | null = null
-      onclose: ((e: CloseEvent) => void) | null = null
-      private listeners: Record<string, Set<(e: Event) => void>> = {}
-
-      constructor(url: string) {
-        this.url = url
-        queueMicrotask(() => {
-          relay.handleOpen(this)
-          if (this.readyState === 1) {
-            const ev = new Event('open')
-            this.onopen?.(ev)
-            this.dispatchEvent('open', ev)
-          }
-        })
-      }
-
-      addEventListener(type: string, listener: (e: Event) => void, options?: { once?: boolean }) {
-        if (!this.listeners[type]) this.listeners[type] = new Set()
-        if (options?.once) {
-          const onceWrapper = (e: Event) => {
-            this.removeEventListener(type, onceWrapper)
-            listener(e)
-          }
-          this.listeners[type].add(onceWrapper)
-        } else {
-          this.listeners[type].add(listener)
-        }
-      }
-
-      removeEventListener(type: string, listener: (e: Event) => void) {
-        this.listeners[type]?.delete(listener)
-      }
-
-      private dispatchEvent(type: string, ev: Event) {
-        this.listeners[type]?.forEach((fn) => fn(ev))
-      }
-
-      send(data: unknown) {
-        if (typeof data === 'string') {
-          relay.handleText(this, data)
-        } else if (data instanceof Uint8Array || data instanceof ArrayBuffer) {
-          const uint8 = data instanceof ArrayBuffer ? new Uint8Array(data) : data
-          relay.handleBinary(this, uint8)
-        }
-      }
-
-      receiveText(text: string) {
-        if (this.readyState !== 1) return
-        const ev = new MessageEvent('message', { data: text })
-        this.onmessage?.(ev)
-        this.dispatchEvent('message', ev)
-      }
-
-      receiveBinary(data: Uint8Array) {
-        if (this.readyState !== 1) return
-        const buf = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength)
-        const ev = new MessageEvent('message', { data: buf })
-        this.onmessage?.(ev)
-        this.dispatchEvent('message', ev)
-      }
-
-      close(code = 1000, reason = '') {
-        this.readyState = 3
-        relay.handleClose(this)
-        const ev = new CloseEvent('close', { code, reason })
-        this.onclose?.(ev)
-        this.dispatchEvent('close', ev)
-      }
-    }
-
+  it('synchronizes Alice and Bob presence and removes Bob on disconnect', async () => {
     const containerA = document.createElement('div')
     const containerB = document.createElement('div')
     document.body.appendChild(containerA)
     document.body.appendChild(containerB)
 
-    const rootA = createRoot(containerA)
-    const rootB = createRoot(containerB)
+    let rootA: ReturnType<typeof createRoot> | null = createRoot(containerA)
+    let rootB: ReturnType<typeof createRoot> | null = createRoot(containerB)
 
     const awarenessRefA: RefObject<Awareness | null> = { current: null }
     const awarenessRefB: RefObject<Awareness | null> = { current: null }
 
-    originalPathname = window.location.pathname
-    window.history.replaceState({}, '', '/room/shared-room-101')
-
     await act(async () => {
-      rootA.render(
+      rootA?.render(
         <RoomPage
           awarenessRef={awarenessRefA}
           wsOptions={{
-            WebSocketClass: RelaySocket as unknown as typeof WebSocket,
+            WebSocketClass: createRelaySocketClass(relay),
             sessionId: '11111111-1111-4111-8111-111111111111',
           }}
         />,
@@ -376,13 +520,17 @@ describe('RoomPage display-name and colour presence', () => {
       formA.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
     })
 
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 35))
+    })
+
     // Render Bob
     await act(async () => {
-      rootB.render(
+      rootB?.render(
         <RoomPage
           awarenessRef={awarenessRefB}
           wsOptions={{
-            WebSocketClass: RelaySocket as unknown as typeof WebSocket,
+            WebSocketClass: createRelaySocketClass(relay),
             sessionId: '22222222-2222-4222-8222-222222222222',
           }}
         />,
@@ -397,9 +545,9 @@ describe('RoomPage display-name and colour presence', () => {
       formB.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
     })
 
-    // Allow awareness updates to propagate through the relay
+    // Allow awareness updates to propagate through relay
     await act(async () => {
-      await new Promise((r) => setTimeout(r, 50))
+      await new Promise((r) => setTimeout(r, 60))
     })
 
     const statesA = Array.from(awarenessRefA.current?.getStates().values() ?? [])
@@ -420,12 +568,59 @@ describe('RoomPage display-name and colour presence', () => {
     expect(aliceInB?.user?.color).toBe(aliceInA?.user?.color)
     expect(bobInB?.user?.color).toBe(bobInA?.user?.color)
 
-    // Unmount
+    // Disconnect Bob (unmount rootB)
     await act(async () => {
-      rootA.unmount()
-      rootB.unmount()
+      rootB?.unmount()
+      rootB = null
+    })
+
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 35))
+    })
+
+    // Bob's presence is removed from Alice's awareness
+    const statesAfterBobLeave = Array.from(awarenessRefA.current?.getStates().values() ?? [])
+    const bobAfterLeave = statesAfterBobLeave.find((s) => s.user?.name === 'Bob')
+    expect(bobAfterLeave).toBeUndefined()
+
+    // Unmount Alice
+    await act(async () => {
+      rootA?.unmount()
+      rootA = null
     })
     containerA.remove()
     containerB.remove()
+  })
+
+  it('cleans up window.awareness and destroys instance when unmounted', async () => {
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    root = createRoot(container)
+
+    const awarenessRef: RefObject<Awareness | null> = { current: null }
+
+    await act(async () => {
+      root?.render(
+        <RoomPage
+          awarenessRef={awarenessRef}
+          wsOptions={{
+            WebSocketClass: createRelaySocketClass(relay),
+            sessionId: '50000000-0000-4000-8000-000000000005',
+          }}
+        />,
+      )
+    })
+
+    const awareness = awarenessRef.current
+    expect(awareness).not.toBeNull()
+    expect((window as unknown as { awareness?: Awareness }).awareness).toBe(awareness)
+
+    await act(async () => {
+      root?.unmount()
+      root = null
+    })
+
+    expect((window as unknown as { awareness?: Awareness }).awareness).toBeUndefined()
+    expect(awarenessRef.current).toBeNull()
   })
 })

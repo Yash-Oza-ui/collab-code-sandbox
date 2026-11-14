@@ -38,6 +38,7 @@ class TestRelay {
   rooms = new Map<string, Map<string, RelayRoomSession>>()
   controlClients = new Map<TestWebSocket, { roomId: string; sessionId: string }>()
   docClients = new Map<TestWebSocket, { roomId: string; docId: string; sessionId: string }>()
+  refuseNames = new Set<string>()
 
   createClient(url: string): TestWebSocket {
     return new TestWebSocket(url, this)
@@ -78,6 +79,18 @@ class TestRelay {
     try {
       const msg = JSON.parse(text)
       if (msg.type === 'join') {
+        if (this.refuseNames.has(msg.display_name)) {
+          ws.receiveText(
+            JSON.stringify({
+              type: 'join-refused',
+              reason: 'NAME_TAKEN',
+              message: 'That display name is already in use in this room.',
+            }),
+          )
+          ws.close(1000, 'Join refused')
+          return
+        }
+
         const room = this.rooms.get(meta.roomId) ?? new Map()
         this.rooms.set(meta.roomId, room)
 
@@ -294,6 +307,12 @@ class TestWebSocket {
     this.onclose?.(ev as CloseEvent)
     this.dispatchEvent('close', ev)
   }
+
+  triggerError(): void {
+    const ev = new Event('error')
+    this.onerror?.(ev)
+    this.dispatchEvent('error', ev)
+  }
 }
 
 describe('awarenessWs helper functions', () => {
@@ -473,5 +492,91 @@ describe('T-20 WebSocket connection and multi-client awareness synchronization',
     expect(bobAfterLeave).toBeUndefined()
 
     connA.destroy()
+  })
+
+  it('handles join-refused without opening document socket, and allows reconnecting on subsequent join', async () => {
+    const relay = new TestRelay()
+    relay.refuseNames.add('TakenAlice')
+
+    const doc = new Y.Doc()
+    const awareness = createAwareness(doc)
+    let refusedReason = ''
+    let joined = false
+
+    const conn = connectAwarenessWs({
+      roomId: 'test-refusal-room',
+      displayName: 'TakenAlice',
+      awareness,
+      syncWsUrl: 'ws://localhost:8081/ws/rooms',
+      sessionId: '33333333-3333-4333-8333-333333333333',
+      WebSocketClass: function (url: string) {
+        return relay.createClient(url)
+      } as unknown as typeof WebSocket,
+      onJoinRefused: (msg) => {
+        refusedReason = msg.reason
+      },
+      onJoined: () => {
+        joined = true
+      },
+    })
+
+    await new Promise((r) => setTimeout(r, 20))
+
+    // Refusal received, document socket was NEVER opened
+    expect(refusedReason).toBe('NAME_TAKEN')
+    expect(joined).toBe(false)
+    expect(conn.docWs).toBeNull()
+
+    // Retry with an available name
+    conn.join('ValidAlice')
+    await new Promise((r) => setTimeout(r, 30))
+
+    // Joined successfully and document socket opened
+    expect(joined).toBe(true)
+    expect(conn.docWs).not.toBeNull()
+
+    conn.destroy()
+  })
+
+  it('triggers onClose and onError on control socket failures without opening document socket', async () => {
+    const relay = new TestRelay()
+    const doc = new Y.Doc()
+    const awareness = createAwareness(doc)
+    let errorTriggered = false
+    let closeTriggered = false
+
+    let clientWs: TestWebSocket | null = null
+    const conn = connectAwarenessWs({
+      roomId: 'test-error-room',
+      awareness,
+      syncWsUrl: 'ws://localhost:8081/ws/rooms',
+      sessionId: '44444444-4444-4444-8444-444444444444',
+      WebSocketClass: function (url: string) {
+        clientWs = relay.createClient(url)
+        return clientWs
+      } as unknown as typeof WebSocket,
+      onError: () => {
+        errorTriggered = true
+      },
+      onClose: () => {
+        closeTriggered = true
+      },
+    })
+
+    await new Promise((r) => setTimeout(r, 10))
+    const controlTestWs = conn.controlWs as unknown as TestWebSocket
+    expect(controlTestWs).not.toBeNull()
+
+    // Trigger error and premature close on control socket
+    controlTestWs.triggerError()
+    controlTestWs.close(4404, 'Room not found')
+
+    await new Promise((r) => setTimeout(r, 10))
+
+    expect(errorTriggered).toBe(true)
+    expect(closeTriggered).toBe(true)
+    expect(conn.docWs).toBeNull()
+
+    conn.destroy()
   })
 })

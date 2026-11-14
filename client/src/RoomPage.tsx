@@ -26,7 +26,7 @@ export interface RoomPageProps {
    * Enables tests and downstream US-03 live cursor / awareness integration.
    */
   awarenessRef?: RefObject<Awareness | null>
-  /** Called once a guest has supplied a valid name; ready for awareness integration. */
+  /** Called once a guest has supplied a valid name and joined; ready for awareness integration. */
   onDisplayNameAccepted?: (displayName: string, userColor?: string) => void
   /**
    * Optional WebSocket relay configuration or custom WebSocket implementation for testing.
@@ -37,6 +37,8 @@ export interface RoomPageProps {
     WebSocketClass?: typeof WebSocket
   }
 }
+
+export type RoomJoinStatus = 'prompt' | 'joining' | 'joined' | 'refused' | 'error'
 
 // Reads the room id from the URL (T-06 section 3.2: /room/{room_id}).
 // Manages the Y.Doc lifecycle inside effect setup/cleanup (T-01).
@@ -51,12 +53,22 @@ export default function RoomPage(props: RoomPageProps = {}) {
   const roomId = getRoomIdFromPath(window.location.pathname)
   const [displayName, setDisplayName] = useState<string | null>(null)
   const [userColor, setUserColor] = useState<string | null>(null)
+  const [joinStatus, setJoinStatus] = useState<RoomJoinStatus>('prompt')
+  const [serverError, setServerError] = useState<string | null>(null)
+  const [pendingName, setPendingName] = useState<string | null>(null)
 
   // One Y.Doc is created inside effect setup and destroyed in its cleanup (T-01).
   const { docRef } = useRoomDoc(roomId, { docRef: externalDocRef })
 
   const awarenessInstanceRef = useRef<Awareness | null>(null)
   const connRef = useRef<AwarenessWsConnection | null>(null)
+  const pendingNameRef = useRef<string | null>(null)
+  const joinStatusRef = useRef<RoomJoinStatus>('prompt')
+  const onDisplayNameAcceptedRef = useRef(onDisplayNameAccepted)
+
+  useEffect(() => {
+    onDisplayNameAcceptedRef.current = onDisplayNameAccepted
+  }, [onDisplayNameAccepted])
 
   // Manage Awareness instance lifecycle tied to active Y.Doc and WebSocket relay
   useEffect(() => {
@@ -118,6 +130,65 @@ export default function RoomPage(props: RoomPageProps = {}) {
         syncWsUrl: wsOptions?.syncWsUrl,
         sessionId: wsOptions?.sessionId,
         WebSocketClass: wsOptions?.WebSocketClass,
+        onJoined: () => {
+          const name = pendingNameRef.current
+          if (!name) return
+
+          const existingColors = getExistingUserColors(awareness)
+          const fallbackIndex = doc.clientID ?? 0
+          const color = pickUserColor(existingColors, fallbackIndex)
+
+          setUserAwareness(awareness, { name, color })
+          setDisplayName(name)
+          setUserColor(color)
+          setServerError(null)
+          setJoinStatus('joined')
+          joinStatusRef.current = 'joined'
+          onDisplayNameAcceptedRef.current?.(name, color)
+        },
+        onJoinRefused: (msg) => {
+          let message = msg.message
+          if (!message) {
+            if (msg.reason === 'NAME_TAKEN') {
+              message = `The display name "${pendingNameRef.current ?? ''}" is already taken in this room. Please choose another name.`
+            } else if (msg.reason === 'ROOM_FULL') {
+              message = 'This room has reached maximum capacity.'
+            } else {
+              message = `Join refused: ${msg.reason}`
+            }
+          }
+          setServerError(message)
+          setJoinStatus('refused')
+          joinStatusRef.current = 'refused'
+        },
+        onError: () => {
+          if (joinStatusRef.current !== 'joined' && joinStatusRef.current !== 'refused') {
+            setServerError('Failed to connect to the room server. Please check your network connection.')
+            setJoinStatus('error')
+            joinStatusRef.current = 'error'
+          }
+        },
+        onClose: (event) => {
+          if (joinStatusRef.current === 'refused') {
+            // Keep the refusal message intact
+            return
+          }
+          if (joinStatusRef.current === 'joining') {
+            let msg = 'Connection closed before joining the room.'
+            if (event.code === 4404) {
+              msg = 'Room not found (4404). Please verify the room link.'
+            } else if (event.code === 4410) {
+              msg = 'This room has been closed.'
+            }
+            setServerError(msg)
+            setJoinStatus('error')
+            joinStatusRef.current = 'error'
+          } else if (joinStatusRef.current === 'prompt') {
+            setServerError('Unable to connect to the room server. Please check your connection.')
+            setJoinStatus('error')
+            joinStatusRef.current = 'error'
+          }
+        },
       })
       connRef.current = conn
       wsCleanup = () => {
@@ -150,29 +221,30 @@ export default function RoomPage(props: RoomPageProps = {}) {
   // Keep presence updated in awareness whenever displayName and userColor are set or change
   useEffect(() => {
     const awareness = awarenessInstanceRef.current
-    if (awareness && displayName && userColor) {
+    if (awareness && displayName && userColor && joinStatus === 'joined') {
       setUserAwareness(awareness, { name: displayName, color: userColor })
     }
-  }, [displayName, userColor])
+  }, [displayName, userColor, joinStatus])
 
   function handleDisplayNameAccepted(name: string) {
-    const awareness = awarenessInstanceRef.current
-    const existingColors = awareness ? getExistingUserColors(awareness) : []
-    const fallbackIndex = docRef.current?.clientID ?? 0
-    const color = pickUserColor(existingColors, fallbackIndex)
-
-    if (awareness) {
-      setUserAwareness(awareness, { name, color })
-    }
-
-    setDisplayName(name)
-    setUserColor(color)
+    if (joinStatus === 'joining') return
+    setPendingName(name)
+    pendingNameRef.current = name
+    setServerError(null)
+    setJoinStatus('joining')
+    joinStatusRef.current = 'joining'
     connRef.current?.join(name)
-    onDisplayNameAccepted?.(name, color)
   }
 
-  if (roomId && displayName === null) {
-    return <DisplayNamePrompt onSubmit={handleDisplayNameAccepted} />
+  if (roomId && joinStatus !== 'joined') {
+    return (
+      <DisplayNamePrompt
+        onSubmit={handleDisplayNameAccepted}
+        serverError={serverError}
+        submitting={joinStatus === 'joining'}
+        initialValue={pendingName ?? ''}
+      />
+    )
   }
 
   return (
