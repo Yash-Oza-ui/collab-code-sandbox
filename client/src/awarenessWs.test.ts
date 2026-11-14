@@ -758,4 +758,208 @@ describe('T-20 WebSocket connection and multi-client awareness synchronization',
     expect(connRegistered.docWs).not.toBeNull()
     connRegistered.destroy()
   })
+
+  it('queues join request when socket is CONNECTING and sends exactly one join message upon open', async () => {
+    const relay = new TestRelay()
+    const doc = new Y.Doc()
+    const awareness = createAwareness(doc)
+    let joinSentCount = 0
+
+    const conn = connectAwarenessWs({
+      roomId: 'test-single-join-room',
+      awareness,
+      syncWsUrl: 'ws://localhost:8081/ws/rooms',
+      sessionId: '10101010-1010-4010-8010-101010101010',
+      WebSocketClass: function (url: string) {
+        const client = relay.createClient(url)
+        const originalSend = client.send.bind(client)
+        client.send = (data: unknown) => {
+          if (typeof data === 'string') {
+            try {
+              const parsed = JSON.parse(data)
+              if (parsed.type === 'join') {
+                joinSentCount += 1
+              }
+            } catch {
+              // ignore
+            }
+          }
+          originalSend(data)
+        }
+        return client
+      } as unknown as typeof WebSocket,
+    })
+
+    // Immediately call join while socket is still CONNECTING
+    expect(conn.controlWs?.readyState).toBe(TestWebSocket.CONNECTING)
+    conn.join('Grace')
+
+    // Call join again while still CONNECTING (duplicate prevention)
+    conn.join('Grace')
+
+    await new Promise((r) => setTimeout(r, 40))
+
+    expect(joinSentCount).toBe(1)
+    expect(conn.controlWs?.readyState).toBe(TestWebSocket.OPEN)
+
+    conn.destroy()
+  })
+
+  it('deduplicates multiple join calls while handshake is active', async () => {
+    const relay = new TestRelay()
+    relay.ignoreJoins = true // Keep handshake in flight
+    const doc = new Y.Doc()
+    const awareness = createAwareness(doc)
+    let joinSentCount = 0
+
+    const conn = connectAwarenessWs({
+      roomId: 'test-dedup-active-room',
+      awareness,
+      joinTimeoutMs: 200,
+      syncWsUrl: 'ws://localhost:8081/ws/rooms',
+      sessionId: '20202020-2020-4020-8020-202020202020',
+      WebSocketClass: function (url: string) {
+        const client = relay.createClient(url)
+        const originalSend = client.send.bind(client)
+        client.send = (data: unknown) => {
+          if (typeof data === 'string') {
+            try {
+              const parsed = JSON.parse(data)
+              if (parsed.type === 'join') {
+                joinSentCount += 1
+              }
+            } catch {
+              // ignore
+            }
+          }
+          originalSend(data)
+        }
+        return client
+      } as unknown as typeof WebSocket,
+    })
+
+    // Wait until socket is open
+    await new Promise((r) => setTimeout(r, 20))
+    expect(conn.controlWs?.readyState).toBe(TestWebSocket.OPEN)
+
+    // Call join multiple times while waiting for server response
+    conn.join('Heidi')
+    conn.join('Heidi')
+    conn.join('Heidi')
+
+    await new Promise((r) => setTimeout(r, 20))
+
+    // Exactly one join was sent over WebSocket
+    expect(joinSentCount).toBe(1)
+
+    conn.destroy()
+  })
+
+  it('closes and nulls old socket on timeout, and creates a fresh WebSocket connection on retry', async () => {
+    const relay = new TestRelay()
+    relay.ignoreJoins = true // Drops initial attempt
+    const doc = new Y.Doc()
+    const awareness = createAwareness(doc)
+    let timeoutFired = false
+    let joinedFired = false
+
+    const conn = connectAwarenessWs({
+      roomId: 'test-fresh-retry-room',
+      awareness,
+      joinTimeoutMs: 35,
+      syncWsUrl: 'ws://localhost:8081/ws/rooms',
+      sessionId: '30303030-3030-4030-8030-303030303030',
+      WebSocketClass: function (url: string) {
+        return relay.createClient(url)
+      } as unknown as typeof WebSocket,
+      onJoinTimeout: () => {
+        timeoutFired = true
+      },
+      onJoined: () => {
+        joinedFired = true
+      },
+    })
+
+    await new Promise((r) => setTimeout(r, 10))
+    const firstSocket = conn.controlWs as unknown as TestWebSocket
+    expect(firstSocket).not.toBeNull()
+
+    // Trigger initial join
+    conn.join('Ivan')
+
+    // Wait for timeout
+    await new Promise((r) => setTimeout(r, 60))
+    expect(timeoutFired).toBe(true)
+
+    // Previous socket was closed and nulled
+    expect(firstSocket.readyState).toBe(TestWebSocket.CLOSED)
+    expect(conn.controlWs).toBeNull()
+
+    // Server is now responsive
+    relay.ignoreJoins = false
+
+    // Retry join
+    conn.join('Ivan')
+
+    const secondSocket = conn.controlWs as unknown as TestWebSocket
+    expect(secondSocket).not.toBeNull()
+    expect(secondSocket).not.toBe(firstSocket) // Fresh instance!
+
+    await new Promise((r) => setTimeout(r, 40))
+    expect(joinedFired).toBe(true)
+    expect(secondSocket.readyState).toBe(TestWebSocket.OPEN)
+
+    conn.destroy()
+  })
+
+  it('ignores late server responses from expired generation after timeout', async () => {
+    const relay = new TestRelay()
+    relay.ignoreJoins = true
+    const doc = new Y.Doc()
+    const awareness = createAwareness(doc)
+    let timeoutFired = false
+    let lateJoinedCallbackInvoked = false
+
+    const conn = connectAwarenessWs({
+      roomId: 'test-late-response-room',
+      awareness,
+      joinTimeoutMs: 25,
+      syncWsUrl: 'ws://localhost:8081/ws/rooms',
+      sessionId: '40404040-4040-4040-8040-404040404040',
+      WebSocketClass: function (url: string) {
+        return relay.createClient(url)
+      } as unknown as typeof WebSocket,
+      onJoinTimeout: () => {
+        timeoutFired = true
+      },
+      onJoined: () => {
+        lateJoinedCallbackInvoked = true
+      },
+    })
+
+    await new Promise((r) => setTimeout(r, 10))
+    const staleSocket = conn.controlWs as unknown as TestWebSocket
+    conn.join('Judy')
+
+    // Wait for timeout to fire
+    await new Promise((r) => setTimeout(r, 50))
+    expect(timeoutFired).toBe(true)
+
+    // Simulate late response from server arriving on old socket after timeout
+    staleSocket.receiveText(
+      JSON.stringify({
+        type: 'joined',
+        member_id: '40404040-4040-4040-8040-404040404040',
+        role: 'Guest',
+        mode: 'pair',
+        permissions: { can_edit: true, can_run: true },
+      }),
+    )
+
+    // The late response must NOT invoke onJoined or alter state
+    expect(lateJoinedCallbackInvoked).toBe(false)
+    expect(conn.docWs).toBeNull()
+
+    conn.destroy()
+  })
 })

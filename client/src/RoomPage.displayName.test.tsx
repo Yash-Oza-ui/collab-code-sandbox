@@ -852,4 +852,68 @@ describe('RoomPage display-name and colour presence join lifecycle', () => {
     expect(docErrorBadge).not.toBeNull()
     expect(docErrorBadge?.textContent).toContain('4405')
   })
+
+  it('ignores late server response after timeout without mounting editor or corrupting state', async () => {
+    let capturedClient: RelaySocket | null = null
+    relay.ignoreJoins = true
+
+    const RelayClass = createRelaySocketClass(relay)
+    const WebSocketClass = function (url: string) {
+      const client = new RelayClass(url) as unknown as RelaySocket
+      if (!url.includes('/docs/')) {
+        capturedClient = client
+      }
+      return client as unknown as WebSocket
+    } as unknown as typeof WebSocket
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    root = createRoot(container)
+
+    await act(async () => {
+      root?.render(
+        <RoomPage
+          wsOptions={{
+            WebSocketClass,
+            sessionId: '90000000-0000-4000-8000-000000000009',
+            joinTimeoutMs: 35,
+          }}
+        />,
+      )
+    })
+
+    const input = container.querySelector<HTMLInputElement>('#display-name')!
+    const form = container.querySelector<HTMLFormElement>('form')!
+    await act(async () => {
+      input.value = 'Frank'
+      form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+    })
+
+    // Wait for timeout to fire
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 60))
+    })
+
+    // Timeout alert is shown, editor is hidden
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain('Join request timed out')
+    expect(container.querySelector('[data-testid="mock-monaco-editor"]')).toBeNull()
+
+    // Late joined message arrives on the stale socket
+    await act(async () => {
+      capturedClient?.receiveText(
+        JSON.stringify({
+          type: 'joined',
+          member_id: '90000000-0000-4000-8000-000000000009',
+          role: 'Guest',
+          mode: 'pair',
+          permissions: { can_edit: true, can_run: true },
+        }),
+      )
+    })
+
+    // Editor MUST remain hidden and prompt still accessible
+    expect(container.querySelector('[data-testid="mock-monaco-editor"]')).toBeNull()
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain('Join request timed out')
+    expect(container.querySelector<HTMLButtonElement>('button')?.disabled).toBe(false)
+  })
 })

@@ -311,7 +311,9 @@ export function connectAwarenessWs(
   let controlWs: WebSocket | null = null
   let docWs: WebSocket | null = null
   let isDestroyed = false
+  let activeGeneration = 0
   let pendingJoin: { name: string; token?: string } | null = null
+  let activeHandshake: { name: string; token?: string } | null = null
   let joinTimer: ReturnType<typeof setTimeout> | null = null
 
   const clearJoinTimer = () => {
@@ -321,19 +323,52 @@ export function connectAwarenessWs(
     }
   }
 
-  const startJoinTimer = () => {
+  const handleTimeout = (timedOutGen: number) => {
+    if (isDestroyed || timedOutGen !== activeGeneration) return
+
+    // 1. Invalidate current attempt so late responses are ignored
+    activeGeneration += 1
+
+    // 2. Clear timer and pending state
+    clearJoinTimer()
+    pendingJoin = null
+    activeHandshake = null
+
+    // 3. Cleanly close previous control socket
+    if (controlWs) {
+      const oldWs = controlWs
+      controlWs = null
+      try {
+        oldWs.onopen = null
+        oldWs.onmessage = null
+        oldWs.onerror = null
+        oldWs.onclose = null
+        if (oldWs.readyState === WS_OPEN || oldWs.readyState === WS_CONNECTING) {
+          oldWs.close(1000, 'Join timeout')
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    // 4. Notify timeout callback
+    onJoinTimeout?.()
+  }
+
+  const startJoinTimer = (gen: number) => {
     clearJoinTimer()
     if (joinTimeoutMs > 0) {
       joinTimer = setTimeout(() => {
-        if (isDestroyed) return
-        onJoinTimeout?.()
+        if (isDestroyed || gen !== activeGeneration) return
+        handleTimeout(gen)
       }, joinTimeoutMs)
     }
   }
 
-  const sendJoin = (name: string, token?: string) => {
-    if (controlWs && controlWs.readyState === WS_OPEN) {
-      startJoinTimer()
+  const sendJoin = (ws: WebSocket, name: string, gen: number, token?: string) => {
+    if (isDestroyed || gen !== activeGeneration) return
+    if (ws.readyState === WS_OPEN) {
+      activeHandshake = { name, token }
       const payload: Record<string, string> = {
         type: 'join',
         display_name: name,
@@ -341,7 +376,13 @@ export function connectAwarenessWs(
       if (token) {
         payload.owner_token = token
       }
-      controlWs.send(JSON.stringify(payload))
+      try {
+        startJoinTimer(gen)
+        ws.send(JSON.stringify(payload))
+      } catch {
+        clearJoinTimer()
+        activeHandshake = null
+      }
     }
   }
 
@@ -464,27 +505,40 @@ export function connectAwarenessWs(
 
   const initControlSocket = (): WebSocket | null => {
     if (isDestroyed) return null
+
+    activeGeneration += 1
+    const gen = activeGeneration
+    clearJoinTimer()
+
     const controlUrl = buildControlWebSocketUrl(syncWsUrl, roomId, sessionId)
     const ws = new WebSocketClass(controlUrl)
 
     ws.onopen = () => {
+      if (isDestroyed || gen !== activeGeneration) return
       if (pendingJoin) {
-        sendJoin(pendingJoin.name, pendingJoin.token)
+        const { name, token } = pendingJoin
+        pendingJoin = null
+        sendJoin(ws, name, gen, token)
       } else if (displayName) {
-        sendJoin(displayName, ownerToken)
+        sendJoin(ws, displayName, gen, ownerToken)
       }
     }
 
     ws.onmessage = (event: MessageEvent) => {
+      if (isDestroyed || gen !== activeGeneration) return
       if (typeof event.data === 'string') {
         try {
           const msg = JSON.parse(event.data) as { type?: string }
           if (msg.type === 'joined') {
             clearJoinTimer()
+            pendingJoin = null
+            activeHandshake = null
             onJoined?.(msg as JoinedMessage)
             void openDocumentSocket(msg as JoinedMessage)
           } else if (msg.type === 'join-refused') {
             clearJoinTimer()
+            pendingJoin = null
+            activeHandshake = null
             onJoinRefused?.(msg as JoinRefusedMessage)
           } else if (msg.type === 'roster') {
             onRoster?.(msg as RosterMessage)
@@ -496,12 +550,21 @@ export function connectAwarenessWs(
     }
 
     ws.onerror = (event: Event) => {
+      if (isDestroyed || gen !== activeGeneration) return
       clearJoinTimer()
+      pendingJoin = null
+      activeHandshake = null
       onError?.(event)
     }
 
     ws.onclose = (event: CloseEvent) => {
+      if (isDestroyed || gen !== activeGeneration) return
       clearJoinTimer()
+      pendingJoin = null
+      activeHandshake = null
+      if (controlWs === ws) {
+        controlWs = null
+      }
       onClose?.(event)
     }
 
@@ -512,39 +575,38 @@ export function connectAwarenessWs(
 
   const join = (name: string, token?: string) => {
     if (isDestroyed) return
-    pendingJoin = { name, token }
+
+    // Prevent duplicate join attempts while a request is already queued or active
+    if (activeHandshake) {
+      return
+    }
+    activeHandshake = { name, token }
 
     const activeControlWs = controlWs
     if (!activeControlWs || activeControlWs.readyState === WS_CLOSED || activeControlWs.readyState === WS_CLOSING) {
+      // Reconnect with a fresh WebSocket attempt
+      pendingJoin = { name, token }
       controlWs = initControlSocket()
-      startJoinTimer()
+      return
+    }
+
+    if (activeControlWs.readyState === WS_CONNECTING) {
+      // Queue request: ws.onopen will send it exactly once without duplicate listeners
+      pendingJoin = { name, token }
       return
     }
 
     if (activeControlWs.readyState === WS_OPEN) {
-      sendJoin(name, token)
-    } else if (typeof activeControlWs.addEventListener === 'function') {
-      startJoinTimer()
-      activeControlWs.addEventListener(
-        'open',
-        () => {
-          sendJoin(name, token)
-        },
-        { once: true },
-      )
-    } else {
-      startJoinTimer()
-      const prevOnOpen = activeControlWs.onopen
-      activeControlWs.onopen = (ev: Event) => {
-        prevOnOpen?.call(activeControlWs, ev)
-        sendJoin(name, token)
-      }
+      pendingJoin = null
+      sendJoin(activeControlWs, name, activeGeneration, token)
     }
   }
 
   const destroy = () => {
     isDestroyed = true
+    activeGeneration += 1
     pendingJoin = null
+    activeHandshake = null
     clearJoinTimer()
     if (onDocAwarenessUpdate) {
       awareness.off('update', onDocAwarenessUpdate)
@@ -553,6 +615,7 @@ export function connectAwarenessWs(
 
     if (docWs) {
       const activeDocWs = docWs
+      docWs = null
       if (activeDocWs.readyState === WS_OPEN) {
         try {
           removeAwarenessStates(awareness, [awareness.clientID], activeDocWs)
@@ -564,14 +627,22 @@ export function connectAwarenessWs(
       } else if (activeDocWs.readyState === WS_CONNECTING) {
         activeDocWs.close()
       }
-      docWs = null
     }
 
     if (controlWs) {
-      if (controlWs.readyState === WS_OPEN || controlWs.readyState === WS_CONNECTING) {
-        controlWs.close()
-      }
+      const activeControlWs = controlWs
       controlWs = null
+      try {
+        activeControlWs.onopen = null
+        activeControlWs.onmessage = null
+        activeControlWs.onerror = null
+        activeControlWs.onclose = null
+        if (activeControlWs.readyState === WS_OPEN || activeControlWs.readyState === WS_CONNECTING) {
+          activeControlWs.close()
+        }
+      } catch {
+        // ignore
+      }
     }
   }
 
