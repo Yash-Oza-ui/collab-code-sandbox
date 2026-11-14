@@ -7,14 +7,18 @@ import {
   COLLAB_SESSION_ID_KEY,
   MESSAGE_AWARENESS,
   MESSAGE_QUERY_AWARENESS,
+  MESSAGE_SYNC,
   buildControlWebSocketUrl,
   buildDocumentWebSocketUrl,
   buildRoomWebSocketUrl,
   connectAwarenessWs,
   encodeAwarenessMessage,
+  encodeDocUpdateMessage,
   encodeQueryAwarenessMessage,
+  encodeSyncStep1Message,
   generateUuidV4,
   getCollabSessionId,
+  handleIncomingSyncFrame,
 } from './awarenessWs'
 import { USER_COLORS, pickUserColor } from './userColor'
 
@@ -1128,6 +1132,406 @@ describe('T-20 WebSocket connection and multi-client awareness synchronization',
       conn.destroy()
     } finally {
       vi.useRealTimers()
+    }
+  })
+
+  it('encodes sync step 1 message with MESSAGE_SYNC prefix (0x00)', () => {
+    const doc = new Y.Doc()
+    doc.getText('monaco').insert(0, 'init')
+    const frame = encodeSyncStep1Message(doc)
+    expect(frame[0]).toBe(MESSAGE_SYNC)
+    expect(frame.length).toBeGreaterThan(1)
+    doc.destroy()
+  })
+
+  it('encodes document update message with MESSAGE_SYNC prefix (0x00)', () => {
+    const doc = new Y.Doc()
+    let updateBytes: Uint8Array | null = null
+    doc.on('update', (u) => {
+      updateBytes = u
+    })
+    doc.getText('monaco').insert(0, 'test')
+    expect(updateBytes).not.toBeNull()
+    const frame = encodeDocUpdateMessage(updateBytes!)
+    expect(frame[0]).toBe(MESSAGE_SYNC)
+    expect(frame.length).toBeGreaterThan(1)
+    doc.destroy()
+  })
+
+  it('handles incoming sync frame, applying updates to local Y.Doc', () => {
+    const docA = new Y.Doc()
+    const docB = new Y.Doc()
+    try {
+      let updateFromA: Uint8Array | null = null
+      docA.on('update', (u) => {
+        updateFromA = u
+      })
+      docA.getText('monaco').insert(0, 'content from A')
+
+      const frame = encodeDocUpdateMessage(updateFromA!)
+      const reply = handleIncomingSyncFrame(docB, frame, 'test-origin')
+      expect(reply).toBeNull() // regular updates do not require a reply
+      expect(docB.getText('monaco').toString()).toBe('content from A')
+    } finally {
+      docA.destroy()
+      docB.destroy()
+    }
+  })
+
+  it('synchronizes document edits between two clients through the WebSocket relay (US-02 / FR2)', async () => {
+    const relay = new TestRelay()
+    const docA = new Y.Doc()
+    const docB = new Y.Doc()
+    const awarenessA = createAwareness(docA)
+    const awarenessB = createAwareness(docB)
+
+    try {
+      const connA = connectAwarenessWs({
+        roomId: 'test-sync-relay-room',
+        displayName: 'Alice',
+        doc: docA,
+        awareness: awarenessA,
+        syncWsUrl: 'ws://localhost:8081/ws/rooms',
+        sessionId: '11111111-1111-4111-8111-111111111111',
+        WebSocketClass: function (url: string) {
+          return relay.createClient(url)
+        } as unknown as typeof WebSocket,
+      })
+
+      const connB = connectAwarenessWs({
+        roomId: 'test-sync-relay-room',
+        displayName: 'Bob',
+        doc: docB,
+        awareness: awarenessB,
+        syncWsUrl: 'ws://localhost:8081/ws/rooms',
+        sessionId: '22222222-2222-4222-8222-222222222222',
+        WebSocketClass: function (url: string) {
+          return relay.createClient(url)
+        } as unknown as typeof WebSocket,
+      })
+
+      await new Promise((r) => setTimeout(r, 30))
+
+      // Client A types into editor text
+      docA.getText('monaco').insert(0, 'Hello from Alice')
+
+      await new Promise((r) => setTimeout(r, 30))
+
+      // Client B receives Alice's edits over the relay
+      expect(docB.getText('monaco').toString()).toBe('Hello from Alice')
+
+      // Client B replies
+      docB.getText('monaco').insert(16, ' and Bob!')
+
+      await new Promise((r) => setTimeout(r, 30))
+
+      // Both documents match exactly
+      expect(docA.getText('monaco').toString()).toBe('Hello from Alice and Bob!')
+      expect(docB.getText('monaco').toString()).toBe('Hello from Alice and Bob!')
+
+      connA.destroy()
+      connB.destroy()
+    } finally {
+      docA.destroy()
+      docB.destroy()
+    }
+  })
+
+  it('merges simultaneous edits from two clients without losing either contribution (US-02 / FR2)', async () => {
+    const relay = new TestRelay()
+    const docA = new Y.Doc()
+    const docB = new Y.Doc()
+    const awarenessA = createAwareness(docA)
+    const awarenessB = createAwareness(docB)
+
+    try {
+      const connA = connectAwarenessWs({
+        roomId: 'test-concurrent-merge-room',
+        displayName: 'Alice',
+        doc: docA,
+        awareness: awarenessA,
+        syncWsUrl: 'ws://localhost:8081/ws/rooms',
+        sessionId: '11111111-1111-4111-8111-111111111111',
+        WebSocketClass: function (url: string) {
+          return relay.createClient(url)
+        } as unknown as typeof WebSocket,
+      })
+
+      const connB = connectAwarenessWs({
+        roomId: 'test-concurrent-merge-room',
+        displayName: 'Bob',
+        doc: docB,
+        awareness: awarenessB,
+        syncWsUrl: 'ws://localhost:8081/ws/rooms',
+        sessionId: '22222222-2222-4222-8222-222222222222',
+        WebSocketClass: function (url: string) {
+          return relay.createClient(url)
+        } as unknown as typeof WebSocket,
+      })
+
+      await new Promise((r) => setTimeout(r, 30))
+
+      // Set initial base text
+      docA.getText('monaco').insert(0, 'SHARED_BASE')
+      await new Promise((r) => setTimeout(r, 30))
+      expect(docB.getText('monaco').toString()).toBe('SHARED_BASE')
+
+      // Both users type simultaneously at the same offset
+      docA.getText('monaco').insert(11, 'AAAA')
+      docB.getText('monaco').insert(11, 'BBBB')
+
+      await new Promise((r) => setTimeout(r, 50))
+
+      const textA = docA.getText('monaco').toString()
+      const textB = docB.getText('monaco').toString()
+
+      // Acceptance Criteria 2: Connected clients reach the same document state
+      expect(textA).toBe(textB)
+
+      // Acceptance Criteria 1: Neither user's edit was overwritten or lost
+      expect(textA).toContain('SHARED_BASE')
+      expect(textA).toContain('AAAA')
+      expect(textA).toContain('BBBB')
+
+      connA.destroy()
+      connB.destroy()
+    } finally {
+      docA.destroy()
+      docB.destroy()
+    }
+  })
+
+  it('merges simultaneous edits from three clients converging to identical text (US-02 manual test scenario)', async () => {
+    const relay = new TestRelay()
+    const docA = new Y.Doc()
+    const docB = new Y.Doc()
+    const docC = new Y.Doc()
+    const awarenessA = createAwareness(docA)
+    const awarenessB = createAwareness(docB)
+    const awarenessC = createAwareness(docC)
+
+    try {
+      const connA = connectAwarenessWs({
+        roomId: 'test-three-clients-room',
+        displayName: 'Alice',
+        doc: docA,
+        awareness: awarenessA,
+        syncWsUrl: 'ws://localhost:8081/ws/rooms',
+        sessionId: '11111111-1111-4111-8111-111111111111',
+        WebSocketClass: function (url: string) {
+          return relay.createClient(url)
+        } as unknown as typeof WebSocket,
+      })
+
+      const connB = connectAwarenessWs({
+        roomId: 'test-three-clients-room',
+        displayName: 'Bob',
+        doc: docB,
+        awareness: awarenessB,
+        syncWsUrl: 'ws://localhost:8081/ws/rooms',
+        sessionId: '22222222-2222-4222-8222-222222222222',
+        WebSocketClass: function (url: string) {
+          return relay.createClient(url)
+        } as unknown as typeof WebSocket,
+      })
+
+      const connC = connectAwarenessWs({
+        roomId: 'test-three-clients-room',
+        displayName: 'Charlie',
+        doc: docC,
+        awareness: awarenessC,
+        syncWsUrl: 'ws://localhost:8081/ws/rooms',
+        sessionId: '33333333-3333-4333-8333-333333333333',
+        WebSocketClass: function (url: string) {
+          return relay.createClient(url)
+        } as unknown as typeof WebSocket,
+      })
+
+      await new Promise((r) => setTimeout(r, 40))
+
+      // 3 windows type simultaneously
+      docA.getText('monaco').insert(0, 'LINE_A\n')
+      docB.getText('monaco').insert(0, 'LINE_B\n')
+      docC.getText('monaco').insert(0, 'LINE_C\n')
+
+      await new Promise((r) => setTimeout(r, 60))
+
+      const textA = docA.getText('monaco').toString()
+      const textB = docB.getText('monaco').toString()
+      const textC = docC.getText('monaco').toString()
+
+      // All three converge to the same text
+      expect(textA).toBe(textB)
+      expect(textB).toBe(textC)
+
+      // All contributions preserved
+      expect(textA).toContain('LINE_A')
+      expect(textA).toContain('LINE_B')
+      expect(textA).toContain('LINE_C')
+
+      connA.destroy()
+      connB.destroy()
+      connC.destroy()
+    } finally {
+      docA.destroy()
+      docB.destroy()
+      docC.destroy()
+    }
+  })
+
+  it('preserves document isolation between different module IDs in Open mode (FR2 / T-17 V2.5)', async () => {
+    const relay = new TestRelay()
+    relay.roomModes.set('test-open-room', 'open')
+    relay.roomModules.set('test-open-room', new Set(['module_alpha', 'module_beta']))
+
+    const docAlpha = new Y.Doc()
+    const docBeta = new Y.Doc()
+    const awarenessAlpha = createAwareness(docAlpha)
+    const awarenessBeta = createAwareness(docBeta)
+
+    try {
+      const connAlpha = connectAwarenessWs({
+        roomId: 'test-open-room',
+        docId: 'module_alpha',
+        displayName: 'Alice',
+        doc: docAlpha,
+        awareness: awarenessAlpha,
+        syncWsUrl: 'ws://localhost:8081/ws/rooms',
+        sessionId: '11111111-1111-4111-8111-111111111111',
+        WebSocketClass: function (url: string) {
+          return relay.createClient(url)
+        } as unknown as typeof WebSocket,
+      })
+
+      const connBeta = connectAwarenessWs({
+        roomId: 'test-open-room',
+        docId: 'module_beta',
+        displayName: 'Bob',
+        doc: docBeta,
+        awareness: awarenessBeta,
+        syncWsUrl: 'ws://localhost:8081/ws/rooms',
+        sessionId: '22222222-2222-4222-8222-222222222222',
+        WebSocketClass: function (url: string) {
+          return relay.createClient(url)
+        } as unknown as typeof WebSocket,
+      })
+
+      await new Promise((r) => setTimeout(r, 30))
+
+      // User edits module_alpha
+      docAlpha.getText('monaco').insert(0, 'def alpha(): pass')
+
+      await new Promise((r) => setTimeout(r, 30))
+
+      // module_beta must NOT receive edits from module_alpha
+      expect(docAlpha.getText('monaco').toString()).toBe('def alpha(): pass')
+      expect(docBeta.getText('monaco').toString()).toBe('')
+
+      connAlpha.destroy()
+      connBeta.destroy()
+    } finally {
+      docAlpha.destroy()
+      docBeta.destroy()
+    }
+  })
+
+  it('preserves room isolation so edits in one room never affect another room (US-02 manual test scenario 6)', async () => {
+    const relay = new TestRelay()
+    const docRoom1 = new Y.Doc()
+    const docRoom2 = new Y.Doc()
+    const awarenessRoom1 = createAwareness(docRoom1)
+    const awarenessRoom2 = createAwareness(docRoom2)
+
+    try {
+      const conn1 = connectAwarenessWs({
+        roomId: 'room-isolation-1',
+        displayName: 'Alice',
+        doc: docRoom1,
+        awareness: awarenessRoom1,
+        syncWsUrl: 'ws://localhost:8081/ws/rooms',
+        sessionId: '11111111-1111-4111-8111-111111111111',
+        WebSocketClass: function (url: string) {
+          return relay.createClient(url)
+        } as unknown as typeof WebSocket,
+      })
+
+      const conn2 = connectAwarenessWs({
+        roomId: 'room-isolation-2',
+        displayName: 'Bob',
+        doc: docRoom2,
+        awareness: awarenessRoom2,
+        syncWsUrl: 'ws://localhost:8081/ws/rooms',
+        sessionId: '22222222-2222-4222-8222-222222222222',
+        WebSocketClass: function (url: string) {
+          return relay.createClient(url)
+        } as unknown as typeof WebSocket,
+      })
+
+      await new Promise((r) => setTimeout(r, 30))
+
+      docRoom1.getText('monaco').insert(0, 'SECRET_IN_ROOM_1')
+
+      await new Promise((r) => setTimeout(r, 30))
+
+      expect(docRoom1.getText('monaco').toString()).toBe('SECRET_IN_ROOM_1')
+      expect(docRoom2.getText('monaco').toString()).toBe('')
+
+      conn1.destroy()
+      conn2.destroy()
+    } finally {
+      docRoom1.destroy()
+      docRoom2.destroy()
+    }
+  })
+
+  it('allows a newly joining client to catch up on the existing document state via syncStep1', async () => {
+    const relay = new TestRelay()
+    const docA = new Y.Doc()
+    const docB = new Y.Doc()
+    const awarenessA = createAwareness(docA)
+    const awarenessB = createAwareness(docB)
+
+    try {
+      const connA = connectAwarenessWs({
+        roomId: 'test-late-joiner-room',
+        displayName: 'Alice',
+        doc: docA,
+        awareness: awarenessA,
+        syncWsUrl: 'ws://localhost:8081/ws/rooms',
+        sessionId: '11111111-1111-4111-8111-111111111111',
+        WebSocketClass: function (url: string) {
+          return relay.createClient(url)
+        } as unknown as typeof WebSocket,
+      })
+
+      await new Promise((r) => setTimeout(r, 30))
+
+      // Alice creates initial content before Bob joins
+      docA.getText('monaco').insert(0, 'Pre-existing document content')
+
+      // Bob joins late with an empty document
+      const connB = connectAwarenessWs({
+        roomId: 'test-late-joiner-room',
+        displayName: 'Bob',
+        doc: docB,
+        awareness: awarenessB,
+        syncWsUrl: 'ws://localhost:8081/ws/rooms',
+        sessionId: '22222222-2222-4222-8222-222222222222',
+        WebSocketClass: function (url: string) {
+          return relay.createClient(url)
+        } as unknown as typeof WebSocket,
+      })
+
+      await new Promise((r) => setTimeout(r, 40))
+
+      // Bob's doc caught up to Alice's existing content
+      expect(docB.getText('monaco').toString()).toBe('Pre-existing document content')
+
+      connA.destroy()
+      connB.destroy()
+    } finally {
+      docA.destroy()
+      docB.destroy()
     }
   })
 })
