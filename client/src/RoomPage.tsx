@@ -230,6 +230,17 @@ export default function RoomPage(props: RoomPageProps = {}) {
             setDocError(`Presence connection closed (${event.code}). Remote presence synchronization stopped.`)
           }
         },
+        onEditRejected: (msg) => {
+          let reasonText = 'You do not have permission to edit this document.'
+          if (msg.reason === 'observer') {
+            reasonText = 'Observers cannot edit in this room.'
+          } else if (msg.reason === 'not_module_writer') {
+            reasonText = 'You are not a registered writer for this module.'
+          } else if (msg.reason === 'no_edit_access') {
+            reasonText = 'You do not have edit access in this Pair room.'
+          }
+          setDocError(reasonText)
+        },
       })
       connRef.current = conn
       wsCleanup = () => {
