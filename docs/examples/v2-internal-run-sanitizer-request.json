@@ -1,0 +1,11 @@
+{
+  "request_id": "5a6b7c8d-9e0f-1a2b-3c4d-5e6f7a8b9c0d",
+  "room_id": "Zq8-Lw2Ef6Th0Yx4Rn7JbA",
+  "purpose": "sanitizer",
+  "language": "cpp",
+  "code": "#include <vector>\nint main() {\n    std::vector<int> v = {1, 2, 3};\n    return v[5];\n}",
+  "sanitizers": [
+    "address",
+    "undefined"
+  ]
+}

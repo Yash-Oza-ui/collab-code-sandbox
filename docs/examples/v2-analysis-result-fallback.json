@@ -1,0 +1,29 @@
+{
+  "type": "analysis-result",
+  "request_id": "7a3e2b10-6c5d-4f8a-9e12-3456789abcde",
+  "analysis_id": "8b4f3c21-7d6e-4a9b-0f23-456789abcdef",
+  "room_id": "Zq8-Lw2Ef6Th0Yx4Rn7JbA",
+  "task": "complexity",
+  "status": "fallback",
+  "ai_step": {
+    "status": "skipped",
+    "error_code": "CONSENT_MISSING"
+  },
+  "result": {
+    "growth_rate": 1.99,
+    "estimated_complexity": "O(n^2)",
+    "r2_score": 0.999,
+    "projected_timeout_input_size": 6700,
+    "slow_patterns": [
+      {
+        "pattern": "nested_loops",
+        "line": 4,
+        "message": "Nested loop detected at line 4: potential polynomial time complexity O(n^2)."
+      }
+    ],
+    "suggested_fix": null,
+    "verified": false,
+    "verified_speedup_pct": null
+  },
+  "message": "AI analysis skipped: user consent required. Returning empirical measurements and rule findings."
+}

@@ -1,0 +1,17 @@
+{
+  "request_id": "7a3e2b10-6c5d-4f8a-9e12-3456789abcde",
+  "room_id": "Zq8-Lw2Ef6Th0Yx4Rn7JbA",
+  "task": "complexity",
+  "language": "python",
+  "consent": true,
+  "source": {
+    "kind": "inline",
+    "files": [
+      {
+        "name": "main.py",
+        "content": "def find_duplicates(arr):\n    dups = []\n    for i in range(len(arr)):\n        for j in range(i + 1, len(arr)):\n            if arr[i] == arr[j]:\n                dups.append(arr[i])\n    return dups"
+      }
+    ],
+    "entry": "main.py"
+  }
+}

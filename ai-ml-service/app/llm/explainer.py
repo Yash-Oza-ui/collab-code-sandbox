@@ -1,7 +1,7 @@
-"""LLM-backed failure explainer logic (FR13.1, T-16, US-17).
+"""LLM-backed failure explainer logic (FR13.1, T-16, US-17, US-76).
 
 Handles LLM communication, consent gating, retry/timeout handling, response normalization,
-and programmatic sentence limit enforcement.
+programmatic sentence limit enforcement, and relevant code section extraction (FR40.2).
 """
 
 import logging
@@ -17,7 +17,9 @@ from app.llm.client import (
     call_llm_with_consent,
     get_default_llm_client,
 )
+from app.config import settings
 from app.llm.prompts import build_explanation_prompt
+from app.section import extract_error_line_from_stderr, extract_relevant_section
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +70,7 @@ async def call_llm_api(
     base_url: Optional[str] = None,
     timeout_seconds: Optional[float] = None,
     client: Optional[LLMClient] = None,
+    room_id: Optional[str] = None,
 ) -> str:
     """Call external LLM API routed through the central consent gate (FR12.2, FR35, US-17)."""
     return await call_llm_with_consent(
@@ -79,6 +82,7 @@ async def call_llm_api(
         model=model,
         base_url=base_url,
         timeout_seconds=timeout_seconds,
+        room_id=room_id,
     )
 
 
@@ -96,10 +100,15 @@ async def generate_explanation(
     api_key: Optional[str] = None,
     model: Optional[str] = None,
     llm_client: Optional[LLMClient] = None,
+    error_line: Optional[int] = None,
+    function_name: Optional[str] = None,
+    pre_sliced: bool = False,
+    room_id: Optional[str] = None,
 ) -> str:
-    """Generate a 3-sentence plain prose failure explanation using LLM.
+    """Generate a 3-sentence plain prose failure explanation using LLM (FR13.1, FR40.2, US-76).
 
-    Privacy & Consent compliance:
+    Privacy & Data minimization compliance:
+    - FR40.2, US-76: Sends ONLY the relevant code section to external AI, never the full file.
     - FR12.2, FR35: If consent is missing/false or ai_enabled is missing/false, fails immediately at the gate without outbound calls.
     - NFR8.2: Never logs raw code, stderr, or prompts.
     """
@@ -114,6 +123,27 @@ async def generate_explanation(
         oom_killed,
     )
 
+    # 1. Extract only the relevant code section (FR40.2, US-76)
+    if pre_sliced:
+        # Caller supplied an already-localized code_snippet (e.g. Task 4 crash explanation).
+        # Avoid re-windowing it with a full-file error_line when it already fits within SECTION_MAX_LINES.
+        code_lines = code.splitlines() if code else []
+        if len(code_lines) <= settings.SECTION_MAX_LINES:
+            relevant_code = code
+        else:
+            relevant_code = "\n".join(code_lines[: settings.SECTION_MAX_LINES])
+    else:
+        target_error_line = error_line
+        if target_error_line is None and stderr:
+            target_error_line = extract_error_line_from_stderr(stderr, language=language)
+
+        relevant_code = extract_relevant_section(
+            code=code,
+            language=language,
+            function_name=function_name,
+            error_line=target_error_line,
+        )
+
     prompt = build_explanation_prompt(
         language=language,
         failure_kind=failure_kind,
@@ -121,7 +151,7 @@ async def generate_explanation(
         stderr=stderr,
         timed_out=timed_out,
         oom_killed=oom_killed,
-        code=code,
+        code=relevant_code,
     )
 
     raw_output = await call_llm_with_consent(
@@ -131,6 +161,7 @@ async def generate_explanation(
         client=llm_client,
         api_key=api_key,
         model=model,
+        room_id=room_id,
     )
 
     explanation = enforce_sentence_limit(raw_output, max_sentences=3)

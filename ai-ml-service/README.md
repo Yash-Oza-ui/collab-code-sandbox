@@ -166,3 +166,86 @@ python scripts/evaluate_baseline.py --test-data models/test_set.csv
 ### Sanity Check & Reproducibility
 - **Directional Sanity Check:** Evaluated via `tests/test_evaluation.py`. A clearly anomalous row (e.g., wall-clock timeout kill, memory spike > 115 MB, or output flooding > 900 KB) scores strictly higher than a typical quick execution.
 - **Reproducibility:** Two runs with the same random seed (`--seed 42`) yield identical model parameters, test splits, and evaluation metrics.
+
+
+## Relevant Code Section Extraction (US-76, FR40.2, NFR8.2)
+
+To satisfy student privacy and data minimization requirements, calls to external AI services send only the code section relevant to the request—such as the target function or a small bounded section around a reported error line—and **never the whole file**.
+
+### Supported Languages & Extraction Mechanics (DR1)
+
+Function body extraction is implemented in `app.section.extract_relevant_section` across all five supported languages:
+
+1. **Python (`python`):**
+   - AST-based parsing using `ast.parse` to locate `FunctionDef` and `AsyncFunctionDef` line boundaries (`lineno` through `end_lineno`).
+   - Fallback to indentation-based line scanning if user code contains syntax errors.
+2. **C++ (`cpp`):**
+   - Regex-based function signature recognition (handling `inline`, `static`, `virtual`, `constexpr`, qualifiers, and template returns).
+   - String- and comment-aware brace matching depth counters to detect the exact closing brace.
+3. **C (`c`):**
+   - Signature detection for standard C function definitions.
+   - String- and comment-aware brace matching.
+4. **Java (`java`):**
+   - Method signature detection supporting annotations (`@Override`), visibility and concurrency modifiers (`public`, `private`, `static`, `synchronized`, `final`), generics (`<T>`), and `throws` clauses.
+   - String- and comment-aware brace matching.
+5. **JavaScript (`javascript`):**
+   - Matches `function` declarations, `async function`, arrow functions assigned to `const`/`let`/`var`, and class/object method definitions.
+   - String- and comment-aware brace matching.
+
+### Error Line Windows & Diagnostic Parsing
+
+When an error line is provided or detected:
+- The section extractor extracts a bounded window of lines centered on the error line (default: `10` lines before and `10` lines after).
+- Edge cases (e.g. line 1, EOF, or negative/out-of-bounds indices) are clamped safely without crashing.
+- Automatic stderr diagnostic parsing (`app.section.extract_error_line_from_stderr`) detects error line numbers from:
+  - AddressSanitizer and UBSan reports (`/workspace/solution.cpp:14`).
+  - Python tracebacks (`File "main.py", line 14`).
+  - GCC and Clang compiler errors (`solution.c:14:5: error:`).
+  - Java runtime stack traces (`(Solution.java:14)`).
+  - Node.js stack traces (`at Solution.js:14:5`).
+
+### Configurable Bounds & Fallback Strategy
+
+The extraction limits are named configuration parameters in `app.config.Settings`:
+
+| Setting | Environment Variable | Default | Purpose |
+|---|---|---|---|
+| `SECTION_WINDOW_LINES` | `SECTION_WINDOW_LINES` | `10` | Number of lines included before and after the reported error line |
+| `SECTION_MAX_LINES` | `SECTION_MAX_LINES` | `30` | Upper limit on total lines; sections exceeding this are truncated |
+| `SECTION_FALLBACK_LINES` | `SECTION_FALLBACK_LINES` | `20` | Bounded line count used when no function name or error line is found |
+
+**Fallback Guarantee:** If no target function is found or no error line can be resolved, the extractor sends a small bounded snippet (`SECTION_FALLBACK_LINES`, default 20 lines) and **never falls back to the full file**.
+
+## AI Usage Counters and Telemetry (US-75, FR40.1, T-18 v2)
+
+### Storage Decision: In-Memory Storage
+We selected **thread-safe in-memory storage** (`UsageTracker` protected by `threading.Lock`) for usage counters over SQLite for the following architectural reasons:
+1. **Low Latency & High Concurrency:** Eliminates disk I/O latency and SQLite locking contention on asynchronous analysis pipelines.
+2. **Room Lifecycle Management (US-56, FR32):** In-memory dictionaries enable instantaneous per-room eviction via `clear_room(room_id)` when a room is deleted or closed, leaving overall platform telemetry intact.
+3. **Data Minimization & Privacy (NFR8.2):** Guarantees zero persistence of raw execution strings, prompts, or code on disk; counters store primitive integers, room identifiers, and dollar spend values only.
+
+### Counter Interface (`app.counters`)
+- `record_model_call(room_id: str, tokens: int = 0)`: Records an outbound model call and token usage extracted directly from upstream LLM provider responses (Gemini `usageMetadata.totalTokenCount` or OpenAI `usage.total_tokens`). Tokens are never estimated from user-written code.
+- `record_cache_hit(room_id: str)`: Records a cache hit when a request matches a normalized SHA-256 code key.
+- `record_fallback(room_id: str)`: Records an AI fallback or skipped step activation (`CONSENT_MISSING`, `AI_DISABLED`, `PROVIDER_TIMEOUT`, `RATE_LIMITED_PROVIDER`, `PROVIDER_ERROR`).
+- `clear_room(room_id: str) -> bool`: Removes room-scoped counter state.
+- `get_room_usage(room_id: str) -> dict`: Returns usage metrics for an individual room.
+- `get_total_usage() -> dict`: Returns overall aggregate metrics matching the T-18 v2 contract.
+
+### Telemetry Endpoints
+- `GET /v1/usage`: Returns aggregate platform counters:
+  ```json
+  {
+    "total_model_calls": 24,
+    "total_tokens_used": 8450,
+    "total_cache_hits": 41,
+    "total_fallback_activations": 2,
+    "monthly_spend_usd": 0.0296,
+    "monthly_budget_usd": 10.0,
+    "alert_80_percent_triggered": false,
+    "cost_cap_reached": false,
+    "rooms_tracked": 3
+  }
+  ```
+- `GET /v1/rooms/{room_id}/usage`: Returns metrics scoped to a specific room.
+- `DELETE /v1/rooms/{room_id}/state`: Clears room-scoped counters and cache entries when closed or deleted (US-56).
