@@ -1,5 +1,7 @@
 import * as decoding from 'lib0/decoding'
 import * as encoding from 'lib0/encoding'
+import * as syncProtocol from 'y-protocols/sync'
+import type * as Y from 'yjs'
 import {
   applyAwarenessUpdate,
   encodeAwarenessUpdate,
@@ -164,6 +166,57 @@ export function encodeQueryAwarenessMessage(): Uint8Array {
   return encoding.toUint8Array(encoder)
 }
 
+/**
+ * Encodes a Yjs sync step 1 message (MESSAGE_SYNC = 0, followed by syncStep1) (FR2 / US-02).
+ */
+export function encodeSyncStep1Message(doc: Y.Doc): Uint8Array {
+  const encoder = encoding.createEncoder()
+  encoding.writeVarUint(encoder, MESSAGE_SYNC)
+  syncProtocol.writeSyncStep1(encoder, doc)
+  return encoding.toUint8Array(encoder)
+}
+
+/**
+ * Encodes a Yjs document update message (MESSAGE_SYNC = 0, followed by update) (FR2 / US-02).
+ */
+export function encodeDocUpdateMessage(update: Uint8Array): Uint8Array {
+  const encoder = encoding.createEncoder()
+  encoding.writeVarUint(encoder, MESSAGE_SYNC)
+  syncProtocol.writeUpdate(encoder, update)
+  return encoding.toUint8Array(encoder)
+}
+
+/**
+ * Dispatches an incoming binary sync frame into the local Y.Doc instance and returns any reply (FR2 / US-02).
+ */
+export function handleIncomingSyncFrame(
+  doc: Y.Doc,
+  data: Uint8Array | ArrayBuffer,
+  origin: unknown,
+): Uint8Array | null {
+  const uint8 = data instanceof ArrayBuffer ? new Uint8Array(data) : data
+  if (!uint8 || uint8.length === 0) return null
+
+  const decoder = decoding.createDecoder(uint8)
+  const messageType = decoding.readVarUint(decoder)
+  if (messageType !== MESSAGE_SYNC) return null
+
+  const replyEncoder = encoding.createEncoder()
+  encoding.writeVarUint(replyEncoder, MESSAGE_SYNC)
+  const syncType = syncProtocol.readSyncMessage(decoder, replyEncoder, doc, origin)
+
+  if (syncType === syncProtocol.messageYjsSyncStep1) {
+    // When a peer requests our state (syncStep1), reply with syncStep2 AND send our syncStep1
+    // to establish a full two-way handshake over a stateless relay.
+    syncProtocol.writeSyncStep1(replyEncoder, doc)
+  }
+
+  if (encoding.length(replyEncoder) > 1) {
+    return encoding.toUint8Array(replyEncoder)
+  }
+  return null
+}
+
 type WebSocketSendData = Parameters<WebSocket['send']>[0]
 
 function sendBinary(
@@ -247,6 +300,10 @@ export interface ConnectAwarenessWsOptions {
   docId?: string
   resolveDocId?: (joined: JoinedMessage) => Promise<string | null> | string | null
   awareness: Awareness
+  /**
+   * Optional active Y.Doc instance to synchronize over the Document Socket (US-02 / FR2).
+   */
+  doc?: Y.Doc
   syncWsUrl?: string
   sessionId?: string
   WebSocketClass?: typeof WebSocket
@@ -285,6 +342,7 @@ export function connectAwarenessWs(
     docId = 'main',
     resolveDocId,
     awareness,
+    doc,
     syncWsUrl = getClientConfig().syncWsUrl,
     sessionId = getCollabSessionId(),
     WebSocketClass = typeof WebSocket !== 'undefined' ? WebSocket : undefined,
@@ -385,13 +443,14 @@ export function connectAwarenessWs(
     }
   }
 
-  // Document socket awareness update listener
+  // Document socket awareness & Yjs sync listeners
   let onDocAwarenessUpdate:
     | ((
         update: { added: number[]; updated: number[]; removed: number[] },
         origin: unknown,
       ) => void)
     | null = null
+  let onDocUpdate: ((update: Uint8Array, origin: unknown) => void) | null = null
 
   // 2. Open Document Socket upon receiving 'joined'
   const openDocumentSocket = async (joinedMsg?: JoinedMessage) => {
@@ -483,13 +542,28 @@ export function connectAwarenessWs(
       }
     }
 
+    if (doc) {
+      onDocUpdate = (update: Uint8Array, origin: unknown) => {
+        if (origin === docWs) return
+        if (docWs && docWs.readyState === WS_OPEN) {
+          sendBinary(docWs, encodeDocUpdateMessage(update))
+        }
+      }
+      doc.on('update', onDocUpdate)
+    }
+
     awareness.on('update', onDocAwarenessUpdate)
 
     docWs.onopen = () => {
-      // Contract Rule 6: query awareness from existing participants upon connecting
+      // 1. Send sync step 1 if doc is present (FR2 / US-02)
+      if (doc) {
+        sendBinary(docWs!, encodeSyncStep1Message(doc))
+      }
+
+      // 2. Contract Rule 6: query awareness from existing participants upon connecting
       sendBinary(docWs!, encodeQueryAwarenessMessage())
 
-      // Advertise local state if already present
+      // 3. Advertise local state if already present
       if (awareness.getLocalState() !== null) {
         sendBinary(docWs!, encodeAwarenessMessage(awareness, [awareness.clientID]))
       }
@@ -497,7 +571,22 @@ export function connectAwarenessWs(
 
     docWs.onmessage = (event: MessageEvent) => {
       if (event.data instanceof ArrayBuffer || event.data instanceof Uint8Array) {
-        handleIncomingAwarenessFrame(awareness, event.data, docWs!)
+        const uint8 = event.data instanceof ArrayBuffer ? new Uint8Array(event.data) : event.data
+        if (!uint8 || uint8.length === 0) return
+
+        const decoder = decoding.createDecoder(uint8)
+        const messageType = decoding.readVarUint(decoder)
+
+        if (messageType === MESSAGE_SYNC) {
+          if (doc && docWs) {
+            const reply = handleIncomingSyncFrame(doc, uint8, docWs)
+            if (reply && docWs.readyState === WS_OPEN) {
+              sendBinary(docWs, reply)
+            }
+          }
+        } else if (messageType === MESSAGE_AWARENESS || messageType === MESSAGE_QUERY_AWARENESS) {
+          handleIncomingAwarenessFrame(awareness, uint8, docWs!)
+        }
       }
     }
   }
@@ -617,6 +706,10 @@ export function connectAwarenessWs(
     if (onDocAwarenessUpdate) {
       awareness.off('update', onDocAwarenessUpdate)
       onDocAwarenessUpdate = null
+    }
+    if (doc && onDocUpdate) {
+      doc.off('update', onDocUpdate)
+      onDocUpdate = null
     }
 
     if (docWs) {
