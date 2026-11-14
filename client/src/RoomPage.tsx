@@ -139,11 +139,12 @@ export default function RoomPage(props: RoomPageProps = {}) {
 
     awareness.on('change', handleAwarenessChange)
 
-    // Connect awareness to room WebSocket relay if in a room (US-05 / T-20)
+    // Connect awareness and Yjs document sync to room WebSocket relay if in a room (US-02 / US-05 / T-20)
     let wsCleanup: (() => void) | undefined
     if (roomId) {
       const conn = connectAwarenessWs({
         roomId,
+        doc,
         docId: propDocId,
         resolveDocId,
         awareness,
