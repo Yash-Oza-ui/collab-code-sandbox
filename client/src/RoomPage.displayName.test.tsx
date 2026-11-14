@@ -1126,4 +1126,67 @@ describe('RoomPage display-name and colour presence join lifecycle', () => {
       containerB.remove()
     }
   })
+
+  it('displays permission refusal error when receiving edit-rejected message (US-02 / CR13)', async () => {
+    const relay = new T20Relay()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+
+    let clientWs: RelaySocket | null = null
+
+    try {
+      await act(async () => {
+        root.render(
+          <RoomPage
+            wsOptions={{
+              WebSocketClass: function (url: string) {
+                const s = new RelaySocket(url, relay, true)
+                if (url.includes('/ws/rooms/') && !url.includes('/docs/')) {
+                  clientWs = s
+                }
+                return s
+              } as unknown as typeof WebSocket,
+              sessionId: '77777777-7777-4777-8777-777777777777',
+            }}
+          />,
+        )
+      })
+
+      const input = container.querySelector<HTMLInputElement>('#display-name')!
+      const form = container.querySelector<HTMLFormElement>('form')!
+      await act(async () => {
+        input.value = 'GuestUser'
+        form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+      })
+
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 30))
+      })
+
+      // Editor is rendered
+      expect(container.querySelector('[data-testid="mock-monaco-editor"]')).not.toBeNull()
+
+      // Server sends edit-rejected on control socket
+      await act(async () => {
+        clientWs?.receiveText(
+          JSON.stringify({
+            type: 'edit-rejected',
+            doc_id: 'main',
+            reason: 'no_edit_access',
+          }),
+        )
+      })
+
+      // Room doc error badge is visible
+      const errorBadge = container.querySelector('[data-testid="room-doc-error"]')
+      expect(errorBadge).not.toBeNull()
+      expect(errorBadge?.textContent).toContain('You do not have edit access in this Pair room')
+    } finally {
+      await act(async () => {
+        root.unmount()
+      })
+      container.remove()
+    }
+  })
 })
