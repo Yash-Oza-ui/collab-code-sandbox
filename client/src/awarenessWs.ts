@@ -1,5 +1,7 @@
 import * as decoding from 'lib0/decoding'
 import * as encoding from 'lib0/encoding'
+import * as syncProtocol from 'y-protocols/sync'
+import type * as Y from 'yjs'
 import {
   applyAwarenessUpdate,
   encodeAwarenessUpdate,
@@ -164,6 +166,79 @@ export function encodeQueryAwarenessMessage(): Uint8Array {
   return encoding.toUint8Array(encoder)
 }
 
+/**
+ * Encodes a Yjs sync step 1 message (MESSAGE_SYNC = 0, followed by syncStep1) (FR2 / US-02).
+ */
+export function encodeSyncStep1Message(doc: Y.Doc): Uint8Array {
+  const encoder = encoding.createEncoder()
+  encoding.writeVarUint(encoder, MESSAGE_SYNC)
+  syncProtocol.writeSyncStep1(encoder, doc)
+  return encoding.toUint8Array(encoder)
+}
+
+/**
+ * Encodes a Yjs sync step 2 message (MESSAGE_SYNC = 0, followed by syncStep2) (FR2 / US-02).
+ */
+export function encodeSyncStep2Message(doc: Y.Doc): Uint8Array {
+  const encoder = encoding.createEncoder()
+  encoding.writeVarUint(encoder, MESSAGE_SYNC)
+  syncProtocol.writeSyncStep2(encoder, doc)
+  return encoding.toUint8Array(encoder)
+}
+
+/**
+ * Encodes a Yjs document update message (MESSAGE_SYNC = 0, followed by update) (FR2 / US-02).
+ */
+export function encodeDocUpdateMessage(update: Uint8Array): Uint8Array {
+  const encoder = encoding.createEncoder()
+  encoding.writeVarUint(encoder, MESSAGE_SYNC)
+  syncProtocol.writeUpdate(encoder, update)
+  return encoding.toUint8Array(encoder)
+}
+
+export interface HandleIncomingSyncFrameOptions {
+  replyWithReverseSyncStep1?: boolean
+}
+
+/**
+ * Dispatches an incoming binary sync frame into the local Y.Doc instance and returns any reply frames (FR2 / US-02).
+ * Implements an explicitly supported multi-message decoding loop to process concatenated sync messages cleanly.
+ */
+export function handleIncomingSyncFrame(
+  doc: Y.Doc,
+  data: Uint8Array | ArrayBuffer,
+  origin: unknown,
+  options?: HandleIncomingSyncFrameOptions,
+): Uint8Array[] {
+  const uint8 = data instanceof ArrayBuffer ? new Uint8Array(data) : data
+  if (!uint8 || uint8.length === 0) return []
+
+  const decoder = decoding.createDecoder(uint8)
+  const messageType = decoding.readVarUint(decoder)
+  if (messageType !== MESSAGE_SYNC) return []
+
+  const replies: Uint8Array[] = []
+  while (decoding.hasContent(decoder)) {
+    const replyEncoder = encoding.createEncoder()
+    encoding.writeVarUint(replyEncoder, MESSAGE_SYNC)
+    const syncType = syncProtocol.readSyncMessage(decoder, replyEncoder, doc, origin)
+
+    if (encoding.length(replyEncoder) > 1) {
+      replies.push(encoding.toUint8Array(replyEncoder))
+    }
+
+    if (syncType === syncProtocol.messageYjsSyncStep1 && options?.replyWithReverseSyncStep1) {
+      // Send reverse syncStep1 as its OWN distinct, correctly-prefixed MESSAGE_SYNC frame
+      const reverseEncoder = encoding.createEncoder()
+      encoding.writeVarUint(reverseEncoder, MESSAGE_SYNC)
+      syncProtocol.writeSyncStep1(reverseEncoder, doc)
+      replies.push(encoding.toUint8Array(reverseEncoder))
+    }
+  }
+
+  return replies
+}
+
 type WebSocketSendData = Parameters<WebSocket['send']>[0]
 
 function sendBinary(
@@ -240,6 +315,13 @@ export interface RosterMessage {
   [key: string]: unknown
 }
 
+export interface EditRejectedMessage {
+  type: 'edit-rejected'
+  doc_id?: string
+  reason?: string
+  [key: string]: unknown
+}
+
 export interface ConnectAwarenessWsOptions {
   roomId: string
   displayName?: string
@@ -247,6 +329,10 @@ export interface ConnectAwarenessWsOptions {
   docId?: string
   resolveDocId?: (joined: JoinedMessage) => Promise<string | null> | string | null
   awareness: Awareness
+  /**
+   * Optional active Y.Doc instance to synchronize over the Document Socket (US-02 / FR2).
+   */
+  doc?: Y.Doc
   syncWsUrl?: string
   sessionId?: string
   WebSocketClass?: typeof WebSocket
@@ -254,6 +340,7 @@ export interface ConnectAwarenessWsOptions {
   onJoined?: (msg: JoinedMessage) => void
   onJoinRefused?: (msg: JoinRefusedMessage) => void
   onRoster?: (msg: RosterMessage) => void
+  onEditRejected?: (msg: EditRejectedMessage) => void
   onError?: (event: Event) => void
   onClose?: (event: CloseEvent) => void
   onDocError?: (event: Event) => void
@@ -285,6 +372,7 @@ export function connectAwarenessWs(
     docId = 'main',
     resolveDocId,
     awareness,
+    doc,
     syncWsUrl = getClientConfig().syncWsUrl,
     sessionId = getCollabSessionId(),
     WebSocketClass = typeof WebSocket !== 'undefined' ? WebSocket : undefined,
@@ -292,6 +380,7 @@ export function connectAwarenessWs(
     onJoined,
     onJoinRefused,
     onRoster,
+    onEditRejected,
     onError,
     onClose,
     onDocError,
@@ -385,13 +474,14 @@ export function connectAwarenessWs(
     }
   }
 
-  // Document socket awareness update listener
+  // Document socket awareness & Yjs sync listeners
   let onDocAwarenessUpdate:
     | ((
         update: { added: number[]; updated: number[]; removed: number[] },
         origin: unknown,
       ) => void)
     | null = null
+  let onDocUpdate: ((update: Uint8Array, origin: unknown) => void) | null = null
 
   // 2. Open Document Socket upon receiving 'joined'
   const openDocumentSocket = async (joinedMsg?: JoinedMessage) => {
@@ -483,13 +573,31 @@ export function connectAwarenessWs(
       }
     }
 
+    if (doc) {
+      onDocUpdate = (update: Uint8Array, origin: unknown) => {
+        if (origin === docWs) return
+        if (docWs && docWs.readyState === WS_OPEN) {
+          sendBinary(docWs, encodeDocUpdateMessage(update))
+        }
+      }
+      doc.on('update', onDocUpdate)
+    }
+
     awareness.on('update', onDocAwarenessUpdate)
 
+    let hasSentReverseSync = false
+
     docWs.onopen = () => {
-      // Contract Rule 6: query awareness from existing participants upon connecting
+      // 1. Send sync step 1 and step 2 to exchange initial state bidirectionally (US-02 / FR2)
+      if (doc) {
+        sendBinary(docWs!, encodeSyncStep1Message(doc))
+        sendBinary(docWs!, encodeSyncStep2Message(doc))
+      }
+
+      // 2. Contract Rule 6: query awareness from existing participants upon connecting
       sendBinary(docWs!, encodeQueryAwarenessMessage())
 
-      // Advertise local state if already present
+      // 3. Advertise local state if already present
       if (awareness.getLocalState() !== null) {
         sendBinary(docWs!, encodeAwarenessMessage(awareness, [awareness.clientID]))
       }
@@ -497,7 +605,30 @@ export function connectAwarenessWs(
 
     docWs.onmessage = (event: MessageEvent) => {
       if (event.data instanceof ArrayBuffer || event.data instanceof Uint8Array) {
-        handleIncomingAwarenessFrame(awareness, event.data, docWs!)
+        const uint8 = event.data instanceof ArrayBuffer ? new Uint8Array(event.data) : event.data
+        if (!uint8 || uint8.length === 0) return
+
+        const decoder = decoding.createDecoder(uint8)
+        const messageType = decoding.readVarUint(decoder)
+
+        if (messageType === MESSAGE_SYNC) {
+          if (doc && docWs) {
+            const allowReverse = !hasSentReverseSync
+            const replies = handleIncomingSyncFrame(doc, uint8, docWs, {
+              replyWithReverseSyncStep1: allowReverse,
+            })
+            if (allowReverse && replies.length > 1) {
+              hasSentReverseSync = true
+            }
+            for (const reply of replies) {
+              if (docWs.readyState === WS_OPEN) {
+                sendBinary(docWs, reply)
+              }
+            }
+          }
+        } else if (messageType === MESSAGE_AWARENESS || messageType === MESSAGE_QUERY_AWARENESS) {
+          handleIncomingAwarenessFrame(awareness, uint8, docWs!)
+        }
       }
     }
   }
@@ -541,6 +672,8 @@ export function connectAwarenessWs(
             onJoinRefused?.(msg as JoinRefusedMessage)
           } else if (msg.type === 'roster') {
             onRoster?.(msg as RosterMessage)
+          } else if (msg.type === 'edit-rejected') {
+            onEditRejected?.(msg as EditRejectedMessage)
           }
         } catch {
           // ignore non-json control frames
@@ -617,6 +750,10 @@ export function connectAwarenessWs(
     if (onDocAwarenessUpdate) {
       awareness.off('update', onDocAwarenessUpdate)
       onDocAwarenessUpdate = null
+    }
+    if (doc && onDocUpdate) {
+      doc.off('update', onDocUpdate)
+      onDocUpdate = null
     }
 
     if (docWs) {
