@@ -16,9 +16,36 @@ body {
 }
 
 .room-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   padding: 8px 12px;
   border-bottom: 1px solid #ccc;
   font-family: ui-monospace, Consolas, monospace;
+}
+
+.room-header-separator {
+  color: #888;
+}
+
+.room-user-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border-radius: 9999px;
+  background: #f1f5f9;
+  border: 1px solid #e2e8f0;
+  font-size: 0.875rem;
+}
+
+.room-user-color-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  display: inline-block;
+  flex-shrink: 0;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.1);
 }
 
 .room-editor {
@@ -106,4 +133,29 @@ body {
 
 .display-name-card button:hover {
   background: #1d4ed8;
+}
+
+.create-room-body {
+  display: grid;
+  gap: 10px;
+}
+
+.create-room-actions {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+}
+
+.create-room-actions button {
+  margin-top: 0;
+}
+
+.create-room-actions a {
+  color: #2563eb;
+  font-weight: 600;
+}
+
+.display-name-card button:disabled {
+  opacity: 0.6;
+  cursor: default;
 }

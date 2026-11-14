@@ -1,4 +1,4 @@
-"""Central LLM client and universal consent gate (FR12, US-17).
+"""Central LLM client and universal consent gate (FR12, US-17, US-22).
 
 Enforces that NO code or prompt ever reaches an external AI service
 unless user consent is explicitly provided (consent == True).
@@ -11,6 +11,7 @@ from typing import Optional
 import httpx
 
 from app.config import settings
+from app.counters import record_model_call
 
 logger = logging.getLogger(__name__)
 
@@ -38,12 +39,15 @@ class LLMTimeoutError(LLMProviderError):
     def __init__(
         self,
         message: str = "Upstream LLM provider timed out while generating response.",
+        status_code: int = 504,
+        code: str = "PROVIDER_TIMEOUT",
+        retry_after_seconds: Optional[int] = None,
     ) -> None:
         super().__init__(
             message=message,
-            status_code=504,
-            code="PROVIDER_TIMEOUT",
-            retry_after_seconds=None,
+            status_code=status_code,
+            code=code,
+            retry_after_seconds=retry_after_seconds,
         )
 
 
@@ -53,12 +57,14 @@ class LLMRateLimitError(LLMProviderError):
     def __init__(
         self,
         message: str = "The AI provider returned HTTP 429 (rate limited).",
+        status_code: int = 429,
+        code: str = "RATE_LIMITED_PROVIDER",
         retry_after_seconds: Optional[int] = 30,
     ) -> None:
         super().__init__(
             message=message,
-            status_code=429,
-            code="RATE_LIMITED_PROVIDER",
+            status_code=status_code,
+            code=code,
             retry_after_seconds=retry_after_seconds,
         )
 
@@ -97,6 +103,23 @@ class AIDisabledError(Exception):
         self.retry_after_seconds = retry_after_seconds
 
 
+class RoomRateLimitedError(Exception):
+    """Raised when per-room hourly AI request quota is reached (NFR5.3, US-22, T-18 v2)."""
+
+    def __init__(
+        self,
+        message: str = "Room hourly AI request limit reached. Retry later.",
+        status_code: int = 429,
+        code: str = "ROOM_RATE_LIMITED",
+        retry_after_seconds: Optional[int] = 3600,
+    ) -> None:
+        super().__init__(message)
+        self.message = message
+        self.status_code = status_code
+        self.code = code
+        self.retry_after_seconds = retry_after_seconds
+
+
 class LLMClient:
     """Outbound HTTP client communicating with external LLM APIs (Gemini / OpenAI)."""
 
@@ -110,6 +133,7 @@ class LLMClient:
         model: Optional[str] = None,
         base_url: Optional[str] = None,
         timeout_seconds: Optional[float] = None,
+        room_id: Optional[str] = None,
     ) -> str:
         """Execute outbound HTTP call to LLM provider."""
         self.call_count += 1
@@ -195,21 +219,43 @@ class LLMClient:
 
         try:
             data = response.json()
+            tokens = 0
             if is_gemini:
-                candidates = data.get("candidates", [])
+                candidates = data.get("candidates") or []
                 if not candidates:
                     raise ValueError("No candidates returned from Gemini API")
-                parts = candidates[0].get("content", {}).get("parts", [])
+                content = candidates[0].get("content") or {}
+                parts = content.get("parts") or []
                 if not parts or "text" not in parts[0]:
                     raise ValueError("No text part in Gemini candidate content")
-                return parts[0]["text"]
+                usage_meta = data.get("usageMetadata") or {}
+                if not isinstance(usage_meta, dict):
+                    usage_meta = {}
+                tokens = int(usage_meta.get("totalTokenCount") or 0)
+                if not tokens:
+                    tokens = int(usage_meta.get("promptTokenCount") or 0) + int(
+                        usage_meta.get("candidatesTokenCount") or 0
+                    )
+                output_text = parts[0]["text"]
             else:
-                choices = data.get("choices", [])
+                choices = data.get("choices") or []
                 if not choices:
                     raise ValueError("No choices returned from LLM provider")
-                content = choices[0].get("message", {}).get("content", "")
-                return content
-        except (json.JSONDecodeError, KeyError, IndexError, ValueError) as exc:
+                message = choices[0].get("message") or {}
+                output_text = message.get("content") or ""
+                usage_meta = data.get("usage") or {}
+                if not isinstance(usage_meta, dict):
+                    usage_meta = {}
+                tokens = int(usage_meta.get("total_tokens") or 0)
+                if not tokens:
+                    tokens = int(usage_meta.get("prompt_tokens") or 0) + int(
+                        usage_meta.get("completion_tokens") or 0
+                    )
+
+            # Record model call with tokens extracted from provider response (FR40.1, US-75)
+            record_model_call(room_id=room_id, tokens=tokens)
+            return output_text
+        except (json.JSONDecodeError, KeyError, IndexError, ValueError, TypeError, AttributeError) as exc:
             logger.error("Failed to parse LLM provider response: %s", exc)
             raise LLMProviderError(
                 message="Upstream AI provider returned an unparseable response.",
@@ -243,6 +289,7 @@ async def call_llm_with_consent(
     model: Optional[str] = None,
     base_url: Optional[str] = None,
     timeout_seconds: Optional[float] = None,
+    room_id: Optional[str] = None,
 ) -> str:
     """Universal consent and Host AI switch gate through which every outbound LLM call must pass (FR12.2, FR35, US-17).
 
@@ -281,4 +328,5 @@ async def call_llm_with_consent(
         model=model,
         base_url=base_url,
         timeout_seconds=timeout_seconds,
+        room_id=room_id,
     )
