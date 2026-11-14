@@ -171,6 +171,48 @@ curl -i -X POST http://localhost:8082/v1/runs \
 
 ---
 
+## Queue gate (FR16, US-11)
+
+When the run queue is full the service refuses the new request immediately --
+no container is started, no existing run is disturbed.
+
+### How it works
+
+Every run path (currently `POST /v1/runs`; later `POST /internal/runs` for
+repeated and batch runs) calls the **one** `RunQueueGate`. The gate holds a
+semaphore whose size is `app.execution.limits.max-queue-length`. When all
+permits are in use the gate throws `QueueFullException` before invoking the
+code runner. `QueueFullExceptionHandler` maps that to an HTTP 503 response.
+
+### Configuration (application.yml)
+
+| Key                                              | Default | Notes                                          |
+|--------------------------------------------------|---------|------------------------------------------------|
+| `app.execution.limits.max-queue-length`          | `10`    | Max concurrent runs; tune per host (US-16)     |
+| `app.execution.limits.queue-retry-after-seconds` | `5`     | Sent in `Retry-After` and `error.retry_after_seconds` |
+
+### QUEUE_FULL error shape (docs/api-contracts.md §7.1)
+
+```http
+HTTP 503 Service Unavailable
+Retry-After: 5
+
+{
+  "request_id": "<uuid echoed from request>",
+  "error": {
+    "code":                "QUEUE_FULL",
+    "message":             "Execution service is busy, try again in a few seconds.",
+    "retry_after_seconds": 5
+  }
+}
+```
+
+> **Important (FR16 v2):** repeated runs, including those triggered by
+> automated batch features, count toward the same limit and receive the same
+> refusal. Never add a second gate or bypass this one.
+
+---
+
 ## Resource limits (DR3)
 
 Limits are read from `src/main/resources/application.yml` under `app.execution.limits`.
@@ -222,10 +264,14 @@ execution-service/
             ├── config/
             │   └── ExecutionLimitsPropertiesTest.java  # DR3 (Bhavya)
             ├── controller/
-            │   ├── RunControllerTest.java              # T-03 acceptance tests (updated US-08)
-            │   └── RunControllerUS08Test.java          # US-08 DoD tests (Jay)
+            │   ├── RunControllerTest.java                    # T-03 acceptance tests (updated US-08)
+            │   ├── RunControllerUS08Test.java              # US-08 DoD tests (Jay)
+            │   ├── RunControllerUS11Test.java              # US-11 queue-full MockMvc slice (Yash)
+            │   └── RunControllerQueueIntegrationTest.java  # US-11 queue-full full-stack (Bhavya)
+            ├── queue/
+            │   └── RunQueueGateTest.java                    # US-11 gate unit tests (Yash)
             └── runner/
-                └── FakeCodeRunnerTest.java             # Stub behaviour (Jay)
+                └── FakeCodeRunnerTest.java                 # Stub behaviour (Jay)
 ```
 
 ---
