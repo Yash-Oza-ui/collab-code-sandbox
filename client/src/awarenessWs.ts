@@ -177,6 +177,16 @@ export function encodeSyncStep1Message(doc: Y.Doc): Uint8Array {
 }
 
 /**
+ * Encodes a Yjs sync step 2 message (MESSAGE_SYNC = 0, followed by syncStep2) (FR2 / US-02).
+ */
+export function encodeSyncStep2Message(doc: Y.Doc): Uint8Array {
+  const encoder = encoding.createEncoder()
+  encoding.writeVarUint(encoder, MESSAGE_SYNC)
+  syncProtocol.writeSyncStep2(encoder, doc)
+  return encoding.toUint8Array(encoder)
+}
+
+/**
  * Encodes a Yjs document update message (MESSAGE_SYNC = 0, followed by update) (FR2 / US-02).
  */
 export function encodeDocUpdateMessage(update: Uint8Array): Uint8Array {
@@ -186,35 +196,47 @@ export function encodeDocUpdateMessage(update: Uint8Array): Uint8Array {
   return encoding.toUint8Array(encoder)
 }
 
+export interface HandleIncomingSyncFrameOptions {
+  replyWithReverseSyncStep1?: boolean
+}
+
 /**
- * Dispatches an incoming binary sync frame into the local Y.Doc instance and returns any reply (FR2 / US-02).
+ * Dispatches an incoming binary sync frame into the local Y.Doc instance and returns any reply frames (FR2 / US-02).
+ * Implements an explicitly supported multi-message decoding loop to process concatenated sync messages cleanly.
  */
 export function handleIncomingSyncFrame(
   doc: Y.Doc,
   data: Uint8Array | ArrayBuffer,
   origin: unknown,
-): Uint8Array | null {
+  options?: HandleIncomingSyncFrameOptions,
+): Uint8Array[] {
   const uint8 = data instanceof ArrayBuffer ? new Uint8Array(data) : data
-  if (!uint8 || uint8.length === 0) return null
+  if (!uint8 || uint8.length === 0) return []
 
   const decoder = decoding.createDecoder(uint8)
   const messageType = decoding.readVarUint(decoder)
-  if (messageType !== MESSAGE_SYNC) return null
+  if (messageType !== MESSAGE_SYNC) return []
 
-  const replyEncoder = encoding.createEncoder()
-  encoding.writeVarUint(replyEncoder, MESSAGE_SYNC)
-  const syncType = syncProtocol.readSyncMessage(decoder, replyEncoder, doc, origin)
+  const replies: Uint8Array[] = []
+  while (decoding.hasContent(decoder)) {
+    const replyEncoder = encoding.createEncoder()
+    encoding.writeVarUint(replyEncoder, MESSAGE_SYNC)
+    const syncType = syncProtocol.readSyncMessage(decoder, replyEncoder, doc, origin)
 
-  if (syncType === syncProtocol.messageYjsSyncStep1) {
-    // When a peer requests our state (syncStep1), reply with syncStep2 AND send our syncStep1
-    // to establish a full two-way handshake over a stateless relay.
-    syncProtocol.writeSyncStep1(replyEncoder, doc)
+    if (encoding.length(replyEncoder) > 1) {
+      replies.push(encoding.toUint8Array(replyEncoder))
+    }
+
+    if (syncType === syncProtocol.messageYjsSyncStep1 && options?.replyWithReverseSyncStep1) {
+      // Send reverse syncStep1 as its OWN distinct, correctly-prefixed MESSAGE_SYNC frame
+      const reverseEncoder = encoding.createEncoder()
+      encoding.writeVarUint(reverseEncoder, MESSAGE_SYNC)
+      syncProtocol.writeSyncStep1(reverseEncoder, doc)
+      replies.push(encoding.toUint8Array(reverseEncoder))
+    }
   }
 
-  if (encoding.length(replyEncoder) > 1) {
-    return encoding.toUint8Array(replyEncoder)
-  }
-  return null
+  return replies
 }
 
 type WebSocketSendData = Parameters<WebSocket['send']>[0]
@@ -293,6 +315,13 @@ export interface RosterMessage {
   [key: string]: unknown
 }
 
+export interface EditRejectedMessage {
+  type: 'edit-rejected'
+  doc_id?: string
+  reason?: string
+  [key: string]: unknown
+}
+
 export interface ConnectAwarenessWsOptions {
   roomId: string
   displayName?: string
@@ -311,6 +340,7 @@ export interface ConnectAwarenessWsOptions {
   onJoined?: (msg: JoinedMessage) => void
   onJoinRefused?: (msg: JoinRefusedMessage) => void
   onRoster?: (msg: RosterMessage) => void
+  onEditRejected?: (msg: EditRejectedMessage) => void
   onError?: (event: Event) => void
   onClose?: (event: CloseEvent) => void
   onDocError?: (event: Event) => void
@@ -350,6 +380,7 @@ export function connectAwarenessWs(
     onJoined,
     onJoinRefused,
     onRoster,
+    onEditRejected,
     onError,
     onClose,
     onDocError,
@@ -554,10 +585,13 @@ export function connectAwarenessWs(
 
     awareness.on('update', onDocAwarenessUpdate)
 
+    let hasSentReverseSync = false
+
     docWs.onopen = () => {
-      // 1. Send sync step 1 if doc is present (FR2 / US-02)
+      // 1. Send sync step 1 and step 2 to exchange initial state bidirectionally (US-02 / FR2)
       if (doc) {
         sendBinary(docWs!, encodeSyncStep1Message(doc))
+        sendBinary(docWs!, encodeSyncStep2Message(doc))
       }
 
       // 2. Contract Rule 6: query awareness from existing participants upon connecting
@@ -579,9 +613,17 @@ export function connectAwarenessWs(
 
         if (messageType === MESSAGE_SYNC) {
           if (doc && docWs) {
-            const reply = handleIncomingSyncFrame(doc, uint8, docWs)
-            if (reply && docWs.readyState === WS_OPEN) {
-              sendBinary(docWs, reply)
+            const allowReverse = !hasSentReverseSync
+            const replies = handleIncomingSyncFrame(doc, uint8, docWs, {
+              replyWithReverseSyncStep1: allowReverse,
+            })
+            if (allowReverse && replies.length > 1) {
+              hasSentReverseSync = true
+            }
+            for (const reply of replies) {
+              if (docWs.readyState === WS_OPEN) {
+                sendBinary(docWs, reply)
+              }
             }
           }
         } else if (messageType === MESSAGE_AWARENESS || messageType === MESSAGE_QUERY_AWARENESS) {
@@ -630,6 +672,8 @@ export function connectAwarenessWs(
             onJoinRefused?.(msg as JoinRefusedMessage)
           } else if (msg.type === 'roster') {
             onRoster?.(msg as RosterMessage)
+          } else if (msg.type === 'edit-rejected') {
+            onEditRejected?.(msg as EditRejectedMessage)
           }
         } catch {
           // ignore non-json control frames
