@@ -3,6 +3,7 @@ import { act } from 'react'
 import type { RefObject } from 'react'
 import { createRoot } from 'react-dom/client'
 import type { Awareness } from 'y-protocols/awareness'
+import type * as Y from 'yjs'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import RoomPage from './RoomPage'
 import { USER_COLORS } from './userColor'
@@ -1031,5 +1032,98 @@ describe('RoomPage display-name and colour presence join lifecycle', () => {
     // Fresh socket opened and join succeeded: editor mounts!
     expect(container.querySelector('[data-testid="mock-monaco-editor"]')).not.toBeNull()
     expect(container.textContent).toContain('You: Grace')
+  })
+
+  it('merges simultaneous edits between two RoomPage participants over the relay without losing either contribution (US-02 / FR2)', async () => {
+    const relay = new T20Relay()
+    const docRefA: RefObject<Y.Doc | null> = { current: null }
+    const docRefB: RefObject<Y.Doc | null> = { current: null }
+
+    const containerA = document.createElement('div')
+    const containerB = document.createElement('div')
+    document.body.appendChild(containerA)
+    document.body.appendChild(containerB)
+
+    const rootA = createRoot(containerA)
+    const rootB = createRoot(containerB)
+
+    try {
+      await act(async () => {
+        rootA.render(
+          <RoomPage
+            docRef={docRefA}
+            wsOptions={{
+              WebSocketClass: createRelaySocketClass(relay),
+              sessionId: '11111111-1111-4111-8111-111111111111',
+            }}
+          />,
+        )
+        rootB.render(
+          <RoomPage
+            docRef={docRefB}
+            wsOptions={{
+              WebSocketClass: createRelaySocketClass(relay),
+              sessionId: '22222222-2222-4222-8222-222222222222',
+            }}
+          />,
+        )
+      })
+
+      // Client A joins as Alice
+      const inputA = containerA.querySelector<HTMLInputElement>('#display-name')!
+      const formA = containerA.querySelector<HTMLFormElement>('form')!
+      await act(async () => {
+        inputA.value = 'Alice'
+        formA.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+      })
+
+      // Client B joins as Bob
+      const inputB = containerB.querySelector<HTMLInputElement>('#display-name')!
+      const formB = containerB.querySelector<HTMLFormElement>('form')!
+      await act(async () => {
+        inputB.value = 'Bob'
+        formB.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+      })
+
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 40))
+      })
+
+      expect(docRefA.current).not.toBeNull()
+      expect(docRefB.current).not.toBeNull()
+
+      // Shared initial text
+      await act(async () => {
+        docRefA.current?.getText('monaco').insert(0, 'BASE_CODE')
+        await new Promise((r) => setTimeout(r, 30))
+      })
+
+      expect(docRefB.current?.getText('monaco').toString()).toBe('BASE_CODE')
+
+      // Simultaneous edits by both users
+      await act(async () => {
+        docRefA.current?.getText('monaco').insert(9, '_ALICE')
+        docRefB.current?.getText('monaco').insert(9, '_BOB')
+        await new Promise((r) => setTimeout(r, 50))
+      })
+
+      const textA = docRefA.current?.getText('monaco').toString()
+      const textB = docRefB.current?.getText('monaco').toString()
+
+      // Both converge to identical state
+      expect(textA).toBe(textB)
+
+      // Both contributions preserved
+      expect(textA).toContain('BASE_CODE')
+      expect(textA).toContain('_ALICE')
+      expect(textA).toContain('_BOB')
+    } finally {
+      await act(async () => {
+        rootA.unmount()
+        rootB.unmount()
+      })
+      containerA.remove()
+      containerB.remove()
+    }
   })
 })
