@@ -21,10 +21,14 @@ from app.counters import (
     get_total_usage,
     record_fallback,
 )
+from app.limiter import get_room_rate_limiter
 from app.llm import (
+    AIDisabledError,
+    ConsentMissingError,
     LLMProviderError,
     LLMRateLimitError,
     LLMTimeoutError,
+    RoomRateLimitedError,
     generate_explanation,
 )
 from app.llm.client import call_llm_with_consent
@@ -217,18 +221,8 @@ async def analyze_complexity(payload: ComplexityRequest, request: Request) -> Co
     # 1. Compute empirical complexity metrics from measurements (FR36.1, FR36.2)
     comp_metrics = estimate_complexity_from_measurements(payload.measurements)
 
-    # 2. Define the AI optimization fallback with normalized code cache and relevant section (FR40.1, FR40.2, NFR5.2)
+    # 2. Define the AI optimization fallback with relevant code extraction (FR40.2, US-76)
     async def ai_fallback() -> str:
-        cache = get_analysis_cache()
-        cache_key = compute_cache_key(
-            code=payload.code,
-            language=payload.language,
-            request_type="complexity",
-        )
-        cached = cache.get(cache_key, room_id=payload.room_id)
-        if cached is not None and "suggested_fix" in cached:
-            return str(cached["suggested_fix"])
-
         detected_patterns = detect_slow_patterns(payload.code, language=payload.language)
         target_line = detected_patterns[0]["line"] if detected_patterns else None
         relevant_code = extract_relevant_section(
@@ -240,14 +234,12 @@ async def analyze_complexity(payload: ComplexityRequest, request: Request) -> Co
             f"Suggest an optimization fix for {payload.language} code:\n"
             f"```\n{relevant_code}\n```"
         )
-        suggestion = await call_llm_with_consent(
+        return await call_llm_with_consent(
             prompt=prompt,
             consent=payload.consent,
             ai_enabled=payload.ai_enabled,
             room_id=payload.room_id,
         )
-        cache.set(cache_key, {"suggested_fix": suggestion}, room_id=payload.room_id)
-        return suggestion
 
     # 3. Rules-First Static Analysis with Central Consent/AI Gate (FR12.2, FR12.3, FR35)
     rule_analysis = await run_rule_based_analysis_with_ai_fallback(
@@ -257,6 +249,7 @@ async def analyze_complexity(payload: ComplexityRequest, request: Request) -> Co
         ai_enabled=payload.ai_enabled,
         ai_fallback=ai_fallback,
         room_id=payload.room_id,
+        request_type="complexity",
     )
 
     ai_step = rule_analysis["ai_step"]
@@ -336,7 +329,7 @@ async def explain_crash(payload: CrashExplanationRequest, request: Request) -> C
 
     summary = f"Detected {error_type} at line {line_number}."
 
-    # 3. AI Gate (FR12.2, FR35)
+    # 3. Controlled AI pipeline (US-17, FR35, NFR5.3, NFR5.2, US-22, US-75)
     if payload.consent is not True:
         record_fallback(payload.room_id)
         ai_step = CrashAIStep(
@@ -360,6 +353,7 @@ async def explain_crash(payload: CrashExplanationRequest, request: Request) -> C
             language=payload.language,
             request_type="crash_explanation",
             error_signature=f"{error_type}:{line_number}",
+            error_output=payload.sanitizer_output,
         )
         cached = cache.get(cache_key, room_id=payload.room_id)
         if cached is not None and "explanation" in cached:
@@ -368,6 +362,14 @@ async def explain_crash(payload: CrashExplanationRequest, request: Request) -> C
                 error_code=None,
                 explanation=str(cached["explanation"]),
                 suggested_fix=cached.get("suggested_fix"),
+            )
+        elif payload.room_id and not get_room_rate_limiter().check_and_reserve(payload.room_id):
+            record_fallback(payload.room_id)
+            ai_step = CrashAIStep(
+                status="skipped",
+                error_code="ROOM_RATE_LIMITED",
+                explanation=None,
+                suggested_fix=None,
             )
         else:
             try:
@@ -397,6 +399,30 @@ async def explain_crash(payload: CrashExplanationRequest, request: Request) -> C
                     error_code=None,
                     explanation=explanation,
                     suggested_fix=suggested_fix,
+                )
+            except RoomRateLimitedError:
+                record_fallback(payload.room_id)
+                ai_step = CrashAIStep(
+                    status="skipped",
+                    error_code="ROOM_RATE_LIMITED",
+                    explanation=None,
+                    suggested_fix=None,
+                )
+            except ConsentMissingError:
+                record_fallback(payload.room_id)
+                ai_step = CrashAIStep(
+                    status="skipped",
+                    error_code="CONSENT_MISSING",
+                    explanation=None,
+                    suggested_fix=None,
+                )
+            except AIDisabledError:
+                record_fallback(payload.room_id)
+                ai_step = CrashAIStep(
+                    status="skipped",
+                    error_code="AI_DISABLED",
+                    explanation=None,
+                    suggested_fix=None,
                 )
             except LLMTimeoutError:
                 logger.warning("Crash explanation LLM call timed out")
@@ -451,7 +477,7 @@ async def explain_crash(payload: CrashExplanationRequest, request: Request) -> C
 @router.get("/usage")
 @router.get("/analyses/usage")
 async def get_usage(request: Request, room_id: Optional[str] = None) -> dict[str, Any]:
-    """Return telemetry usage counters (Task 5, T-18 v2 §16.5)."""
+    """Return telemetry usage counters (Task 5, T-18 v2 section 16.5)."""
     request.state.request_type = "usage"
     request.state.language = "none"
     if room_id:
@@ -471,12 +497,13 @@ async def get_room_usage_endpoint(room_id: str, request: Request) -> dict[str, A
 
 @router.delete("/rooms/{room_id}/state")
 async def clear_room_state(room_id: str, request: Request) -> dict[str, Any]:
-    """Clean up room-scoped measurement history and counters when closed/deleted (US-56, FR32, T-18 §16.5)."""
+    """Clean up room-scoped measurement history, cache, counters, and rate limits when closed/deleted (US-22, US-56, FR32, T-18 section 16.5)."""
     request.state.request_type = "room_state_delete"
     request.state.language = "none"
     request.state.room_id = room_id
     clear_room(room_id)
     get_analysis_cache().clear_room(room_id)
+    get_room_rate_limiter().clear_room(room_id)
     return {
         "room_id": room_id,
         "status": "cleared",

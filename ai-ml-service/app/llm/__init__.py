@@ -1,4 +1,4 @@
-"""LLM integration module for AI/ML service (T-16, FR12, FR13, US-17, US-76)."""
+"""LLM integration module for AI/ML service (T-16, FR12, FR13, US-17, US-22, US-76)."""
 
 from app.llm.client import (
     AIDisabledError,
@@ -7,6 +7,7 @@ from app.llm.client import (
     LLMProviderError,
     LLMRateLimitError,
     LLMTimeoutError,
+    RoomRateLimitedError,
     call_llm_with_consent,
     get_default_llm_client,
     set_default_llm_client,
@@ -27,6 +28,7 @@ __all__ = [
     "LLMProviderError",
     "LLMRateLimitError",
     "LLMTimeoutError",
+    "RoomRateLimitedError",
     "call_llm_with_consent",
     "get_default_llm_client",
     "set_default_llm_client",

@@ -18,6 +18,9 @@ class Settings:
         self.MONTHLY_BUDGET_USD: float = float(os.getenv("MONTHLY_BUDGET_USD", "10.0"))
         self.TOKEN_COST_PER_TOKEN: float = float(os.getenv("TOKEN_COST_PER_TOKEN", "0.0000035"))
 
+        # Room rate limiting (NFR5.3, US-22, DR3)
+        self.ROOM_HOURLY_LIMIT: int = int(os.getenv("ROOM_HOURLY_LIMIT", "20"))
+
         # Code section extraction limits (FR40.2, US-76, NFR8.2)
         self.SECTION_WINDOW_LINES: int = int(os.getenv("SECTION_WINDOW_LINES", "10"))
         self.SECTION_MAX_LINES: int = int(os.getenv("SECTION_MAX_LINES", "30"))
@@ -28,6 +31,7 @@ class Settings:
         key_status = "set" if self.LLM_API_KEY else "unset"
         return (
             f"<Settings PORT={self.PORT} LLM_MODEL={self.LLM_MODEL!r} "
+            f"ROOM_HOURLY_LIMIT={self.ROOM_HOURLY_LIMIT} "
             f"SECTION_WINDOW_LINES={self.SECTION_WINDOW_LINES} SECTION_MAX_LINES={self.SECTION_MAX_LINES} "
             f"LLM_API_KEY={key_status}>"
         )

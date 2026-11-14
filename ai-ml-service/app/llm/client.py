@@ -1,4 +1,4 @@
-"""Central LLM client and universal consent gate (FR12, US-17).
+"""Central LLM client and universal consent gate (FR12, US-17, US-22).
 
 Enforces that NO code or prompt ever reaches an external AI service
 unless user consent is explicitly provided (consent == True).
@@ -39,12 +39,15 @@ class LLMTimeoutError(LLMProviderError):
     def __init__(
         self,
         message: str = "Upstream LLM provider timed out while generating response.",
+        status_code: int = 504,
+        code: str = "PROVIDER_TIMEOUT",
+        retry_after_seconds: Optional[int] = None,
     ) -> None:
         super().__init__(
             message=message,
-            status_code=504,
-            code="PROVIDER_TIMEOUT",
-            retry_after_seconds=None,
+            status_code=status_code,
+            code=code,
+            retry_after_seconds=retry_after_seconds,
         )
 
 
@@ -54,12 +57,14 @@ class LLMRateLimitError(LLMProviderError):
     def __init__(
         self,
         message: str = "The AI provider returned HTTP 429 (rate limited).",
+        status_code: int = 429,
+        code: str = "RATE_LIMITED_PROVIDER",
         retry_after_seconds: Optional[int] = 30,
     ) -> None:
         super().__init__(
             message=message,
-            status_code=429,
-            code="RATE_LIMITED_PROVIDER",
+            status_code=status_code,
+            code=code,
             retry_after_seconds=retry_after_seconds,
         )
 
@@ -90,6 +95,23 @@ class AIDisabledError(Exception):
         status_code: int = 403,
         code: str = "AI_DISABLED",
         retry_after_seconds: Optional[int] = None,
+    ) -> None:
+        super().__init__(message)
+        self.message = message
+        self.status_code = status_code
+        self.code = code
+        self.retry_after_seconds = retry_after_seconds
+
+
+class RoomRateLimitedError(Exception):
+    """Raised when per-room hourly AI request quota is reached (NFR5.3, US-22, T-18 v2)."""
+
+    def __init__(
+        self,
+        message: str = "Room hourly AI request limit reached. Retry later.",
+        status_code: int = 429,
+        code: str = "ROOM_RATE_LIMITED",
+        retry_after_seconds: Optional[int] = 3600,
     ) -> None:
         super().__init__(message)
         self.message = message
