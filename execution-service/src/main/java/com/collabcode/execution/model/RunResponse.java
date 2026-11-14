@@ -1,27 +1,30 @@
 package com.collabcode.execution.model;
 
+import com.collabcode.execution.snapshot.MemberInfo;
 import com.fasterxml.jackson.annotation.JsonInclude;
 
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+
 /**
- * Run result body – T-06 section 4.2.
+ * Run result body – T-17 V2.9 (Decision 9).
+ *
+ * Extends the run result of section 4.2 with decision 9 fields:
+ * runner, ran_at, visibility, saved_versions, failure, compile_time_ms.
  *
  * All fields are present in every response, including failed runs (FR4.2).
- * Field names intentionally match T-06 section 4.2 and docs/ai-ml-contract.md.
- *
- * History:
- *  T-03 scaffold – stub factory method (stubPlaceholder).
- *  US-08 (Jay)   – full field population from ExecutionResult; stub removed.
  */
 @JsonInclude(JsonInclude.Include.ALWAYS)
 public class RunResponse {
 
-    /** Echoed from the request (T-06 section 4.2). */
+    /** Echoed from the request. */
     private String request_id;
 
-    /** Echoed from the request (T-06 section 4.2). */
+    /** Echoed from the request. */
     private String room_id;
 
-    /** Echoed from the request (T-06 section 4.2). */
+    /** Echoed from the request. */
     private String language;
 
     /** Standard output – always present, may be "" (FR4.2). */
@@ -33,7 +36,7 @@ public class RunResponse {
     /** Exit code of the process (FR4.4). */
     private int exit_code;
 
-    /** Wall-clock time in milliseconds (FR4.3, FR6). */
+    /** Wall-clock time in milliseconds for the run stage only (FR4.3, FR6, Decision 9). */
     private double execution_time_ms;
 
     /** Peak memory in megabytes (FR4.3, FR6). */
@@ -48,7 +51,7 @@ public class RunResponse {
     /**
      * Null when the run succeeded.
      * Values: "compile_error" | "non_zero_exit" | "timeout" | null
-     * (T-06 section 4.2, same as T-07).
+     * An out-of-memory kill is failure_kind: "non_zero_exit" with oom_killed: true, never "oom".
      */
     private String failure_kind;
 
@@ -61,7 +64,34 @@ public class RunResponse {
      */
     private String message;
 
-    // ----- getters (Jackson serialises these) -----
+    /**
+     * Time of the compile stage in milliseconds.
+     * Null when the language has no compile stage (Decision 9).
+     */
+    private Double compile_time_ms;
+
+    /** Member who pressed Run: member_id and display_name (FR26, Decision 9). */
+    private MemberInfo runner;
+
+    /** When the run started, as ISO 8601 UTC with milliseconds and Z (FR26). */
+    private String ran_at;
+
+    /** "room" in Pair mode, "private" in Open mode (FR27, Decision 10). */
+    private String visibility;
+
+    /**
+     * Open mode: snapshot module versions.
+     * Empty array [] in Pair mode (never null).
+     */
+    private List<SavedVersionInfo> saved_versions = new ArrayList<>();
+
+    /**
+     * Open mode: failing module details if run failed and points to one module.
+     * Null for success, in Pair mode, or when failure is not pinned to one module.
+     */
+    private FailureInfo failure;
+
+    // ----- getters -----
 
     public String  getRequest_id()        { return request_id; }
     public String  getRoom_id()           { return room_id; }
@@ -76,8 +106,14 @@ public class RunResponse {
     public String  getFailure_kind()      { return failure_kind; }
     public boolean isOutput_truncated()   { return output_truncated; }
     public String  getMessage()           { return message; }
+    public Double  getCompile_time_ms()   { return compile_time_ms; }
+    public MemberInfo getRunner()         { return runner; }
+    public String  getRan_at()            { return ran_at; }
+    public String  getVisibility()        { return visibility; }
+    public List<SavedVersionInfo> getSaved_versions() { return saved_versions; }
+    public FailureInfo getFailure()       { return failure; }
 
-    // ----- setters (used by RunController to build from ExecutionResult) -----
+    // ----- setters -----
 
     public void setRequest_id(String request_id)               { this.request_id = request_id; }
     public void setRoom_id(String room_id)                     { this.room_id = room_id; }
@@ -92,4 +128,12 @@ public class RunResponse {
     public void setFailure_kind(String failure_kind)           { this.failure_kind = failure_kind; }
     public void setOutput_truncated(boolean output_truncated)  { this.output_truncated = output_truncated; }
     public void setMessage(String message)                     { this.message = message; }
+    public void setCompile_time_ms(Double compile_time_ms)     { this.compile_time_ms = compile_time_ms; }
+    public void setRunner(MemberInfo runner)                   { this.runner = runner; }
+    public void setRan_at(String ran_at)                       { this.ran_at = ran_at; }
+    public void setVisibility(String visibility)               { this.visibility = visibility; }
+    public void setSaved_versions(List<SavedVersionInfo> saved_versions) {
+        this.saved_versions = (saved_versions != null) ? new ArrayList<>(saved_versions) : new ArrayList<>();
+    }
+    public void setFailure(FailureInfo failure)                { this.failure = failure; }
 }
