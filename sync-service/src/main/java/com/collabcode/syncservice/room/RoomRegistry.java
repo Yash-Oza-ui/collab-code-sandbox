@@ -85,6 +85,9 @@ public class RoomRegistry {
      * originator. Used by the internal broadcast endpoint (section 5) which
      * must deliver to <em>every</em> connection including the caller's.
      *
+     * <p>In T-20, internal broadcasts and roster updates carry text messages
+     * destined for control-socket sessions only (sessions without {@code docId}).
+     *
      * @param roomId room to look up
      * @return snapshot list; empty (not null) when the room has no connections
      */
@@ -92,10 +95,35 @@ public class RoomRegistry {
         List<WebSocketSession> raw = rooms.getOrDefault(roomId, Collections.emptyList());
         List<WebSocketSession> result = new ArrayList<>(raw.size());
         for (WebSocketSession s : raw) {
-            if (s.isOpen()) {
+            if (s.isOpen() && s.getAttributes().get("docId") == null) {
                 result.add(s);
             }
         }
         return result;
+    }
+
+    /**
+     * Find the first open session in a room whose {@code sessionId} attribute matches
+     * the given client-supplied session id.
+     *
+     * <p>Used by {@link com.collabcode.syncservice.handler.DocumentHandler} to
+     * route the {@code edit-rejected} message to the sender's control socket
+     * (both sockets share the same client {@code session_id}).
+     *
+     * @param roomId    room to search
+     * @param sessionId the client-supplied session id ({@code session_id} query param)
+     * @return the matching open session, or {@code null} if not found
+     */
+    public WebSocketSession findBySessionId(String roomId, String sessionId) {
+        if (sessionId == null) return null;
+        List<WebSocketSession> raw = rooms.getOrDefault(roomId, Collections.emptyList());
+        for (WebSocketSession s : raw) {
+            if (s.isOpen()
+                    && sessionId.equals(s.getAttributes().get("sessionId"))
+                    && s.getAttributes().get("docId") == null) {
+                return s;
+            }
+        }
+        return null;
     }
 }
