@@ -377,7 +377,6 @@ export function connectAwarenessWs(
         payload.owner_token = token
       }
       try {
-        startJoinTimer(gen)
         ws.send(JSON.stringify(payload))
       } catch {
         clearJoinTimer()
@@ -572,6 +571,10 @@ export function connectAwarenessWs(
   }
 
   controlWs = initControlSocket()
+  if (displayName) {
+    activeHandshake = { name: displayName, token: ownerToken }
+    startJoinTimer(activeGeneration)
+  }
 
   const join = (name: string, token?: string) => {
     if (isDestroyed) return
@@ -587,17 +590,20 @@ export function connectAwarenessWs(
       // Reconnect with a fresh WebSocket attempt
       pendingJoin = { name, token }
       controlWs = initControlSocket()
+      startJoinTimer(activeGeneration)
       return
     }
 
     if (activeControlWs.readyState === WS_CONNECTING) {
       // Queue request: ws.onopen will send it exactly once without duplicate listeners
       pendingJoin = { name, token }
+      startJoinTimer(activeGeneration)
       return
     }
 
     if (activeControlWs.readyState === WS_OPEN) {
       pendingJoin = null
+      startJoinTimer(activeGeneration)
       sendJoin(activeControlWs, name, activeGeneration, token)
     }
   }

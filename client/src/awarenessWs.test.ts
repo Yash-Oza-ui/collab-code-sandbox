@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import * as Y from 'yjs'
 import { createAwareness, getExistingUserColors, setUserAwareness } from './awareness'
 import {
@@ -43,9 +43,10 @@ class TestRelay {
   roomModes = new Map<string, 'pair' | 'open'>()
   roomModules = new Map<string, Set<string>>()
   ignoreJoins = false
+  autoOpen = true
 
-  createClient(url: string): TestWebSocket {
-    return new TestWebSocket(url, this)
+  createClient(url: string, autoOpen?: boolean): TestWebSocket {
+    return new TestWebSocket(url, this, autoOpen ?? this.autoOpen)
   }
 
   handleOpen(ws: TestWebSocket): void {
@@ -259,21 +260,31 @@ class TestWebSocket {
 
   private listeners: Record<string, Set<(event: Event) => void>> = {}
   private relay: TestRelay
+  autoOpen: boolean
 
-  constructor(url: string, relay: TestRelay) {
+  constructor(url: string, relay: TestRelay, autoOpen = true) {
     this.url = url
     this.relay = relay
-    queueMicrotask(() => {
-      if (this.readyState === TestWebSocket.CONNECTING) {
-        this.readyState = TestWebSocket.OPEN
-        this.relay.handleOpen(this)
-        if (this.readyState === TestWebSocket.OPEN) {
-          const ev = new Event('open')
-          this.onopen?.(ev)
-          this.dispatchEvent('open', ev)
+    this.autoOpen = autoOpen
+    if (this.autoOpen) {
+      queueMicrotask(() => {
+        if (this.readyState === TestWebSocket.CONNECTING) {
+          this.triggerOpen()
         }
+      })
+    }
+  }
+
+  triggerOpen(): void {
+    if (this.readyState === TestWebSocket.CONNECTING) {
+      this.readyState = TestWebSocket.OPEN
+      this.relay.handleOpen(this)
+      if (this.readyState === TestWebSocket.OPEN) {
+        const ev = new Event('open')
+        this.onopen?.(ev)
+        this.dispatchEvent('open', ev)
       }
-    })
+    }
   }
 
   addEventListener(
@@ -961,5 +972,162 @@ describe('T-20 WebSocket connection and multi-client awareness synchronization',
     expect(conn.docWs).toBeNull()
 
     conn.destroy()
+  })
+
+  it('triggers onJoinTimeout when WebSocket stays in CONNECTING indefinitely', () => {
+    vi.useFakeTimers()
+    try {
+      const relay = new TestRelay()
+      relay.autoOpen = false // Socket stays CONNECTING indefinitely
+
+      const doc = new Y.Doc()
+      const awareness = createAwareness(doc)
+      let timedOut = false
+
+      const conn = connectAwarenessWs({
+        roomId: 'test-connecting-timeout',
+        awareness,
+        joinTimeoutMs: 100,
+        syncWsUrl: 'ws://localhost:8081/ws/rooms',
+        sessionId: '11111111-1111-4111-8111-111111111111',
+        WebSocketClass: function (url: string) {
+          return relay.createClient(url)
+        } as unknown as typeof WebSocket,
+        onJoinTimeout: () => {
+          timedOut = true
+        },
+      })
+
+      const initialSocket = conn.controlWs as unknown as TestWebSocket
+      expect(initialSocket.readyState).toBe(TestWebSocket.CONNECTING)
+
+      conn.join('Alice')
+
+      // Advance by 50ms (before timeout)
+      vi.advanceTimersByTime(50)
+      expect(timedOut).toBe(false)
+      expect(initialSocket.readyState).toBe(TestWebSocket.CONNECTING)
+
+      // Advance past timeout deadline (100ms total)
+      vi.advanceTimersByTime(51)
+      expect(timedOut).toBe(true)
+
+      // Old socket was cleanly closed and nulled
+      expect(initialSocket.readyState).toBe(TestWebSocket.CLOSED)
+      expect(conn.controlWs).toBeNull()
+
+      conn.destroy()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('preserves the original deadline when WebSocket opens just before deadline', () => {
+    vi.useFakeTimers()
+    try {
+      const relay = new TestRelay()
+      relay.autoOpen = false // Manual open control
+      relay.ignoreJoins = true // Server never responds
+
+      const doc = new Y.Doc()
+      const awareness = createAwareness(doc)
+      let timedOut = false
+
+      const conn = connectAwarenessWs({
+        roomId: 'test-deadline-not-restarted',
+        awareness,
+        joinTimeoutMs: 100,
+        syncWsUrl: 'ws://localhost:8081/ws/rooms',
+        sessionId: '22222222-2222-4222-8222-222222222222',
+        WebSocketClass: function (url: string) {
+          return relay.createClient(url)
+        } as unknown as typeof WebSocket,
+        onJoinTimeout: () => {
+          timedOut = true
+        },
+      })
+
+      const socket = conn.controlWs as unknown as TestWebSocket
+      conn.join('Bob')
+
+      // Advance to 80ms (20ms before 100ms timeout)
+      vi.advanceTimersByTime(80)
+      expect(timedOut).toBe(false)
+      expect(socket.readyState).toBe(TestWebSocket.CONNECTING)
+
+      // Socket opens at 80ms and sends join request
+      socket.triggerOpen()
+      expect(socket.readyState).toBe(TestWebSocket.OPEN)
+
+      // Advance by another 19ms (99ms total): timeout still hasn't fired
+      vi.advanceTimersByTime(19)
+      expect(timedOut).toBe(false)
+
+      // Advance by 2ms (101ms total): timeout MUST fire because deadline was NOT restarted!
+      vi.advanceTimersByTime(2)
+      expect(timedOut).toBe(true)
+
+      conn.destroy()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('creates a fresh WebSocket connection on retry after CONNECTING timeout', () => {
+    vi.useFakeTimers()
+    try {
+      const relay = new TestRelay()
+      relay.autoOpen = false // Socket 1 stays CONNECTING
+
+      const doc = new Y.Doc()
+      const awareness = createAwareness(doc)
+      let timedOut = false
+      let joined = false
+
+      const conn = connectAwarenessWs({
+        roomId: 'test-retry-after-connecting-timeout',
+        awareness,
+        joinTimeoutMs: 100,
+        syncWsUrl: 'ws://localhost:8081/ws/rooms',
+        sessionId: '33333333-3333-4333-8333-333333333333',
+        WebSocketClass: function (url: string) {
+          return relay.createClient(url)
+        } as unknown as typeof WebSocket,
+        onJoinTimeout: () => {
+          timedOut = true
+        },
+        onJoined: () => {
+          joined = true
+        },
+      })
+
+      const firstSocket = conn.controlWs as unknown as TestWebSocket
+      conn.join('Charlie')
+
+      // Timeout fires while in CONNECTING
+      vi.advanceTimersByTime(101)
+      expect(timedOut).toBe(true)
+      expect(firstSocket.readyState).toBe(TestWebSocket.CLOSED)
+      expect(conn.controlWs).toBeNull()
+
+      // Relay will now allow socket to open and respond
+      relay.autoOpen = true
+
+      // User retries
+      conn.join('Charlie')
+
+      const secondSocket = conn.controlWs as unknown as TestWebSocket
+      expect(secondSocket).not.toBeNull()
+      expect(secondSocket).not.toBe(firstSocket) // Fresh instance!
+
+      // Second socket connects
+      secondSocket.triggerOpen()
+      expect(joined).toBe(true)
+      expect(secondSocket.readyState).toBe(TestWebSocket.OPEN)
+
+      conn.destroy()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

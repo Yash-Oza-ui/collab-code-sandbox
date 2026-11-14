@@ -41,6 +41,7 @@ class T20Relay {
   roomModes = new Map<string, 'pair' | 'open'>()
   roomModules = new Map<string, Set<string>>()
   ignoreJoins = false
+  autoOpen = true
 
   parseUrl(url: string) {
     const u = new URL(url.replace(/^ws/, 'http'))
@@ -179,11 +180,23 @@ class RelaySocket {
   onerror: ((e: Event) => void) | null = null
   private listeners: Record<string, Set<(e: Event) => void>> = {}
   protected relay: T20Relay
+  autoOpen: boolean
 
-  constructor(url: string, relay: T20Relay) {
+  constructor(url: string, relay: T20Relay, autoOpen = true) {
     this.url = url
     this.relay = relay
-    queueMicrotask(() => {
+    this.autoOpen = autoOpen
+    if (this.autoOpen) {
+      queueMicrotask(() => {
+        if (this.readyState === 0) {
+          this.triggerOpen()
+        }
+      })
+    }
+  }
+
+  triggerOpen() {
+    if (this.readyState === 0) {
       this.readyState = 1
       this.relay.handleOpen(this)
       if (this.readyState === 1) {
@@ -191,7 +204,7 @@ class RelaySocket {
         this.onopen?.(ev)
         this.dispatchEvent('open', ev)
       }
-    })
+    }
   }
 
   addEventListener(type: string, listener: (e: Event) => void, options?: { once?: boolean }) {
@@ -254,10 +267,10 @@ class RelaySocket {
   }
 }
 
-function createRelaySocketClass(relay: T20Relay): typeof WebSocket {
+function createRelaySocketClass(relay: T20Relay, autoOpen?: boolean): typeof WebSocket {
   return class extends RelaySocket {
     constructor(url: string) {
-      super(url, relay)
+      super(url, relay, autoOpen ?? relay.autoOpen)
     }
   } as unknown as typeof WebSocket
 }
@@ -915,5 +928,63 @@ describe('RoomPage display-name and colour presence join lifecycle', () => {
     expect(container.querySelector('[data-testid="mock-monaco-editor"]')).toBeNull()
     expect(container.querySelector('[role="alert"]')?.textContent).toContain('Join request timed out')
     expect(container.querySelector<HTMLButtonElement>('button')?.disabled).toBe(false)
+  })
+
+  it('CONNECTING timeout in RoomPage: unblocks form after timeout and allows retry with fresh socket', async () => {
+    relay.autoOpen = false // Socket remains CONNECTING indefinitely
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    root = createRoot(container)
+
+    await act(async () => {
+      root?.render(
+        <RoomPage
+          wsOptions={{
+            WebSocketClass: createRelaySocketClass(relay),
+            sessionId: '91111111-1111-4111-8111-111111111111',
+            joinTimeoutMs: 35,
+          }}
+        />,
+      )
+    })
+
+    const input = container.querySelector<HTMLInputElement>('#display-name')!
+    const form = container.querySelector<HTMLFormElement>('form')!
+    await act(async () => {
+      input.value = 'Grace'
+      form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+    })
+
+    // Submitting: loading state shown, editor hidden
+    expect(container.querySelector('button')?.disabled).toBe(true)
+    expect(container.querySelector('[data-testid="mock-monaco-editor"]')).toBeNull()
+
+    // Wait for timeout to fire while CONNECTING
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 60))
+    })
+
+    // Form unblocked with timeout alert
+    expect(container.querySelector('[data-testid="mock-monaco-editor"]')).toBeNull()
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain('Join request timed out')
+    expect(container.querySelector('button')?.disabled).toBe(false)
+    expect(container.querySelector<HTMLInputElement>('#display-name')?.value).toBe('Grace')
+
+    // Now enable autoOpen for retry
+    relay.autoOpen = true
+
+    // User retries
+    await act(async () => {
+      form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+    })
+
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 40))
+    })
+
+    // Fresh socket opened and join succeeded: editor mounts!
+    expect(container.querySelector('[data-testid="mock-monaco-editor"]')).not.toBeNull()
+    expect(container.textContent).toContain('You: Grace')
   })
 })
