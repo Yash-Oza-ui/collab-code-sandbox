@@ -153,6 +153,28 @@ def test_python_normalization_docstrings_preserved():
     # Assigned multiline strings remain distinct
     assert compute_cache_key(assigned_triple1, "python") != compute_cache_key(assigned_triple2, "python")
 
+    # Module-level docstrings
+    mod_doc1 = '"""Module docstring Alpha."""\nx = 1\n'
+    mod_doc2 = '"""Module docstring Beta."""\nx = 1\n'
+    mod_doc1_fmt = '# Top comment\n"""Module docstring Alpha."""\n\n\nx = 1 # trailing\n'
+    assert compute_cache_key(mod_doc1, "python") != compute_cache_key(mod_doc2, "python"), (
+        "Different module-level docstrings must produce different cache keys"
+    )
+    assert compute_cache_key(mod_doc1, "python") == compute_cache_key(mod_doc1_fmt, "python"), (
+        "Formatting/comment variations around module docstrings must yield identical cache keys"
+    )
+
+    # Class-level docstrings
+    cls_doc1 = 'class Model:\n    """Model docstring A."""\n    pass\n'
+    cls_doc2 = 'class Model:\n    """Model docstring B."""\n    pass\n'
+    cls_doc1_fmt = 'class Model:\n    # comment\n    """Model docstring A."""\n\n    pass\n'
+    assert compute_cache_key(cls_doc1, "python") != compute_cache_key(cls_doc2, "python"), (
+        "Different class-level docstrings must produce different cache keys"
+    )
+    assert compute_cache_key(cls_doc1, "python") == compute_cache_key(cls_doc1_fmt, "python"), (
+        "Formatting/comment variations around class docstrings must yield identical cache keys"
+    )
+
 
 def test_cache_key_differentiates_error_output_and_request_type():
     """Verify cache key incorporates both request_type and error_output where it matters (NFR5.2)."""
@@ -1297,6 +1319,135 @@ def test_endpoint_concurrency_at_quota_boundary():
     )
     assert len(skipped_responses) == num_requests - quota, (
         f"Expected {num_requests - quota} skipped AI steps, got {len(skipped_responses)}"
+    )
+
+    for r in skipped_responses:
+        assert r["body"]["ai_step"]["error_code"] == "ROOM_RATE_LIMITED", (
+            f"Expected error_code ROOM_RATE_LIMITED, got {r['body']['ai_step']['error_code']}"
+        )
+
+    # Verify limiter count matches quota
+    assert get_room_rate_limiter().get_count(room) == quota
+
+
+def test_crash_explanation_enforces_ai_switch_before_cache_lookup():
+    """Verify that disabling Host AI switch prevents returning cached AI explanation (US-22 Section 8).
+
+    Required Order:
+    1. Consent check -> CONSENT_MISSING (HTTP 200, skipped AI step, 0 calls)
+    2. Host AI switch -> AI_DISABLED (HTTP 200, skipped AI step, 0 calls)
+    3. Cache lookup (only when consent=true AND ai_enabled=true)
+    4. Rate limit check-and-reserve
+    5. External AI call
+    """
+    room = "room-crash-ai-switch-precedence"
+    req_base = {
+        "request_id": "req-crash-ai-switch-1",
+        "room_id": room,
+        "analysis_id": "an-crash-ai-switch-1",
+        "request_type": "crash_explanation",
+        "language": "cpp",
+        "sanitizer_output": "==100==ERROR: AddressSanitizer: heap-buffer-overflow at test.cpp:25",
+        "code_snippet": "int *p = new int[5]; p[10] = 42;",
+    }
+
+    mock_llm = AsyncMock(return_value="Buffer overflow on array index 10.")
+    with patch("app.llm.client.LLMClient.complete", mock_llm):
+        # 1. First request with consent=True, ai_enabled=True: AI result generated & cached
+        req_enabled = {**req_base, "consent": True, "ai_enabled": True}
+        res1 = client.post("/v1/analyses/crash-explanation", json=req_enabled)
+        assert res1.status_code == 200
+        data1 = res1.json()
+        assert data1["ai_step"]["status"] == "ok"
+        assert data1["ai_step"]["explanation"] == "Buffer overflow on array index 10."
+        assert mock_llm.call_count == 1
+
+        # 2. Repeat request with consent=True, ai_enabled=False: MUST NOT return cached explanation!
+        req_ai_disabled = {**req_base, "request_id": "req-crash-ai-switch-2", "consent": True, "ai_enabled": False}
+        res2 = client.post("/v1/analyses/crash-explanation", json=req_ai_disabled)
+        assert res2.status_code == 200
+        data2 = res2.json()
+        assert data2["ai_step"]["status"] == "skipped"
+        assert data2["ai_step"]["error_code"] == "AI_DISABLED"
+        assert data2["ai_step"]["explanation"] is None, "Cached explanation must NOT be returned when AI is disabled"
+        assert data2["ai_step"]["suggested_fix"] is None
+        assert mock_llm.call_count == 1, "LLM must NOT be called when AI is disabled"
+
+        # 3. Repeat request with consent=False, ai_enabled=True: MUST NOT return cached explanation!
+        req_consent_missing = {**req_base, "request_id": "req-crash-ai-switch-3", "consent": False, "ai_enabled": True}
+        res3 = client.post("/v1/analyses/crash-explanation", json=req_consent_missing)
+        assert res3.status_code == 200
+        data3 = res3.json()
+        assert data3["ai_step"]["status"] == "skipped"
+        assert data3["ai_step"]["error_code"] == "CONSENT_MISSING"
+        assert data3["ai_step"]["explanation"] is None, "Cached explanation must NOT be returned when consent is missing"
+        assert mock_llm.call_count == 1, "LLM must NOT be called when consent is missing"
+
+        # 4. Repeat request with consent=False, ai_enabled=False: consent check must precede AI switch
+        req_both_disabled = {**req_base, "request_id": "req-crash-ai-switch-4", "consent": False, "ai_enabled": False}
+        res4 = client.post("/v1/analyses/crash-explanation", json=req_both_disabled)
+        assert res4.status_code == 200
+        data4 = res4.json()
+        assert data4["ai_step"]["status"] == "skipped"
+        assert data4["ai_step"]["error_code"] == "CONSENT_MISSING", "Consent check must precede AI switch check"
+        assert mock_llm.call_count == 1
+
+        # 5. Repeat request with consent=True, ai_enabled=True: Cache hit returns cached explanation without calling LLM
+        req_cache_hit = {**req_base, "request_id": "req-crash-ai-switch-5", "consent": True, "ai_enabled": True}
+        res5 = client.post("/v1/analyses/crash-explanation", json=req_cache_hit)
+        assert res5.status_code == 200
+        data5 = res5.json()
+        assert data5["ai_step"]["status"] == "ok"
+        assert data5["ai_step"]["explanation"] == "Buffer overflow on array index 10."
+        assert mock_llm.call_count == 1, "Cache hit must not invoke LLM again"
+
+
+def test_crash_explanation_concurrency_at_quota_boundary():
+    """Verify concurrent crash-explanation requests at quota boundary return HTTP 200 with skipped ROOM_RATE_LIMITED (US-22)."""
+    import concurrent.futures
+
+    room = "room-crash-quota-boundary"
+    quota = 3
+    num_requests = 12
+
+    # Clear room state
+    client.delete(f"/v1/rooms/{room}/state")
+
+    mock_llm = AsyncMock(return_value="Crash fix.")
+
+    def send_crash_request(idx: int) -> dict:
+        req = {
+            "request_id": f"req-crash-concurrent-{idx}",
+            "room_id": room,
+            "analysis_id": f"an-crash-concurrent-{idx}",
+            "request_type": "crash_explanation",
+            "language": "cpp",
+            "consent": True,
+            "ai_enabled": True,
+            "sanitizer_output": f"=={idx}==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x{idx:04x} at test.cpp:{idx}",
+            "code_snippet": f"int test_func_{idx}() {{ int arr[{idx}]; return arr[{idx} + 1]; }}",
+        }
+        res = client.post("/v1/analyses/crash-explanation", json=req)
+        return {"status_code": res.status_code, "body": res.json()}
+
+    with patch.object(settings, "ROOM_HOURLY_LIMIT", quota):
+        with patch("app.llm.client.LLMClient.complete", mock_llm):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=num_requests) as executor:
+                futures = [executor.submit(send_crash_request, i) for i in range(num_requests)]
+                responses = [f.result() for f in concurrent.futures.as_completed(futures)]
+
+    # All requests must return HTTP 200
+    for r in responses:
+        assert r["status_code"] == 200, f"Expected HTTP 200, got {r['status_code']}"
+
+    ok_responses = [r for r in responses if r["body"]["ai_step"]["status"] == "ok"]
+    skipped_responses = [r for r in responses if r["body"]["ai_step"]["status"] == "skipped"]
+
+    assert len(ok_responses) == quota, (
+        f"Expected exactly {quota} successful crash explanation steps, got {len(ok_responses)}"
+    )
+    assert len(skipped_responses) == num_requests - quota, (
+        f"Expected {num_requests - quota} skipped crash explanation steps, got {len(skipped_responses)}"
     )
 
     for r in skipped_responses:
