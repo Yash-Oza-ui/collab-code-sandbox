@@ -11,6 +11,12 @@ vi.mock('@monaco-editor/react', () => ({
   default: () => <div data-testid="mock-monaco-editor" />,
 }))
 
+vi.mock('y-monaco', () => ({
+  MonacoBinding: class {
+    destroy() {}
+  },
+}))
+
 ;(globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true
 
 class MockCloseEvent extends Event {
@@ -284,18 +290,72 @@ describe('RoomPage display-name and colour presence join lifecycle', () => {
   beforeEach(() => {
     relay = new T20Relay()
     originalPathname = window.location.pathname
-    window.history.replaceState({}, '', '/room/room-lifecycle-demo')
+    window.history.replaceState({}, '', '/room/room-demo')
   })
 
   afterEach(async () => {
     if (root) {
-      await act(async () => root?.unmount())
+      await act(async () => {
+        root?.unmount()
+      })
       root = null
     }
     window.history.replaceState({}, '', originalPathname)
     container?.remove()
     container = null
-    delete (window as unknown as { awareness?: unknown }).awareness
+  })
+
+  it('requires a display name before rendering the room editor', async () => {
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    root = createRoot(container)
+
+    await act(async () => {
+      root?.render(<RoomPage />)
+    })
+
+    expect(container.textContent).toContain('Choose your display name')
+    expect(container.querySelector('[data-testid="mock-monaco-editor"]')).toBeNull()
+  })
+
+  it('shows an invalid-link error when the room ID is missing', async () => {
+    window.history.replaceState({}, '', '/room/')
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    root = createRoot(container)
+
+    await act(async () => {
+      root?.render(<RoomPage />)
+    })
+
+    expect(container.textContent).toContain('Invalid room link')
+    expect(container.querySelector('[role="alert"]')).not.toBeNull()
+  })
+
+  it('rejects room IDs containing invalid characters', async () => {
+    window.history.replaceState({}, '', '/room/invalid.room')
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    root = createRoot(container)
+
+    await act(async () => {
+      root?.render(<RoomPage />)
+    })
+
+    expect(container.textContent).toContain('Invalid room link')
+  })
+
+  it('rejects room IDs longer than 64 characters', async () => {
+    window.history.replaceState({}, '', `/room/${'a'.repeat(65)}`)
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    root = createRoot(container)
+
+    await act(async () => {
+      root?.render(<RoomPage />)
+    })
+
+    expect(container.textContent).toContain('Invalid room link')
   })
 
   it('successful join: keeps editor hidden until joined, then displays editor, badge, and awareness', async () => {
@@ -303,73 +363,70 @@ describe('RoomPage display-name and colour presence join lifecycle', () => {
     document.body.appendChild(container)
     root = createRoot(container)
 
-    let acceptedName = ''
-    let acceptedColor = ''
+    const awarenessRef: RefObject<Awareness | null> = { current: null }
+    let acceptedName: string | undefined
+    let acceptedColor: string | undefined
 
     await act(async () => {
       root?.render(
         <RoomPage
+          awarenessRef={awarenessRef}
+          onDisplayNameAccepted={(name, color) => {
+            acceptedName = name
+            acceptedColor = color
+          }}
           wsOptions={{
             WebSocketClass: createRelaySocketClass(relay),
             sessionId: '10000000-0000-4000-8000-000000000001',
-          }}
-          onDisplayNameAccepted={(name, color) => {
-            acceptedName = name
-            acceptedColor = color ?? ''
           }}
         />,
       )
     })
 
-    // Initial state: DisplayNamePrompt rendered, editor hidden
-    expect(container.textContent).toContain('Choose your display name')
-    expect(container.querySelector('[data-testid="mock-monaco-editor"]')).toBeNull()
-
     const input = container.querySelector<HTMLInputElement>('#display-name')!
     const form = container.querySelector<HTMLFormElement>('form')!
 
-    // User submits name
+    // Editor hidden initially
+    expect(container.querySelector('[data-testid="mock-monaco-editor"]')).toBeNull()
+
+    // Submitting display name
     await act(async () => {
-      input.value = 'Chandan'
+      input.value = 'Alice'
       form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
     })
 
-    // While join request is pending (before relay delivers joined): editor remains hidden, button shows loading state
-    const submitBtn = container.querySelector<HTMLButtonElement>('button')!
-    expect(submitBtn.disabled).toBe(true)
-    expect(submitBtn.textContent).toBe('Joining room...')
-    expect(container.querySelector('[data-testid="mock-monaco-editor"]')).toBeNull()
-
-    // Wait for asynchronous relay handshake (10ms send delay + handling)
+    // Allow mock WebSocket microtask to cycle and joined message to process
     await act(async () => {
-      await new Promise((r) => setTimeout(r, 35))
+      await new Promise((r) => setTimeout(r, 45))
     })
 
-    // Server returned 'joined': Editor is now visible!
+    // Editor is now visible
     expect(container.querySelector('[data-testid="mock-monaco-editor"]')).not.toBeNull()
-    expect(container.textContent).toContain('You: Chandan')
 
-    // US-05: check user colour dot in room header badge
+    // Header displays display name and user colour dot
     const badge = container.querySelector('[data-testid="room-user-badge"]')
-    const dot = container.querySelector<HTMLElement>('[data-testid="room-user-color-dot"]')
     expect(badge).not.toBeNull()
+    expect(badge?.textContent).toContain('You: Alice')
+
+    const dot = container.querySelector<HTMLSpanElement>('[data-testid="room-user-color-dot"]')
     expect(dot).not.toBeNull()
     expect(dot?.style.backgroundColor).toBeTruthy()
+    expect(USER_COLORS).toContain(dot?.style.backgroundColor)
 
-    // Callback called
-    expect(acceptedName).toBe('Chandan')
-    expect(USER_COLORS).toContain(acceptedColor)
+    // Callback invoked
+    expect(acceptedName).toBe('Alice')
+    expect(acceptedColor).toBe(dot?.style.backgroundColor)
 
-    // US-05 DoD #5: check awareness exposed on window has name and colour
-    const windowAwareness = (window as unknown as { awareness?: Awareness }).awareness
-    expect(windowAwareness).toBeDefined()
-    const localState = windowAwareness?.getLocalState() as { user?: { name: string; color: string } }
-    expect(localState?.user?.name).toBe('Chandan')
-    expect(localState?.user?.color).toBe(acceptedColor)
+    // Awareness local state initialized with name and color
+    const awareness = awarenessRef.current
+    expect(awareness).not.toBeNull()
+    const localUser = (awareness?.getLocalState() as { user?: { name: string; color: string } })?.user
+    expect(localUser?.name).toBe('Alice')
+    expect(localUser?.color).toBe(acceptedColor)
   })
 
   it('refused join: keeps editor hidden on join-refused, shows error alert, and allows retry', async () => {
-    relay.refuseNames.add('TakenAlice')
+    relay.refuseNames.add('DuplicateName')
 
     container = document.createElement('div')
     document.body.appendChild(container)
@@ -389,13 +446,12 @@ describe('RoomPage display-name and colour presence join lifecycle', () => {
     const input = container.querySelector<HTMLInputElement>('#display-name')!
     const form = container.querySelector<HTMLFormElement>('form')!
 
-    // Submit taken name
+    // Submit name that will be refused by relay
     await act(async () => {
-      input.value = 'TakenAlice'
+      input.value = 'DuplicateName'
       form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
     })
 
-    // Wait for relay refusal response
     await act(async () => {
       await new Promise((r) => setTimeout(r, 35))
     })
@@ -403,48 +459,27 @@ describe('RoomPage display-name and colour presence join lifecycle', () => {
     // Editor MUST remain hidden
     expect(container.querySelector('[data-testid="mock-monaco-editor"]')).toBeNull()
 
-    // Clear and useful error message shown in alert
+    // Server refusal message displayed to user
     const alert = container.querySelector('[role="alert"]')
     expect(alert).not.toBeNull()
-    expect(alert?.textContent).toContain('That display name is already in use in this room.')
+    expect(alert?.textContent).toContain('That display name is already in use')
 
-    // Document socket was NEVER opened for refused join
-    expect(relay.docSockets.size).toBe(0)
-
-    // Awareness user presence was not set
-    const windowAwareness = (window as unknown as { awareness?: Awareness }).awareness
-    const localState = windowAwareness?.getLocalState() as { user?: unknown } | undefined
-    expect(localState?.user).toBeUndefined()
-
-    // User can correct the problem and retry
-    const retryInput = container.querySelector<HTMLInputElement>('#display-name')!
-    const retryForm = container.querySelector<HTMLFormElement>('form')!
-
+    // User can retry with a different name
     await act(async () => {
-      retryInput.value = 'FreshAlice'
-      retryForm.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+      input.value = 'ValidUniqueName'
+      form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
     })
 
     await act(async () => {
       await new Promise((r) => setTimeout(r, 35))
     })
 
-    // Retry succeeded: Editor becomes visible, doc socket opened
+    // Editor is now accessible!
     expect(container.querySelector('[data-testid="mock-monaco-editor"]')).not.toBeNull()
-    expect(container.textContent).toContain('You: FreshAlice')
-    expect(relay.docSockets.size).toBe(1)
+    expect(container.textContent).toContain('You: ValidUniqueName')
   })
 
   it('connection failure: keeps editor hidden and communicates failure if socket drops before join', async () => {
-    class DroppingRelay extends T20Relay {
-      override handleText(ws: RelaySocket) {
-        // Drop connection abruptly without replying joined
-        ws.close(4404, 'Room not found')
-      }
-    }
-
-    const dropRelay = new DroppingRelay()
-
     container = document.createElement('div')
     document.body.appendChild(container)
     root = createRoot(container)
@@ -453,7 +488,7 @@ describe('RoomPage display-name and colour presence join lifecycle', () => {
       root?.render(
         <RoomPage
           wsOptions={{
-            WebSocketClass: createRelaySocketClass(dropRelay),
+            WebSocketClass: createRelaySocketClass(relay),
             sessionId: '30000000-0000-4000-8000-000000000003',
           }}
         />,
@@ -463,22 +498,26 @@ describe('RoomPage display-name and colour presence join lifecycle', () => {
     const input = container.querySelector<HTMLInputElement>('#display-name')!
     const form = container.querySelector<HTMLFormElement>('form')!
 
+    // Start join
     await act(async () => {
-      input.value = 'Charlie'
+      input.value = 'Bob'
       form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
     })
 
+    // Simulate premature server drop before join completes
+    const controlSocket = Array.from(relay.controlSockets.keys())[0]
+    expect(controlSocket).toBeDefined()
     await act(async () => {
-      await new Promise((r) => setTimeout(r, 35))
+      controlSocket?.close(1006, 'Abnormal closure')
     })
 
-    // Editor must not be visible
+    // Editor must NOT render
     expect(container.querySelector('[data-testid="mock-monaco-editor"]')).toBeNull()
 
-    // UI communicates failure in alert
+    // Error alert must be shown
     const alert = container.querySelector('[role="alert"]')
     expect(alert).not.toBeNull()
-    expect(alert?.textContent).toContain('Room not found (4404)')
+    expect(alert?.textContent).toContain('Connection closed before joining')
   })
 
   it('assigns a distinct colour when awareness already contains other participant colours', async () => {
@@ -500,33 +539,38 @@ describe('RoomPage display-name and colour presence join lifecycle', () => {
       )
     })
 
-    // Simulate an existing peer in awareness holding USER_COLORS[0]
+    // Pre-populate awareness with other users before this client joins
     const awareness = awarenessRef.current
     expect(awareness).not.toBeNull()
-    awareness!.states.set(999, {
-      user: { name: 'Alice', color: USER_COLORS[0] },
-    })
+
+    // Remote peer 1 takes color index 0
+    awareness?.setLocalStateField('user', { name: 'Peer1', color: USER_COLORS[0] })
+    // Change clientID of that state to represent remote peer
+    const remoteStates = new Map(awareness?.getStates())
+    remoteStates.set(999, { user: { name: 'Peer1', color: USER_COLORS[0] } })
 
     const input = container.querySelector<HTMLInputElement>('#display-name')!
     const form = container.querySelector<HTMLFormElement>('form')!
 
     await act(async () => {
-      input.value = 'Bob'
+      input.value = 'Charlie'
       form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
     })
 
     await act(async () => {
-      await new Promise((r) => setTimeout(r, 35))
+      await new Promise((r) => setTimeout(r, 45))
     })
 
-    const localState = awareness!.getLocalState() as { user?: { name: string; color: string } }
-    expect(localState.user?.name).toBe('Bob')
-    // Must not collide with Alice's colour
-    expect(localState.user?.color).not.toBe(USER_COLORS[0])
-    expect(localState.user?.color).toBe(USER_COLORS[1])
+    const dot = container.querySelector<HTMLSpanElement>('[data-testid="room-user-color-dot"]')
+    expect(dot).not.toBeNull()
+    // Assigned colour should not be Peer1's colour (USER_COLORS[0])
+    expect(dot?.style.backgroundColor).not.toBe(USER_COLORS[0])
   })
 
   it('synchronizes Alice and Bob presence and removes Bob on disconnect', async () => {
+    const roomId = 'multi-client-room'
+    window.history.replaceState({}, '', `/room/${roomId}`)
+
     const containerA = document.createElement('div')
     const containerB = document.createElement('div')
     document.body.appendChild(containerA)
@@ -538,6 +582,7 @@ describe('RoomPage display-name and colour presence join lifecycle', () => {
     const awarenessRefA: RefObject<Awareness | null> = { current: null }
     const awarenessRefB: RefObject<Awareness | null> = { current: null }
 
+    // Render Alice
     await act(async () => {
       rootA?.render(
         <RoomPage

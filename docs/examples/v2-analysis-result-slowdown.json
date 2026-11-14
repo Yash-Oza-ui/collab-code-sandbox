@@ -1,0 +1,30 @@
+{
+  "type": "analysis-result",
+  "request_id": "1c2d3e4f-5a6b-7c8d-9e0f-1a2b3c4d5e6f",
+  "analysis_id": "2d3e4f5a-6b7c-8d9e-0f1a-2b3c4d5e6f7a",
+  "room_id": "Zq8-Lw2Ef6Th0Yx4Rn7JbA",
+  "task": "slowdown",
+  "status": "ok",
+  "ai_step": {
+    "status": "ok",
+    "error_code": null
+  },
+  "result": {
+    "input_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "is_slowdown": true,
+    "slowdown_factor": 14.2,
+    "baseline": {
+      "median_ms": 100.0,
+      "mad_ms": 6.2,
+      "sample_count": 7
+    },
+    "changed_lines": [
+      {
+        "line": 2,
+        "content": "    time.sleep(1.4)"
+      }
+    ],
+    "explanation": "Runtime regression caused by newly introduced blocking sleep call on line 2."
+  },
+  "message": "Execution runtime was 14.2x slower than normal baseline."
+}

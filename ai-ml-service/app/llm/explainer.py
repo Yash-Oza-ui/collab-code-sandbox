@@ -1,67 +1,37 @@
-"""LLM-backed failure explainer logic (FR13.1, T-16).
+"""LLM-backed failure explainer logic (FR13.1, T-16, US-17, US-76).
 
-Handles LLM communication, retry/timeout handling, response normalization,
-and programmatic sentence limit enforcement.
+Handles LLM communication, consent gating, retry/timeout handling, response normalization,
+programmatic sentence limit enforcement, and relevant code section extraction (FR40.2).
 """
 
-import json
 import logging
 import re
 from typing import Optional
-import httpx
 
+from app.llm.client import (
+    AIDisabledError,
+    ConsentMissingError,
+    LLMClient,
+    LLMProviderError,
+    LLMTimeoutError,
+    call_llm_with_consent,
+    get_default_llm_client,
+)
 from app.config import settings
 from app.llm.prompts import build_explanation_prompt
+from app.section import extract_error_line_from_stderr, extract_relevant_section
 
 logger = logging.getLogger(__name__)
 
 
-class LLMProviderError(Exception):
-    """Raised when an external LLM provider returns an error or invalid payload."""
-
-    def __init__(
-        self,
-        message: str,
-        status_code: int = 502,
-        code: str = "PROVIDER_ERROR",
-        retry_after_seconds: Optional[int] = None,
-    ) -> None:
-        super().__init__(message)
-        self.message = message
-        self.status_code = status_code
-        self.code = code
-        self.retry_after_seconds = retry_after_seconds
-
-
-class LLMTimeoutError(LLMProviderError):
-    """Raised when upstream LLM provider times out."""
-
-    def __init__(
-        self,
-        message: str = "Upstream LLM provider timed out while generating explanation.",
-    ) -> None:
-        super().__init__(
-            message=message,
-            status_code=504,
-            code="PROVIDER_TIMEOUT",
-            retry_after_seconds=None,
-        )
-
-
 def clean_markdown(text: str) -> str:
     """Strip markdown formatting (backticks, bold/italics asterisks, headers, bullet points)."""
-    # Remove markdown bold/italics: **text** or *text* or __text__ or _text_
     cleaned = re.sub(r"\*{1,3}(.*?)\*{1,3}", r"\1", text)
     cleaned = re.sub(r"_{1,3}(.*?)_{1,3}", r"\1", cleaned)
-    # Remove inline backticks
     cleaned = re.sub(r"`(.*?)`", r"\1", cleaned)
-    # Remove markdown headers and hashes
     cleaned = re.sub(r"#+", "", cleaned)
-    # Remove bullet markers: '-', '*', '+' preceded by start of line or sentence punctuation
     cleaned = re.sub(r"(?:^|(?<=[.!?\n]))\s*[-*+]\s+", " ", cleaned)
-    # Remove numbered lists: '1. ' preceded by start of line or sentence punctuation
     cleaned = re.sub(r"(?:^|(?<=[.!?\n]))\s*\d+\.\s+", " ", cleaned)
-    # Normalize extra whitespace and newlines into single spaces
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return cleaned
 
@@ -71,7 +41,6 @@ def split_sentences(text: str) -> list[str]:
     cleaned = text.strip()
     if not cleaned:
         return []
-    # Split by '.', '!', '?' when followed by space or end of string
     raw_sentences = re.split(r"(?<=[.!?])\s+", cleaned)
     return [s.strip() for s in raw_sentences if s.strip()]
 
@@ -94,122 +63,33 @@ def enforce_sentence_limit(text: str, max_sentences: int = 3) -> str:
 
 async def call_llm_api(
     prompt: str,
+    consent: Optional[bool] = None,
+    ai_enabled: Optional[bool] = None,
     api_key: Optional[str] = None,
     model: Optional[str] = None,
     base_url: Optional[str] = None,
     timeout_seconds: Optional[float] = None,
+    client: Optional[LLMClient] = None,
+    room_id: Optional[str] = None,
 ) -> str:
-    """Call external LLM API and return raw response text."""
-    key = api_key or settings.LLM_API_KEY
-    if not key or not key.strip():
-        raise LLMProviderError(
-            message="LLM API key is not configured.",
-            status_code=502,
-            code="PROVIDER_ERROR",
-        )
-
-    target_model = model or settings.LLM_MODEL
-    target_base_url = base_url or getattr(settings, "LLM_BASE_URL", None)
-    timeout = timeout_seconds or getattr(settings, "LLM_TIMEOUT_SECONDS", 10.0)
-
-    is_gemini = not target_base_url and target_model.lower().startswith("gemini")
-
-    try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            if is_gemini:
-                endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{target_model}:generateContent"
-                headers = {
-                    "Content-Type": "application/json",
-                    "x-goog-api-key": key,
-                }
-                body = {
-                    "contents": [
-                        {
-                            "parts": [{"text": prompt}],
-                        }
-                    ],
-                    "generationConfig": {
-                        "temperature": 0.2,
-                        "maxOutputTokens": 256,
-                    },
-                }
-                response = await client.post(endpoint, headers=headers, json=body)
-            else:
-                # OpenAI-compatible API format
-                endpoint = (
-                    f"{target_base_url.rstrip('/')}/chat/completions"
-                    if target_base_url
-                    else "https://api.openai.com/v1/chat/completions"
-                )
-                headers = {
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {key}",
-                }
-                body = {
-                    "model": target_model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.2,
-                    "max_tokens": 256,
-                }
-                response = await client.post(endpoint, headers=headers, json=body)
-
-    except httpx.TimeoutException as exc:
-        logger.warning("LLM API call timed out after %s seconds", timeout)
-        raise LLMTimeoutError() from exc
-    except httpx.RequestError as exc:
-        logger.error("LLM API request error: %s", type(exc).__name__)
-        raise LLMProviderError(
-            message=f"Network error communicating with AI provider: {type(exc).__name__}",
-            status_code=502,
-            code="PROVIDER_ERROR",
-        ) from exc
-
-    # Handle provider HTTP status codes
-    if response.status_code == 429:
-        retry_header = response.headers.get("Retry-After")
-        retry_seconds = int(retry_header) if retry_header and retry_header.isdigit() else 30
-        raise LLMProviderError(
-            message="The AI provider returned HTTP 429 (rate limited).",
-            status_code=429,
-            code="RATE_LIMITED_PROVIDER",
-            retry_after_seconds=retry_seconds,
-        )
-
-    if response.status_code != 200:
-        logger.error("LLM provider returned non-200 status: %d", response.status_code)
-        raise LLMProviderError(
-            message=f"Upstream AI provider error (status {response.status_code}).",
-            status_code=502,
-            code="PROVIDER_ERROR",
-        )
-
-    try:
-        data = response.json()
-        if is_gemini:
-            candidates = data.get("candidates", [])
-            if not candidates:
-                raise ValueError("No candidates returned from Gemini API")
-            parts = candidates[0].get("content", {}).get("parts", [])
-            if not parts or "text" not in parts[0]:
-                raise ValueError("No text part in Gemini candidate content")
-            return parts[0]["text"]
-        else:
-            choices = data.get("choices", [])
-            if not choices:
-                raise ValueError("No choices returned from LLM provider")
-            content = choices[0].get("message", {}).get("content", "")
-            return content
-    except (json.JSONDecodeError, KeyError, IndexError, ValueError) as exc:
-        logger.error("Failed to parse LLM provider response: %s", exc)
-        raise LLMProviderError(
-            message="Upstream AI provider returned an unparseable response.",
-            status_code=502,
-            code="PROVIDER_ERROR",
-        ) from exc
+    """Call external LLM API routed through the central consent gate (FR12.2, FR35, US-17)."""
+    return await call_llm_with_consent(
+        prompt=prompt,
+        consent=consent,
+        ai_enabled=ai_enabled,
+        client=client,
+        api_key=api_key,
+        model=model,
+        base_url=base_url,
+        timeout_seconds=timeout_seconds,
+        room_id=room_id,
+    )
 
 
 async def generate_explanation(
     language: str,
+    consent: Optional[bool] = None,
+    ai_enabled: Optional[bool] = None,
     failure_kind: Optional[str] = None,
     exit_code: Optional[int] = None,
     stderr: str = "",
@@ -219,10 +99,18 @@ async def generate_explanation(
     request_id: Optional[str] = None,
     api_key: Optional[str] = None,
     model: Optional[str] = None,
+    llm_client: Optional[LLMClient] = None,
+    error_line: Optional[int] = None,
+    function_name: Optional[str] = None,
+    pre_sliced: bool = False,
+    room_id: Optional[str] = None,
 ) -> str:
-    """Generate a 3-sentence plain prose failure explanation using LLM.
+    """Generate a 3-sentence plain prose failure explanation using LLM (FR13.1, FR40.2, US-76).
 
-    Privacy compliance (NFR8.2): Never logs raw code or stderr.
+    Privacy & Data minimization compliance:
+    - FR40.2, US-76: Sends ONLY the relevant code section to external AI, never the full file.
+    - FR12.2, FR35: If consent is missing/false or ai_enabled is missing/false, fails immediately at the gate without outbound calls.
+    - NFR8.2: Never logs raw code, stderr, or prompts.
     """
     # Safe logging of non-sensitive execution metadata
     logger.info(
@@ -235,6 +123,27 @@ async def generate_explanation(
         oom_killed,
     )
 
+    # 1. Extract only the relevant code section (FR40.2, US-76)
+    if pre_sliced:
+        # Caller supplied an already-localized code_snippet (e.g. Task 4 crash explanation).
+        # Avoid re-windowing it with a full-file error_line when it already fits within SECTION_MAX_LINES.
+        code_lines = code.splitlines() if code else []
+        if len(code_lines) <= settings.SECTION_MAX_LINES:
+            relevant_code = code
+        else:
+            relevant_code = "\n".join(code_lines[: settings.SECTION_MAX_LINES])
+    else:
+        target_error_line = error_line
+        if target_error_line is None and stderr:
+            target_error_line = extract_error_line_from_stderr(stderr, language=language)
+
+        relevant_code = extract_relevant_section(
+            code=code,
+            language=language,
+            function_name=function_name,
+            error_line=target_error_line,
+        )
+
     prompt = build_explanation_prompt(
         language=language,
         failure_kind=failure_kind,
@@ -242,13 +151,17 @@ async def generate_explanation(
         stderr=stderr,
         timed_out=timed_out,
         oom_killed=oom_killed,
-        code=code,
+        code=relevant_code,
     )
 
-    raw_output = await call_llm_api(
+    raw_output = await call_llm_with_consent(
         prompt=prompt,
+        consent=consent,
+        ai_enabled=ai_enabled,
+        client=llm_client,
         api_key=api_key,
         model=model,
+        room_id=room_id,
     )
 
     explanation = enforce_sentence_limit(raw_output, max_sentences=3)

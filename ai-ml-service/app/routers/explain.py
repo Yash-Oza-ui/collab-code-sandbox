@@ -1,19 +1,24 @@
 """Execution failure explainer router.
 
 Implements T-16 (FR13.1, EPIC 3) failure explanation prototype behind T-07 contract.
-Conforms to docs/ai-ml-contract.md §4.3 and §5.
+Conforms to docs/ai-ml-contract.md §4.3, §5, FR12.3, US-17 consent gating, US-22 AI control, and US-76 relevant code extraction (FR40.2).
 """
 
 import logging
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
-from app.llm.explainer import (
+from app.llm import (
+    AIDisabledError,
+    ConsentMissingError,
     LLMProviderError,
+    LLMRateLimitError,
     LLMTimeoutError,
+    RoomRateLimitedError,
     generate_explanation,
 )
+from app.rules.patterns import run_rule_based_analysis_with_ai_fallback
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +32,14 @@ class ExplainRequest(BaseModel):
     room_id: str
     request_type: Literal["explanation"] = "explanation"
     language: Literal["cpp", "python", "c", "java", "javascript"]
-    consent: bool = Field(..., description="User consent boolean (FR12)")
+    consent: Optional[bool] = Field(
+        default=None,
+        description="User consent boolean (FR12). When missing or false, external AI is not called.",
+    )
+    ai_enabled: Optional[bool] = Field(
+        default=None,
+        description="Host AI switch boolean (FR35). When missing or false, external AI is not called.",
+    )
     code: str
     stderr: str = ""
     exit_code: int
@@ -36,35 +48,49 @@ class ExplainRequest(BaseModel):
     timed_out: bool = False
     oom_killed: bool = False
     failure_kind: Optional[Literal["compile_error", "non_zero_exit", "timeout"]] = None
+    error_line: Optional[int] = Field(
+        default=None,
+        description="Optional 1-based error line for relevant section extraction (FR40.2).",
+    )
+    function_name: Optional[str] = Field(
+        default=None,
+        description="Optional target function name for relevant section extraction (FR40.2).",
+    )
+
+
+class AIStep(BaseModel):
+    """AI step execution or skip status (FR12.3, T-18 v2)."""
+
+    status: Literal["ok", "skipped"]
+    error_code: Optional[str] = None
+    suggested_fix: Optional[str] = None
 
 
 class ExplainResponse(BaseModel):
-    """Short plain-language explanation (at most 3 sentences)."""
+    """Plain-language explanation and rule-based findings (FR12.3)."""
 
     request_id: str
-    explanation: str
+    explanation: Optional[str] = None
+    slow_patterns: list[dict[str, Any]] = Field(default_factory=list)
+    ai_step: Optional[AIStep] = None
 
 
 @router.post("/explain", response_model=ExplainResponse)
 async def explain_failure(payload: ExplainRequest, request: Request) -> ExplainResponse:
-    """Explain a failed run in plain prose using LLM API (FR13.1, T-16)."""
-    # Track request_id for consistent error envelope responses
+    """Explain a failed run in plain prose using rules-first analysis, rate limiting, caching, and LLM API (FR12.3, FR13.1, T-16, US-17, US-22, US-76)."""
+    # Publish validated metadata into request.state for the logging middleware.
+    # Only safe, non-user-text metadata fields are stored — never code/stderr.
     request.state.request_id = payload.request_id
+    request.state.room_id = payload.room_id
+    request.state.request_type = payload.request_type
+    request.state.language = payload.language
 
-    # Enforce privacy consent gate (FR12.2, contract §5)
-    if not payload.consent:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail={
-                "code": "CONSENT_MISSING",
-                "message": "User consent is required before code or execution context can be sent to external AI.",
-                "retry_after_seconds": None,
-            },
-        )
-
-    try:
-        explanation = await generate_explanation(
+    # Define the failure explanation AI fallback
+    async def explain_fallback() -> str:
+        return await generate_explanation(
             language=payload.language,
+            consent=payload.consent,
+            ai_enabled=payload.ai_enabled,
             failure_kind=payload.failure_kind,
             exit_code=payload.exit_code,
             stderr=payload.stderr,
@@ -72,14 +98,66 @@ async def explain_failure(payload: ExplainRequest, request: Request) -> ExplainR
             oom_killed=payload.oom_killed,
             code=payload.code,
             request_id=payload.request_id,
+            room_id=payload.room_id,
+            error_line=payload.error_line,
+            function_name=payload.function_name,
         )
 
+    try:
+        # 1. Rules-First Static Analysis with US-22 AI Control Pipeline:
+        # Consent -> AI Switch -> Room Rate Limit -> Normalized Cache -> AI Call
+        rule_analysis = await run_rule_based_analysis_with_ai_fallback(
+            code=payload.code,
+            language=payload.language,
+            consent=payload.consent,
+            ai_enabled=payload.ai_enabled,
+            ai_fallback=explain_fallback,
+            reraise_ai_errors=True,
+            room_id=payload.room_id,
+            request_type=payload.request_type,
+            error_output=payload.stderr,
+            cache_context={
+                "failure_kind": payload.failure_kind,
+                "exit_code": payload.exit_code,
+                "timed_out": payload.timed_out,
+                "oom_killed": payload.oom_killed,
+                "error_line": payload.error_line,
+                "function_name": payload.function_name,
+            },
+        )
+
+        slow_patterns = rule_analysis.get("slow_patterns", [])
+        request.state.rule_findings = slow_patterns
+        ai_step = rule_analysis["ai_step"]
+
+        if ai_step.get("status") == "skipped":
+            request.state.error_code = ai_step.get("error_code")
+            return ExplainResponse(
+                request_id=payload.request_id,
+                explanation=None,
+                slow_patterns=slow_patterns,
+                ai_step=AIStep(
+                    status="skipped",
+                    error_code=ai_step.get("error_code"),
+                    suggested_fix=None,
+                ),
+            )
+
+        explanation = ai_step.get("suggested_fix")
+        request.state.error_code = None
         return ExplainResponse(
             request_id=payload.request_id,
             explanation=explanation,
+            slow_patterns=slow_patterns,
+            ai_step=AIStep(
+                status="ok",
+                error_code=None,
+                suggested_fix=explanation,
+            ),
         )
 
     except LLMTimeoutError as exc:
+        request.state.error_code = exc.code
         raise HTTPException(
             status_code=status.HTTP_504_GATEWAY_TIMEOUT,
             detail={
@@ -89,7 +167,19 @@ async def explain_failure(payload: ExplainRequest, request: Request) -> ExplainR
             },
         ) from exc
 
+    except LLMRateLimitError as exc:
+        request.state.error_code = exc.code
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={
+                "code": exc.code,
+                "message": exc.message,
+                "retry_after_seconds": exc.retry_after_seconds,
+            },
+        ) from exc
+
     except LLMProviderError as exc:
+        request.state.error_code = exc.code
         raise HTTPException(
             status_code=exc.status_code,
             detail={
@@ -101,6 +191,7 @@ async def explain_failure(payload: ExplainRequest, request: Request) -> ExplainR
 
     except Exception as exc:
         # Non-sensitive error logging (NFR8.2: no raw code or stderr logged)
+        request.state.error_code = "PROVIDER_ERROR"
         logger.error(
             "Unexpected error in explain endpoint for request_id=%s: %s",
             payload.request_id,

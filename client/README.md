@@ -18,6 +18,8 @@ The `client/` package is the web frontend for **Collab Code Sandbox**, providing
   - *Note on CDN Dependency:* `@monaco-editor/react` currently fetches the Monaco Editor bundle from CDN (`cdn.jsdelivr.net`) at runtime in the browser. An active internet connection is required when loading the editor.
 - **Collaborative State (CRDT) & Awareness:** **Yjs** (`yjs`) & **y-protocols** (`y-protocols/awareness`)
   - *Rationale:* High-performance Conflict-free Replicated Data Type (CRDT) document model providing conflict-free simultaneous edit merging and decentralised participant awareness presence without central coordinator locking.
+- **Collaboration Integration:** `y-websocket` and `y-monaco`
+  - *Rationale:* Connects Yjs documents to the WebSocket relay and binds shared document changes to Monaco.
 - **Testing & Tooling:** **Vitest** with `happy-dom` for DOM-aware tests, and **ESLint** for code quality.
 - **Intended Browser Compatibility Target (NFR12):** Current desktop versions of **Chrome**, **Edge**, and **Firefox**. Standard web APIs are used, avoiding browser-specific extensions. Formal multi-browser test verification is scheduled for **Sprint 2**.
 
@@ -64,6 +66,7 @@ cp .env.example .env
 |---|---|---|
 | `VITE_SYNC_WS_URL` | `ws://localhost:8081/ws/rooms` | Base URL of the `sync-service` WebSocket relay (T-06 §3.1). |
 | `VITE_EXECUTION_API_URL` | `http://localhost:8082` | Base URL of the `execution-service` REST API (T-06 §4.1). |
+| `VITE_PLATFORM_API_URL` | `http://localhost:8081` | Base URL of the `sync-service` REST API, used to create rooms (`POST /v1/rooms`). Name from the v1 text in `docs/api-contracts.md` section 8. |
 
 All configuration is parsed via `src/config.ts` with safe defaults matching `docs/api-contracts.md`.  
 **Security note (NFR10):** Real `.env` files are ignored by `.gitignore`. Never commit API keys, tokens, or credentials to client configuration.
@@ -87,6 +90,19 @@ The dev server is configured with:
 - The editor page reads this ID from the URL path.
 - Typing in the Monaco editor works upon loading the page (requires internet access to fetch Monaco from CDN).
 
+### Create and join a room locally (US-01)
+
+1. Start `sync-service` on port 8081 (see `sync-service/README.md`; it needs Java 21 and Maven).
+2. Start the client with `npm run dev` and open http://localhost:3000/ (use `localhost`, not `127.0.0.1`: the server only allows the origin `http://localhost:3000` by default).
+3. Click **Create room**. A link of the form `/room/{room_id}` appears. Use **Copy link**, or select it by hand if copying is blocked.
+4. Open the link in a second browser profile or a private window, enter a display name, and the shared editor loads.
+
+Notes:
+- **Placeholder:** "Create room" currently sends a fixed Pair-mode body (`preset: debug_together`). The real mode/preset choice comes from US-34.
+- The owner token returned at creation is stored in `localStorage` under `collab_owner_token:{room_id}`. It is never shown, logged or put in a URL. It is not yet sent when joining.
+- Per `docs/api-contracts.md`, room and owner state lives in memory in Sprint 1, so restarting `sync-service` loses existing rooms.
+- **Collaboration:** The room page connects to the sync-service through `y-websocket` after the participant enters a display name. `y-monaco` binds the shared Yjs document to the Monaco editor.
+- **Document persistence limitation:** The current relay does not permanently persist document content. If all participants disconnect, the document content is not guaranteed to survive. A reconnecting participant can catch up on changes while another participant remains connected.
 ---
 
 ## 6. Building for Production
@@ -130,6 +146,12 @@ Test suites cover:
   - `useRoomDoc` StrictMode regression test (verifies that during React StrictMode effect replay, each replaced document is destroyed, the document after effect replay is live, and the document is destroyed on final unmount).
   - Room ID change regression test (verifies old document is destroyed when switching rooms).
   - `RoomPage` component regression test under `<StrictMode>`.
+- `src/RoomPage.displayName.test.tsx`: Verifies the display-name prompt and editor access after submitting a name.
+- `src/App.test.tsx`: Tests application routing for the home page, room routes, and invalid paths.
+- `src/CreateRoomScreen.test.tsx`: Tests room creation UI, loading state, error handling, share-link display, and clipboard behavior.
+- `src/createRoom.test.ts`: Tests room creation API requests, response validation, owner-token storage, and error handling.
+- `src/roomLink.test.ts`: Tests shareable room URL construction and URL parsing.
+- `src/sessionId.test.ts`: Tests collaboration session ID generation and reuse.
 
 ### Code Quality (Linting)
 Run ESLint:
@@ -146,7 +168,8 @@ In T-01:
 - `yjs` is installed as a primary dependency.
 - **StrictMode-Safe Lifecycle:** `useRoomDoc` (`src/roomDoc.ts`) creates each `Y.Doc` inside effect setup and destroys that exact instance in effect cleanup. No disposable documents are instantiated during the render phase. In development with React StrictMode enabled, effect replay cleanly destroys the first instance and recreates a live document without leaving stale or destroyed documents.
 - **Ref Availability:** The active document is exposed via `docRef` for subsequent **US-01** and **US-02** integrations.
-- Per T-01 specification, document syncing is bound to Monaco in **US-01** and **US-02**.
+- **US-01 / US-02 Integration:** The room page connects to the sync-service using `y-websocket` and binds the shared Yjs document to Monaco using `y-monaco`. The connection is established after the participant enters a display name and the editor is mounted. The provider and binding are cleaned up when the room page unmounts or the room state changes.
+- **Participant Awareness & Presence (US-05):** Yjs Awareness (`y-protocols/awareness`) is used to publish and synchronize the participant's display name and assigned presence colour across control and document sockets.
 
 ---
 

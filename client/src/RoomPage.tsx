@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import type { RefObject } from 'react'
+import type { editor as MonacoEditor } from 'monaco-editor'
 import type { Awareness } from 'y-protocols/awareness'
 import type * as Y from 'yjs'
 import Editor from '@monaco-editor/react'
+import { MonacoBinding } from 'y-monaco'
 import DisplayNamePrompt from './DisplayNamePrompt'
 import {
   createAwareness,
@@ -11,6 +13,7 @@ import {
   type AwarenessUserState,
 } from './awareness'
 import { connectAwarenessWs, type AwarenessWsConnection, type JoinedMessage } from './awarenessWs'
+import { ownerTokenKey } from './createRoom'
 import { getRoomIdFromPath } from './roomId'
 import { useRoomDoc } from './roomDoc'
 import { pickUserColor } from './userColor'
@@ -63,6 +66,8 @@ export default function RoomPage(props: RoomPageProps = {}) {
     wsOptions,
   } = props
   const roomId = getRoomIdFromPath(window.location.pathname)
+  const isInvalidRoomId = !roomId || !/^[A-Za-z0-9_-]{1,64}$/.test(roomId)
+
   const [displayName, setDisplayName] = useState<string | null>(null)
   const [userColor, setUserColor] = useState<string | null>(null)
   const [joinStatus, setJoinStatus] = useState<RoomJoinStatus>('prompt')
@@ -78,6 +83,7 @@ export default function RoomPage(props: RoomPageProps = {}) {
   const pendingNameRef = useRef<string | null>(null)
   const joinStatusRef = useRef<RoomJoinStatus>('prompt')
   const onDisplayNameAcceptedRef = useRef(onDisplayNameAccepted)
+  const bindingRef = useRef<MonacoBinding | null>(null)
 
   useEffect(() => {
     onDisplayNameAcceptedRef.current = onDisplayNameAccepted
@@ -86,7 +92,7 @@ export default function RoomPage(props: RoomPageProps = {}) {
   // Manage Awareness instance lifecycle tied to active Y.Doc and WebSocket relay
   useEffect(() => {
     const doc = docRef.current
-    if (!doc) return
+    if (!doc || isInvalidRoomId) return
 
     const awareness = createAwareness(doc)
     awarenessInstanceRef.current = awareness
@@ -236,6 +242,8 @@ export default function RoomPage(props: RoomPageProps = {}) {
     return () => {
       awareness.off('change', handleAwarenessChange)
       wsCleanup?.()
+      bindingRef.current?.destroy()
+      bindingRef.current = null
       awareness.destroy()
       if (awarenessInstanceRef.current === awareness) {
         awarenessInstanceRef.current = null
@@ -250,7 +258,7 @@ export default function RoomPage(props: RoomPageProps = {}) {
         delete (window as unknown as { awareness?: Awareness }).awareness
       }
     }
-  }, [roomId, docRef, externalAwarenessRef, propDocId, resolveDocId, wsOptions])
+  }, [roomId, isInvalidRoomId, docRef, externalAwarenessRef, propDocId, resolveDocId, wsOptions])
 
   // Keep presence updated in awareness whenever displayName and userColor are set or change
   useEffect(() => {
@@ -268,10 +276,52 @@ export default function RoomPage(props: RoomPageProps = {}) {
     setDocError(null)
     setJoinStatus('joining')
     joinStatusRef.current = 'joining'
-    connRef.current?.join(name)
+
+    let ownerToken: string | undefined
+    if (roomId && typeof localStorage !== 'undefined') {
+      try {
+        const stored = localStorage.getItem(ownerTokenKey(roomId))
+        if (stored) ownerToken = stored
+      } catch {
+        // ignore localStorage access issues
+      }
+    }
+
+    connRef.current?.join(name, ownerToken)
   }
 
-  if (roomId && joinStatus !== 'joined') {
+  if (isInvalidRoomId) {
+    return (
+      <div className="room-page">
+        <header className="room-header">
+          {roomId ? `Room: ${roomId}` : 'No room id in the URL (expected /room/{room_id})'}
+        </header>
+        <div className="room-editor" style={{ position: 'relative' }}>
+          <div
+            role="alert"
+            style={{
+              position: 'absolute',
+              inset: 0,
+              zIndex: 10,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              background: '#ffffff',
+              padding: '24px',
+              textAlign: 'center',
+            }}
+          >
+            <div>
+              <h2>Invalid room link</h2>
+              <p>Please check the room URL and try again.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  if (joinStatus !== 'joined') {
     return (
       <DisplayNamePrompt
         onSubmit={handleDisplayNameAccepted}
@@ -285,7 +335,7 @@ export default function RoomPage(props: RoomPageProps = {}) {
   return (
     <div className="room-page">
       <header className="room-header">
-        <span>{roomId ? `Room: ${roomId}` : 'No room id in the URL (expected /room/{room_id})'}</span>
+        <span>Room: {roomId}</span>
         {displayName && (
           <>
             <span className="room-header-separator" aria-hidden="true"> · </span>
@@ -318,10 +368,20 @@ export default function RoomPage(props: RoomPageProps = {}) {
           height="100%"
           defaultLanguage="plaintext"
           defaultValue=""
-          onMount={() => {
-            // US-01 / US-02 will bind Monaco to the active docRef.current.
-            // The accepted display name is held by RoomPage and exposed through the callback.
-            void docRef.current
+          onMount={(editor: MonacoEditor.IStandaloneCodeEditor) => {
+            const doc = docRef.current
+            const awareness = awarenessInstanceRef.current
+            if (doc && awareness) {
+              const model = editor.getModel()
+              if (model) {
+                bindingRef.current = new MonacoBinding(
+                  doc.getText('monaco'),
+                  model,
+                  new Set([editor]),
+                  awareness,
+                )
+              }
+            }
           }}
         />
       </div>

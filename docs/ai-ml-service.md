@@ -71,3 +71,26 @@ This feature keeps AI use within the project's budget.
 - **Protect user data:** Do not put source code or user text in telemetry logs.
 - **Verify suggested fixes:** A suggested patch is not a proven improvement until it has been tested.
 - **Keep costs under control:** Use cache hits, smaller prompts, token limits, and budget alerts.
+
+
+## 7. AI Consent, Host Switch & Client Responsibilities (US-17, FR12, FR35)
+
+### Client-Side First-Use Consent Notice (FR12.1)
+- **Client Responsibility:** In accordance with FR12.1, the web client (`client/`) must present a first-use consent modal/notice before any user action triggers an analysis request that involves external AI. The client stores this preference locally or passes it per-request.
+- **Scope Boundary:** Modifying `client/` is outside the backend `ai-ml-service` project boundary. The backend expects the client (via `execution-service`) to supply the boolean `consent` field on every analysis request envelope.
+
+### Backend Central Permission Gate (FR12.2, FR35, US-17)
+- **Dual-Condition Enforcement:** An outbound call to an external LLM is strictly permitted **only when both** of the following conditions are true:
+  1. `consent == true` (User has explicitly consented to AI analysis)
+  2. `ai_enabled == true` (Room Host has enabled AI features for the session)
+- **Check Placement:** The permission check is enforced immediately prior to any external LLM invocation (`app.llm.client.call_llm_with_consent`).
+- **Zero Outbound Leaks:** If either flag is `false` or missing (`null`), 0 outbound network calls are made to external AI providers, and no user code or context leaves the sandbox boundary.
+
+### Continuity of Editing, Execution, and AI-Free Analysis (FR12.3, NFR7.5)
+- **Never Gating Sandbox Work:** Declining consent (`consent: false`) or disabling AI (`ai_enabled: false`) must never block or disrupt code editing or sandbox execution runs.
+- **Rule-Based Analysis Continues:** Deterministic, AI-free analysis (such as AST/regex pattern detection and empirical complexity measurements) continues to execute and returns HTTP 200 with complete results.
+- **Skipped Representation:** When AI is skipped or blocked, the service returns HTTP 200 with `ai_step.status = "skipped"` and an explicit error code (`CONSENT_MISSING`, `AI_DISABLED`, `COST_CAP_REACHED`, `ROOM_RATE_LIMITED`, `RATE_LIMITED_PROVIDER`, `PROVIDER_TIMEOUT`, or `PROVIDER_ERROR`).
+- **HTTP 422 for Genuine Validation Errors:** HTTP 403 is never returned for skipped AI. Standard HTTP 422 `INVALID_REQUEST` is returned only when request schemas are genuinely violated.
+
+### Consent Withdrawal Separation (US-21)
+- **Scope Boundary:** Consent withdrawal (FR12.4, US-21: allowing a user to revoke previously granted consent at any time from room settings) is an independent user story. US-17 focuses strictly on the consent gate preventing code from leaving the sandbox without consent.
