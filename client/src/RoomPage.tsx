@@ -10,7 +10,7 @@ import {
   setUserAwareness,
   type AwarenessUserState,
 } from './awareness'
-import { connectAwarenessWs, type AwarenessWsConnection } from './awarenessWs'
+import { connectAwarenessWs, type AwarenessWsConnection, type JoinedMessage } from './awarenessWs'
 import { getRoomIdFromPath } from './roomId'
 import { useRoomDoc } from './roomDoc'
 import { pickUserColor } from './userColor'
@@ -29,12 +29,22 @@ export interface RoomPageProps {
   /** Called once a guest has supplied a valid name and joined; ready for awareness integration. */
   onDisplayNameAccepted?: (displayName: string, userColor?: string) => void
   /**
+   * Optional document ID to bind. In Pair mode, defaults to 'main'.
+   * In Open mode, must be a valid registered module_id (US-05 / T-17 V2.5).
+   */
+  docId?: string
+  /**
+   * Optional resolver function to determine document ID from joined message in Open mode.
+   */
+  resolveDocId?: (joined: JoinedMessage) => Promise<string | null> | string | null
+  /**
    * Optional WebSocket relay configuration or custom WebSocket implementation for testing.
    */
   wsOptions?: {
     syncWsUrl?: string
     sessionId?: string
     WebSocketClass?: typeof WebSocket
+    joinTimeoutMs?: number
   }
 }
 
@@ -48,6 +58,8 @@ export default function RoomPage(props: RoomPageProps = {}) {
     docRef: externalDocRef,
     awarenessRef: externalAwarenessRef,
     onDisplayNameAccepted,
+    docId: propDocId,
+    resolveDocId,
     wsOptions,
   } = props
   const roomId = getRoomIdFromPath(window.location.pathname)
@@ -55,6 +67,7 @@ export default function RoomPage(props: RoomPageProps = {}) {
   const [userColor, setUserColor] = useState<string | null>(null)
   const [joinStatus, setJoinStatus] = useState<RoomJoinStatus>('prompt')
   const [serverError, setServerError] = useState<string | null>(null)
+  const [docError, setDocError] = useState<string | null>(null)
   const [pendingName, setPendingName] = useState<string | null>(null)
 
   // One Y.Doc is created inside effect setup and destroyed in its cleanup (T-01).
@@ -125,11 +138,13 @@ export default function RoomPage(props: RoomPageProps = {}) {
     if (roomId) {
       const conn = connectAwarenessWs({
         roomId,
-        docId: 'main',
+        docId: propDocId,
+        resolveDocId,
         awareness,
         syncWsUrl: wsOptions?.syncWsUrl,
         sessionId: wsOptions?.sessionId,
         WebSocketClass: wsOptions?.WebSocketClass,
+        joinTimeoutMs: wsOptions?.joinTimeoutMs,
         onJoined: () => {
           const name = pendingNameRef.current
           if (!name) return
@@ -161,6 +176,13 @@ export default function RoomPage(props: RoomPageProps = {}) {
           setJoinStatus('refused')
           joinStatusRef.current = 'refused'
         },
+        onJoinTimeout: () => {
+          if (joinStatusRef.current === 'joining') {
+            setServerError('Join request timed out. The server did not respond. Please try again.')
+            setJoinStatus('error')
+            joinStatusRef.current = 'error'
+          }
+        },
         onError: () => {
           if (joinStatusRef.current !== 'joined' && joinStatusRef.current !== 'refused') {
             setServerError('Failed to connect to the room server. Please check your network connection.')
@@ -187,6 +209,18 @@ export default function RoomPage(props: RoomPageProps = {}) {
             setServerError('Unable to connect to the room server. Please check your connection.')
             setJoinStatus('error')
             joinStatusRef.current = 'error'
+          }
+        },
+        onDocError: () => {
+          setDocError('Presence connection error. Remote presence synchronization may be degraded.')
+        },
+        onDocClose: (event) => {
+          if (event.code === 4405) {
+            setDocError('Document sync error (4405): unknown document or unregistered module.')
+          } else if (event.code === 4406) {
+            setDocError('Document sync error (4406): document socket opened before room join.')
+          } else if (event.code !== 1000) {
+            setDocError(`Presence connection closed (${event.code}). Remote presence synchronization stopped.`)
           }
         },
       })
@@ -216,7 +250,7 @@ export default function RoomPage(props: RoomPageProps = {}) {
         delete (window as unknown as { awareness?: Awareness }).awareness
       }
     }
-  }, [roomId, docRef, externalAwarenessRef, wsOptions])
+  }, [roomId, docRef, externalAwarenessRef, propDocId, resolveDocId, wsOptions])
 
   // Keep presence updated in awareness whenever displayName and userColor are set or change
   useEffect(() => {
@@ -231,6 +265,7 @@ export default function RoomPage(props: RoomPageProps = {}) {
     setPendingName(name)
     pendingNameRef.current = name
     setServerError(null)
+    setDocError(null)
     setJoinStatus('joining')
     joinStatusRef.current = 'joining'
     connRef.current?.join(name)
@@ -266,6 +301,16 @@ export default function RoomPage(props: RoomPageProps = {}) {
               <span>You: {displayName}</span>
             </span>
           </>
+        )}
+        {docError && (
+          <span
+            className="room-doc-error-badge"
+            data-testid="room-doc-error"
+            role="alert"
+            style={{ marginLeft: '1rem', color: '#ef4444' }}
+          >
+            ⚠️ {docError}
+          </span>
         )}
       </header>
       <div className="room-editor">

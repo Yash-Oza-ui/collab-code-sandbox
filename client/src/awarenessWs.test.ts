@@ -3,6 +3,7 @@ import * as Y from 'yjs'
 import { createAwareness, getExistingUserColors, setUserAwareness } from './awareness'
 import {
   CLOSE_NOT_JOINED,
+  CLOSE_UNKNOWN_DOC,
   COLLAB_SESSION_ID_KEY,
   MESSAGE_AWARENESS,
   MESSAGE_QUERY_AWARENESS,
@@ -39,6 +40,9 @@ class TestRelay {
   controlClients = new Map<TestWebSocket, { roomId: string; sessionId: string }>()
   docClients = new Map<TestWebSocket, { roomId: string; docId: string; sessionId: string }>()
   refuseNames = new Set<string>()
+  roomModes = new Map<string, 'pair' | 'open'>()
+  roomModules = new Map<string, Set<string>>()
+  ignoreJoins = false
 
   createClient(url: string): TestWebSocket {
     return new TestWebSocket(url, this)
@@ -64,6 +68,22 @@ class TestRelay {
         ws.close(CLOSE_NOT_JOINED, 'Not joined')
         return
       }
+
+      // 4405: doc_id validation (Pair mode must be 'main', Open mode must be registered module)
+      const mode = this.roomModes.get(parsed.roomId) ?? 'pair'
+      if (mode === 'pair') {
+        if (parsed.docId !== 'main') {
+          ws.close(CLOSE_UNKNOWN_DOC, 'Unknown doc_id')
+          return
+        }
+      } else {
+        const modules = this.roomModules.get(parsed.roomId)
+        if (!modules || !modules.has(parsed.docId)) {
+          ws.close(CLOSE_UNKNOWN_DOC, 'Unknown module_id')
+          return
+        }
+      }
+
       this.docClients.set(ws, {
         roomId: parsed.roomId,
         docId: parsed.docId,
@@ -79,6 +99,11 @@ class TestRelay {
     try {
       const msg = JSON.parse(text)
       if (msg.type === 'join') {
+        if (this.ignoreJoins) {
+          // Intentionally do not answer join request to test client join-handshake timeout
+          return
+        }
+
         if (this.refuseNames.has(msg.display_name)) {
           ws.receiveText(
             JSON.stringify({
@@ -103,13 +128,15 @@ class TestRelay {
         }
         room.set(meta.sessionId, session)
 
+        const roomMode = this.roomModes.get(meta.roomId) ?? 'pair'
+
         // 1. Reply to joining client with 'joined'
         ws.receiveText(
           JSON.stringify({
             type: 'joined',
             member_id: meta.sessionId,
             role: session.role,
-            mode: 'COLLAB',
+            mode: roomMode,
             permissions: { can_edit: true, can_run: true },
           }),
         )
@@ -578,5 +605,157 @@ describe('T-20 WebSocket connection and multi-client awareness synchronization',
     expect(conn.docWs).toBeNull()
 
     conn.destroy()
+  })
+
+  it('triggers onJoinTimeout when control socket does not respond within joinTimeoutMs', async () => {
+    const relay = new TestRelay()
+    relay.ignoreJoins = true // server silently drops join requests
+
+    const doc = new Y.Doc()
+    const awareness = createAwareness(doc)
+    let timedOut = false
+
+    const conn = connectAwarenessWs({
+      roomId: 'test-timeout-room',
+      displayName: 'Alice',
+      awareness,
+      joinTimeoutMs: 30, // 30ms bounded timeout for test
+      syncWsUrl: 'ws://localhost:8081/ws/rooms',
+      sessionId: '55555555-5555-4555-8555-555555555555',
+      WebSocketClass: function (url: string) {
+        return relay.createClient(url)
+      } as unknown as typeof WebSocket,
+      onJoinTimeout: () => {
+        timedOut = true
+      },
+    })
+
+    await new Promise((r) => setTimeout(r, 60))
+
+    expect(timedOut).toBe(true)
+    expect(conn.docWs).toBeNull()
+
+    conn.destroy()
+  })
+
+  it('cancels joinTimeout upon receiving joined response', async () => {
+    const relay = new TestRelay()
+    const doc = new Y.Doc()
+    const awareness = createAwareness(doc)
+    let timedOut = false
+    let joined = false
+
+    const conn = connectAwarenessWs({
+      roomId: 'test-cancel-timeout-room',
+      displayName: 'Bob',
+      awareness,
+      joinTimeoutMs: 100,
+      syncWsUrl: 'ws://localhost:8081/ws/rooms',
+      sessionId: '66666666-6666-4666-8666-666666666666',
+      WebSocketClass: function (url: string) {
+        return relay.createClient(url)
+      } as unknown as typeof WebSocket,
+      onJoined: () => {
+        joined = true
+      },
+      onJoinTimeout: () => {
+        timedOut = true
+      },
+    })
+
+    await new Promise((r) => setTimeout(r, 20))
+    expect(joined).toBe(true)
+
+    // Wait beyond timeout threshold
+    await new Promise((r) => setTimeout(r, 120))
+    expect(timedOut).toBe(false)
+
+    conn.destroy()
+  })
+
+  it('Pair mode strictly preserves docId main', async () => {
+    const relay = new TestRelay()
+    relay.roomModes.set('test-pair-room', 'pair')
+
+    const doc = new Y.Doc()
+    const awareness = createAwareness(doc)
+    let openedDocWsUrl = ''
+
+    const conn = connectAwarenessWs({
+      roomId: 'test-pair-room',
+      displayName: 'PairUser',
+      awareness,
+      syncWsUrl: 'ws://localhost:8081/ws/rooms',
+      sessionId: '77777777-7777-4777-8777-777777777777',
+      WebSocketClass: function (url: string) {
+        const client = relay.createClient(url)
+        if (url.includes('/docs/')) {
+          openedDocWsUrl = url
+        }
+        return client
+      } as unknown as typeof WebSocket,
+    })
+
+    await new Promise((r) => setTimeout(r, 30))
+    expect(openedDocWsUrl).toContain('/docs/main')
+    expect(conn.docWs).not.toBeNull()
+
+    conn.destroy()
+  })
+
+  it('Open mode connects to registered module docId and handles 4405 close on unknown module', async () => {
+    const relay = new TestRelay()
+    relay.roomModes.set('test-open-room', 'open')
+    relay.roomModules.set('test-open-room', new Set(['mod_registered_101']))
+
+    // 1. Connection with unregistered module triggers 4405 close
+    const docUnregistered = new Y.Doc()
+    const awarenessUnregistered = createAwareness(docUnregistered)
+    let docCloseCode = 0
+
+    const connUnregistered = connectAwarenessWs({
+      roomId: 'test-open-room',
+      displayName: 'User1',
+      docId: 'mod_unknown_999',
+      awareness: awarenessUnregistered,
+      syncWsUrl: 'ws://localhost:8081/ws/rooms',
+      sessionId: '88888888-8888-4888-8888-888888888888',
+      WebSocketClass: function (url: string) {
+        return relay.createClient(url)
+      } as unknown as typeof WebSocket,
+      onDocClose: (ev) => {
+        docCloseCode = ev.code
+      },
+    })
+
+    await new Promise((r) => setTimeout(r, 30))
+    expect(docCloseCode).toBe(CLOSE_UNKNOWN_DOC) // 4405
+    connUnregistered.destroy()
+
+    // 2. Connection with registered module connects successfully
+    const docRegistered = new Y.Doc()
+    const awarenessRegistered = createAwareness(docRegistered)
+    let openedDocWsUrl = ''
+
+    const connRegistered = connectAwarenessWs({
+      roomId: 'test-open-room',
+      displayName: 'User2',
+      docId: 'mod_registered_101',
+      awareness: awarenessRegistered,
+      syncWsUrl: 'ws://localhost:8081/ws/rooms',
+      sessionId: '99999999-9999-4999-8999-999999999999',
+      WebSocketClass: function (url: string) {
+        const client = relay.createClient(url)
+        if (url.includes('/docs/')) {
+          openedDocWsUrl = url
+        }
+        return client
+      } as unknown as typeof WebSocket,
+    })
+
+    await new Promise((r) => setTimeout(r, 30))
+    expect(openedDocWsUrl).toContain('/docs/mod_registered_101')
+    expect(connRegistered.docWs).not.toBeNull()
+    connRegistered.destroy()
   })
 })

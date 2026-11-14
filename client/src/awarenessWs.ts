@@ -29,6 +29,24 @@ export const CLOSE_UNKNOWN_DOC = 4405
 export const CLOSE_NOT_JOINED = 4406
 export const CLOSE_ROOM_CLOSED = 4410
 
+/** Default join-handshake timeout in milliseconds. */
+export const DEFAULT_JOIN_TIMEOUT_MS = 5000
+
+class MockCloseEvent extends Event {
+  code: number
+  reason: string
+  constructor(type: string, init?: { code?: number; reason?: string }) {
+    super(type)
+    this.code = init?.code ?? 1000
+    this.reason = init?.reason ?? ''
+  }
+}
+
+export const SafeCloseEvent =
+  typeof CloseEvent !== 'undefined'
+    ? CloseEvent
+    : (MockCloseEvent as unknown as typeof CloseEvent)
+
 /**
  * Generates a valid UUID v4 compliant with RFC 4122 (T-06 §3.3).
  */
@@ -227,15 +245,20 @@ export interface ConnectAwarenessWsOptions {
   displayName?: string
   ownerToken?: string
   docId?: string
+  resolveDocId?: (joined: JoinedMessage) => Promise<string | null> | string | null
   awareness: Awareness
   syncWsUrl?: string
   sessionId?: string
   WebSocketClass?: typeof WebSocket
+  joinTimeoutMs?: number
   onJoined?: (msg: JoinedMessage) => void
   onJoinRefused?: (msg: JoinRefusedMessage) => void
   onRoster?: (msg: RosterMessage) => void
   onError?: (event: Event) => void
   onClose?: (event: CloseEvent) => void
+  onDocError?: (event: Event) => void
+  onDocClose?: (event: CloseEvent) => void
+  onJoinTimeout?: () => void
 }
 
 export interface AwarenessWsConnection {
@@ -260,15 +283,20 @@ export function connectAwarenessWs(
     displayName,
     ownerToken,
     docId = 'main',
+    resolveDocId,
     awareness,
     syncWsUrl = getClientConfig().syncWsUrl,
     sessionId = getCollabSessionId(),
     WebSocketClass = typeof WebSocket !== 'undefined' ? WebSocket : undefined,
+    joinTimeoutMs = DEFAULT_JOIN_TIMEOUT_MS,
     onJoined,
     onJoinRefused,
     onRoster,
     onError,
     onClose,
+    onDocError,
+    onDocClose,
+    onJoinTimeout,
   } = options
 
   if (!WebSocketClass) {
@@ -284,9 +312,28 @@ export function connectAwarenessWs(
   let docWs: WebSocket | null = null
   let isDestroyed = false
   let pendingJoin: { name: string; token?: string } | null = null
+  let joinTimer: ReturnType<typeof setTimeout> | null = null
+
+  const clearJoinTimer = () => {
+    if (joinTimer) {
+      clearTimeout(joinTimer)
+      joinTimer = null
+    }
+  }
+
+  const startJoinTimer = () => {
+    clearJoinTimer()
+    if (joinTimeoutMs > 0) {
+      joinTimer = setTimeout(() => {
+        if (isDestroyed) return
+        onJoinTimeout?.()
+      }, joinTimeoutMs)
+    }
+  }
 
   const sendJoin = (name: string, token?: string) => {
     if (controlWs && controlWs.readyState === WS_OPEN) {
+      startJoinTimer()
       const payload: Record<string, string> = {
         type: 'join',
         display_name: name,
@@ -307,11 +354,79 @@ export function connectAwarenessWs(
     | null = null
 
   // 2. Open Document Socket upon receiving 'joined'
-  const openDocumentSocket = () => {
+  const openDocumentSocket = async (joinedMsg?: JoinedMessage) => {
     if (isDestroyed || docWs) return
-    const docUrl = buildDocumentWebSocketUrl(syncWsUrl, roomId, docId, sessionId)
+
+    let resolvedDocId = docId
+    const roomMode = joinedMsg?.mode ? String(joinedMsg.mode).toLowerCase() : undefined
+
+    if (roomMode === 'pair') {
+      // Pair mode strictly requires 'main' (T-17 V2.5 / DocumentHandler)
+      resolvedDocId = 'main'
+    } else if (roomMode === 'open') {
+      // Open mode requires a valid registered module_id
+      if (resolveDocId && joinedMsg) {
+        try {
+          const customId = await resolveDocId(joinedMsg)
+          if (customId) {
+            resolvedDocId = customId
+          }
+        } catch {
+          // fallback
+        }
+      } else if (!resolvedDocId || resolvedDocId === 'main') {
+        try {
+          const httpBase = syncWsUrl.replace(/^ws/, 'http').replace(/\/ws\/rooms.*$/, '')
+          const res = await fetch(`${httpBase}/v1/rooms/${encodeURIComponent(roomId)}/modules`, {
+            headers: sessionId ? { 'X-Session-Id': sessionId } : {},
+          })
+          if (res.ok) {
+            const modules = (await res.json()) as Array<{
+              module_id: string
+              is_entry?: boolean
+              pending?: boolean
+            }>
+            if (Array.isArray(modules) && modules.length > 0) {
+              const active =
+                modules.find((m) => m.is_entry && !m.pending) ??
+                modules.find((m) => !m.pending) ??
+                modules[0]
+              if (active?.module_id) {
+                resolvedDocId = active.module_id
+              }
+            }
+          }
+        } catch {
+          // ignore fetch error
+        }
+      }
+    } else if (!resolvedDocId) {
+      resolvedDocId = 'main'
+    }
+
+    if (!resolvedDocId) {
+      onDocClose?.(
+        new SafeCloseEvent('close', {
+          code: CLOSE_UNKNOWN_DOC,
+          reason: 'No registered module document found for Open room',
+        }),
+      )
+      return
+    }
+
+    if (isDestroyed || docWs) return
+
+    const docUrl = buildDocumentWebSocketUrl(syncWsUrl, roomId, resolvedDocId, sessionId)
     docWs = new WebSocketClass(docUrl)
     docWs.binaryType = 'arraybuffer'
+
+    docWs.onerror = (event: Event) => {
+      onDocError?.(event)
+    }
+
+    docWs.onclose = (event: CloseEvent) => {
+      onDocClose?.(event)
+    }
 
     onDocAwarenessUpdate = (
       {
@@ -365,9 +480,11 @@ export function connectAwarenessWs(
         try {
           const msg = JSON.parse(event.data) as { type?: string }
           if (msg.type === 'joined') {
+            clearJoinTimer()
             onJoined?.(msg as JoinedMessage)
-            openDocumentSocket()
+            void openDocumentSocket(msg as JoinedMessage)
           } else if (msg.type === 'join-refused') {
+            clearJoinTimer()
             onJoinRefused?.(msg as JoinRefusedMessage)
           } else if (msg.type === 'roster') {
             onRoster?.(msg as RosterMessage)
@@ -379,10 +496,12 @@ export function connectAwarenessWs(
     }
 
     ws.onerror = (event: Event) => {
+      clearJoinTimer()
       onError?.(event)
     }
 
     ws.onclose = (event: CloseEvent) => {
+      clearJoinTimer()
       onClose?.(event)
     }
 
@@ -398,12 +517,14 @@ export function connectAwarenessWs(
     const activeControlWs = controlWs
     if (!activeControlWs || activeControlWs.readyState === WS_CLOSED || activeControlWs.readyState === WS_CLOSING) {
       controlWs = initControlSocket()
+      startJoinTimer()
       return
     }
 
     if (activeControlWs.readyState === WS_OPEN) {
       sendJoin(name, token)
     } else if (typeof activeControlWs.addEventListener === 'function') {
+      startJoinTimer()
       activeControlWs.addEventListener(
         'open',
         () => {
@@ -412,6 +533,7 @@ export function connectAwarenessWs(
         { once: true },
       )
     } else {
+      startJoinTimer()
       const prevOnOpen = activeControlWs.onopen
       activeControlWs.onopen = (ev: Event) => {
         prevOnOpen?.call(activeControlWs, ev)
@@ -423,6 +545,7 @@ export function connectAwarenessWs(
   const destroy = () => {
     isDestroyed = true
     pendingJoin = null
+    clearJoinTimer()
     if (onDocAwarenessUpdate) {
       awareness.off('update', onDocAwarenessUpdate)
       onDocAwarenessUpdate = null

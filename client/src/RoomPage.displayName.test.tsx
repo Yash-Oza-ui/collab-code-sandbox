@@ -38,6 +38,9 @@ class T20Relay {
   controlSockets = new Map<RelaySocket, { roomId: string; sessionId: string }>()
   docSockets = new Map<RelaySocket, { roomId: string; docId: string; sessionId: string }>()
   refuseNames = new Set<string>()
+  roomModes = new Map<string, 'pair' | 'open'>()
+  roomModules = new Map<string, Set<string>>()
+  ignoreJoins = false
 
   parseUrl(url: string) {
     const u = new URL(url.replace(/^ws/, 'http'))
@@ -70,6 +73,22 @@ class T20Relay {
         ws.close(4406, 'Not joined')
         return
       }
+
+      // 4405: doc_id validation (Pair mode must be 'main', Open mode must be registered module)
+      const mode = this.roomModes.get(parsed.roomId) ?? 'pair'
+      if (mode === 'pair') {
+        if (parsed.docId !== 'main') {
+          ws.close(4405, 'Unknown doc_id')
+          return
+        }
+      } else {
+        const modules = this.roomModules.get(parsed.roomId)
+        if (!modules || !modules.has(parsed.docId)) {
+          ws.close(4405, 'Unknown module_id')
+          return
+        }
+      }
+
       this.docSockets.set(ws, {
         roomId: parsed.roomId,
         docId: parsed.docId,
@@ -84,6 +103,11 @@ class T20Relay {
     try {
       const msg = JSON.parse(text)
       if (msg.type === 'join') {
+        if (this.ignoreJoins) {
+          // Intentionally do not reply to test client join-handshake timeout
+          return
+        }
+
         if (this.refuseNames.has(msg.display_name)) {
           ws.receiveText(
             JSON.stringify({
@@ -102,12 +126,13 @@ class T20Relay {
           sessionId: meta.sessionId,
           displayName: msg.display_name,
         })
+        const roomMode = this.roomModes.get(meta.roomId) ?? 'pair'
         ws.receiveText(
           JSON.stringify({
             type: 'joined',
             member_id: meta.sessionId,
             role: 'Guest',
-            mode: 'COLLAB',
+            mode: roomMode,
             permissions: { can_edit: true, can_run: true },
           }),
         )
@@ -622,5 +647,209 @@ describe('RoomPage display-name and colour presence join lifecycle', () => {
 
     expect((window as unknown as { awareness?: Awareness }).awareness).toBeUndefined()
     expect(awarenessRef.current).toBeNull()
+  })
+
+  it('join timeout and recoverable retry: unblocks form after timeout and allows retry', async () => {
+    relay.ignoreJoins = true // Control socket connects, but server hangs / drops join
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    root = createRoot(container)
+
+    await act(async () => {
+      root?.render(
+        <RoomPage
+          wsOptions={{
+            WebSocketClass: createRelaySocketClass(relay),
+            sessionId: '60000000-0000-4000-8000-000000000006',
+            joinTimeoutMs: 35, // 35ms timeout for testing
+          }}
+        />,
+      )
+    })
+
+    const input = container.querySelector<HTMLInputElement>('#display-name')!
+    const form = container.querySelector<HTMLFormElement>('form')!
+
+    // User submits name
+    await act(async () => {
+      input.value = 'Dennis'
+      form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+    })
+
+    // While waiting for server: button is disabled, loading state shown
+    const submitBtn = container.querySelector<HTMLButtonElement>('button')!
+    expect(submitBtn.disabled).toBe(true)
+    expect(submitBtn.textContent).toBe('Joining room...')
+    expect(container.querySelector('[data-testid="mock-monaco-editor"]')).toBeNull()
+
+    // Wait for timeout to fire (35ms timeout + grace period)
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 60))
+    })
+
+    // Form is now unblocked and shows timeout alert
+    expect(container.querySelector('[data-testid="mock-monaco-editor"]')).toBeNull()
+    const alert = container.querySelector('[role="alert"]')
+    expect(alert).not.toBeNull()
+    expect(alert?.textContent).toContain('Join request timed out')
+
+    const retryBtn = container.querySelector<HTMLButtonElement>('button')!
+    expect(retryBtn.disabled).toBe(false)
+    expect(retryBtn.textContent).toBe('Join room')
+
+    // Typed name was preserved for retry
+    const retryInput = container.querySelector<HTMLInputElement>('#display-name')!
+    expect(retryInput.value).toBe('Dennis')
+
+    // Server is now responsive again
+    relay.ignoreJoins = false
+
+    // User retries
+    await act(async () => {
+      form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+    })
+
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 35))
+    })
+
+    // Retry succeeded: Editor becomes visible
+    expect(container.querySelector('[data-testid="mock-monaco-editor"]')).not.toBeNull()
+    expect(container.textContent).toContain('You: Dennis')
+  })
+
+  it('Open mode awareness synchronization: synchronizes Alice and Bob over registered module docId', async () => {
+    const roomId = 'open-sync-room'
+    window.history.replaceState({}, '', `/room/${roomId}`)
+    relay.roomModes.set(roomId, 'open')
+    relay.roomModules.set(roomId, new Set(['mod_calc_1']))
+
+    const containerA = document.createElement('div')
+    const containerB = document.createElement('div')
+    document.body.appendChild(containerA)
+    document.body.appendChild(containerB)
+
+    let rootA: ReturnType<typeof createRoot> | null = createRoot(containerA)
+    let rootB: ReturnType<typeof createRoot> | null = createRoot(containerB)
+
+    const awarenessRefA: RefObject<Awareness | null> = { current: null }
+    const awarenessRefB: RefObject<Awareness | null> = { current: null }
+
+    await act(async () => {
+      rootA?.render(
+        <RoomPage
+          docId="mod_calc_1"
+          awarenessRef={awarenessRefA}
+          wsOptions={{
+            WebSocketClass: createRelaySocketClass(relay),
+            sessionId: '71111111-1111-4111-8111-111111111111',
+          }}
+        />,
+      )
+    })
+
+    const inputA = containerA.querySelector<HTMLInputElement>('#display-name')!
+    const formA = containerA.querySelector<HTMLFormElement>('form')!
+    await act(async () => {
+      inputA.value = 'Alice'
+      formA.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+    })
+
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 35))
+    })
+
+    await act(async () => {
+      rootB?.render(
+        <RoomPage
+          docId="mod_calc_1"
+          awarenessRef={awarenessRefB}
+          wsOptions={{
+            WebSocketClass: createRelaySocketClass(relay),
+            sessionId: '72222222-2222-4222-8222-222222222222',
+          }}
+        />,
+      )
+    })
+
+    const inputB = containerB.querySelector<HTMLInputElement>('#display-name')!
+    const formB = containerB.querySelector<HTMLFormElement>('form')!
+    await act(async () => {
+      inputB.value = 'Bob'
+      formB.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+    })
+
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 60))
+    })
+
+    // Both clients are on Open-mode module document mod_calc_1
+    const statesA = Array.from(awarenessRefA.current?.getStates().values() ?? [])
+    const statesB = Array.from(awarenessRefB.current?.getStates().values() ?? [])
+
+    const aliceInA = statesA.find((s) => s.user?.name === 'Alice')
+    const bobInA = statesA.find((s) => s.user?.name === 'Bob')
+    const aliceInB = statesB.find((s) => s.user?.name === 'Alice')
+    const bobInB = statesB.find((s) => s.user?.name === 'Bob')
+
+    expect(aliceInA?.user?.name).toBe('Alice')
+    expect(bobInA?.user?.name).toBe('Bob')
+    expect(aliceInB?.user?.name).toBe('Alice')
+    expect(bobInB?.user?.name).toBe('Bob')
+
+    // Distinct colours verified in Open mode
+    expect(aliceInA?.user?.color).not.toBe(bobInA?.user?.color)
+
+    await act(async () => {
+      rootB?.unmount()
+      rootA?.unmount()
+      rootB = null
+      rootA = null
+    })
+    containerA.remove()
+    containerB.remove()
+  })
+
+  it('Open mode 4405 document socket rejection surfaces visible error badge', async () => {
+    const roomId = 'open-err-room'
+    window.history.replaceState({}, '', `/room/${roomId}`)
+    relay.roomModes.set(roomId, 'open')
+    relay.roomModules.set(roomId, new Set(['mod_approved_only']))
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    root = createRoot(container)
+
+    await act(async () => {
+      root?.render(
+        <RoomPage
+          docId="mod_unregistered_invalid"
+          wsOptions={{
+            WebSocketClass: createRelaySocketClass(relay),
+            sessionId: '80000000-0000-4000-8000-000000000008',
+          }}
+        />,
+      )
+    })
+
+    const input = container.querySelector<HTMLInputElement>('#display-name')!
+    const form = container.querySelector<HTMLFormElement>('form')!
+    await act(async () => {
+      input.value = 'Eve'
+      form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+    })
+
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 45))
+    })
+
+    // Control join was successful, so editor mounted
+    expect(container.querySelector('[data-testid="mock-monaco-editor"]')).not.toBeNull()
+
+    // But document socket closed with 4405, and error is visibly surfaced!
+    const docErrorBadge = container.querySelector('[data-testid="room-doc-error"]')
+    expect(docErrorBadge).not.toBeNull()
+    expect(docErrorBadge?.textContent).toContain('4405')
   })
 })
