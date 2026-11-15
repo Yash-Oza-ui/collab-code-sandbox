@@ -202,7 +202,7 @@ jobs:
   integration:
     name: integration
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 35 # headroom for up.sh's one build retry on a transient flake
     env:
       SMOKE_TIMEOUT: "120" # cold CI builds start slower than a laptop
     steps:

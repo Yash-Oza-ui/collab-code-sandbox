@@ -55,15 +55,26 @@ class MockWebSocket {
 describe('roomConnection', () => {
   const roomId = 'room_123'
   const tokenKey = ownerTokenKey(roomId)
+  let storage: Map<string, string>
 
-  beforeEach(() => {
+    beforeEach(() => {
+      storage = new Map()
+
     vi.stubGlobal('WebSocket', MockWebSocket)
+
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) =>
+        storage.set(key, String(value)),
+      removeItem: (key: string) => storage.delete(key),
+      clear: () => storage.clear(),
+    })
+
     vi.clearAllMocks()
     localStorage.removeItem(tokenKey)
   })
 
   afterEach(() => {
-    localStorage.removeItem(tokenKey)
     vi.useRealTimers()
     vi.unstubAllGlobals()
   })
@@ -117,11 +128,12 @@ describe('roomConnection', () => {
     expect(result.joined.role).toBe('participant')
   })
 
-  it('still allows joining when local storage is unavailable', async () => {
-    const getItem = vi.spyOn(Storage.prototype, 'getItem')
-      .mockImplementation(() => {
+    it('still allows joining when local storage is unavailable', async () => {
+    vi.stubGlobal('localStorage', {
+      getItem: () => {
         throw new Error('Storage unavailable')
-      })
+      },
+    })
 
     const promise = joinRoom(roomId, 'Chandan', 'session_456')
     const socket = MockWebSocket.instance
@@ -136,9 +148,8 @@ describe('roomConnection', () => {
     )
 
     socket.receive({ type: 'joined' })
-    await expect(promise).resolves.toBeDefined()
 
-    getItem.mockRestore()
+    await expect(promise).resolves.toBeDefined()
   })
 
   it('resolves after server acceptance and removes handshake handlers', async () => {

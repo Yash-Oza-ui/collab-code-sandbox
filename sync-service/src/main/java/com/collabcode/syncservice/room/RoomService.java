@@ -10,8 +10,8 @@ import java.util.List;
  *
  * <p>This is the server-side model only; wiring it onto the control socket is
  * done where the control/document sockets are split (the Bhavya part of T-20).
- * A member is identified publicly by its {@code member_id}; the private
- * {@code session_id} is never exposed.
+ * A member is identified publicly by its member_id; the private session_id
+ * is never exposed.
  */
 @Component
 public class RoomService {
@@ -40,6 +40,12 @@ public class RoomService {
         Member existing = findBySession(room, sessionId);
         if (existing != null) {
             return JoinOutcome.joined(existing);
+        }
+
+        // FR9.3 / US-26: if the room requires Host approval, the join is held as
+        // APPROVAL_PENDING. The control socket must remain open (V2.3 review 2).
+        if (room.isRequiresApproval()) {
+            return JoinOutcome.refused("APPROVAL_PENDING");
         }
 
         // A display name already used by a DIFFERENT session is refused (FR42).
@@ -80,9 +86,7 @@ public class RoomService {
 
     /**
      * Change a member's role and recompute its permissions (US-27, V2.17).
-     * An Observer gets {@code can_edit:false, can_run:false}; a participant gets
-     * the preset's default edit access (FR19.2). Returns the updated member, or
-     * {@code null} if the room or member is unknown.
+     * Returns the updated member, or null if the room or member is unknown.
      */
     public synchronized Member changeRole(String roomId, String memberId, Role newRole) {
         Room room = store.get(roomId);
@@ -107,17 +111,14 @@ public class RoomService {
 
     /**
      * Base edit permission at join. In Pair mode the preset decides the default
-     * (FR19.2): Teach/Interview lets only the Host edit; Debug together lets
-     * everyone edit. The Host can change this later (US-35). In Open mode edit
-     * rights are per module, so this room-level flag is not used and the
-     * join/roster message omits {@code can_edit} (see {@link RoomMessages}).
+     * (FR19.2). In Open mode edit rights are per module so this flag is not sent.
      */
     private boolean computeCanEdit(Room room, Role role) {
         if (role == Role.OBSERVER) {
-            return false; // an Observer never edits, in either mode (FR9.4)
+            return false;
         }
         if (room.getMode() != RoomMode.PAIR) {
-            return false; // Open: per-module; value is not sent
+            return false;
         }
         if (role == Role.HOST) {
             return true;
@@ -141,5 +142,16 @@ public class RoomService {
             }
         }
         return null;
+    }
+
+    /**
+     * Mark a room as closed / destroyed (FR31.2, T-17 V2.5).
+     * Returns false if the room is unknown.
+     */
+    public boolean closeRoom(String roomId) {
+        Room room = store.get(roomId);
+        if (room == null) return false;
+        room.close();
+        return true;
     }
 }

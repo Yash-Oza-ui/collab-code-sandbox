@@ -1,0 +1,46 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "InternalRunRequest",
+  "description": "Internal container-execution request from ai-ml-service to execution-service (Decision 7, §18). Optional test_batch and sanitizer extensions remain provisional pending execution-service confirmation (§16.3, §23).",
+  "type": "object",
+  "properties": {
+    "request_id": { "type": "string", "format": "uuid" },
+    "room_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{22}$"
+    },
+    "purpose": {
+      "type": "string",
+      "enum": ["measurement", "test_batch", "sanitizer"]
+    },
+    "language": {
+      "type": "string",
+      "enum": ["cpp", "python", "c", "java", "javascript"]
+    },
+    "code": { "type": "string", "minLength": 1 },
+    "stdin": {
+      "type": "string",
+      "description": "Optional standard input supplied when reproducing a crash during sanitizer execution."
+    },
+    "inputs": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "reference_solution": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Provisional (pending execution-service sign-off): authoritative reference source for wrong_output comparison in test_batch."
+    },
+    "expected_outputs": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Provisional (pending execution-service sign-off): optional expected stdout values matching inputs."
+    },
+    "sanitizers": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  },
+  "required": ["request_id", "room_id", "purpose", "language", "code"],
+  "additionalProperties": true
+}

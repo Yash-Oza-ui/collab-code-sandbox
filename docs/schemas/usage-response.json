@@ -1,0 +1,28 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "UsageCountersResponse",
+  "type": "object",
+  "properties": {
+    "total_model_calls": { "type": "integer", "minimum": 0 },
+    "total_tokens_used": { "type": "integer", "minimum": 0 },
+    "total_cache_hits": { "type": "integer", "minimum": 0 },
+    "total_fallback_activations": { "type": "integer", "minimum": 0 },
+    "monthly_spend_usd": { "type": "number", "minimum": 0.0 },
+    "monthly_budget_usd": { "type": "number", "minimum": 0.0 },
+    "alert_80_percent_triggered": { "type": "boolean" },
+    "cost_cap_reached": { "type": "boolean" },
+    "rooms_tracked": { "type": "integer", "minimum": 0 }
+  },
+  "required": [
+    "total_model_calls",
+    "total_tokens_used",
+    "total_cache_hits",
+    "total_fallback_activations",
+    "monthly_spend_usd",
+    "monthly_budget_usd",
+    "alert_80_percent_triggered",
+    "cost_cap_reached",
+    "rooms_tracked"
+  ],
+  "additionalProperties": false
+}

@@ -14,12 +14,29 @@ import numpy as np
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from app.llm import generate_explanation
+from app.cache import compute_cache_key, get_analysis_cache
+from app.counters import (
+    clear_room,
+    get_room_usage,
+    get_total_usage,
+    record_fallback,
+)
+from app.limiter import get_room_rate_limiter
+from app.llm import (
+    AIDisabledError,
+    ConsentMissingError,
+    LLMProviderError,
+    LLMRateLimitError,
+    LLMTimeoutError,
+    RoomRateLimitedError,
+    generate_explanation,
+)
 from app.llm.client import call_llm_with_consent
 from app.rules.patterns import (
     detect_slow_patterns,
     run_rule_based_analysis_with_ai_fallback,
 )
+from app.section import extract_relevant_section
 
 logger = logging.getLogger(__name__)
 
@@ -179,7 +196,7 @@ def estimate_complexity_from_measurements(measurements: list[MeasurementItem]) -
             "projected_timeout_input_size": timeout_n,
         }
     except Exception as e:
-        logger.warning("Error computing regression: %s", e)
+        logger.warning("Error computing regression: %s", type(e).__name__)
         return {
             "growth_rate": 0.0,
             "estimated_complexity": "O(1)",
@@ -195,38 +212,48 @@ def estimate_complexity_from_measurements(measurements: list[MeasurementItem]) -
 
 @router.post("/analyses/complexity", response_model=ComplexityResponse)
 async def analyze_complexity(payload: ComplexityRequest, request: Request) -> ComplexityResponse:
-    """Analyze time complexity using rules-first static analysis and AI fallback (US-17, US-65..US-67, FR12.3)."""
+    """Analyze time complexity using rules-first static analysis and AI fallback (US-17, US-65..US-67, FR12.3, US-76)."""
     request.state.request_id = payload.request_id
     request.state.room_id = payload.room_id
+    request.state.request_type = payload.request_type
+    request.state.language = payload.language
 
     # 1. Compute empirical complexity metrics from measurements (FR36.1, FR36.2)
     comp_metrics = estimate_complexity_from_measurements(payload.measurements)
 
-    # 2. Define the AI optimization fallback
+    # 2. Define the AI optimization fallback with relevant code extraction (FR40.2, US-76)
     async def ai_fallback() -> str:
+        detected_patterns = detect_slow_patterns(payload.code, language=payload.language)
+        target_line = detected_patterns[0]["line"] if detected_patterns else None
+        relevant_code = extract_relevant_section(
+            code=payload.code,
+            language=payload.language,
+            error_line=target_line,
+        )
         prompt = (
             f"Suggest an optimization fix for {payload.language} code:\n"
-            f"```\n{payload.code}\n```"
+            f"```\n{relevant_code}\n```"
         )
         return await call_llm_with_consent(
             prompt=prompt,
             consent=payload.consent,
             ai_enabled=payload.ai_enabled,
+            room_id=payload.room_id,
         )
 
     # 3. Rules-First Static Analysis with Central Consent/AI Gate (FR12.2, FR12.3, FR35)
-    # Always runs AI-free AST/regex pattern detection first.
-    # When consent is false/missing or ai_enabled is false, zero LLM calls occur,
-    # and rule findings are returned with HTTP 200.
     rule_analysis = await run_rule_based_analysis_with_ai_fallback(
         code=payload.code,
         language=payload.language,
         consent=payload.consent,
         ai_enabled=payload.ai_enabled,
         ai_fallback=ai_fallback,
+        room_id=payload.room_id,
+        request_type="complexity",
     )
 
     ai_step = rule_analysis["ai_step"]
+    request.state.error_code = ai_step.get("error_code")
 
     # 4. Sandbox patch verification (FR36.3, US-66)
     if ai_step.get("status") == "ok":
@@ -272,12 +299,15 @@ async def analyze_complexity(payload: ComplexityRequest, request: Request) -> Co
 
 @router.post("/analyses/crash-explanation", response_model=CrashExplanationResponse)
 async def explain_crash(payload: CrashExplanationRequest, request: Request) -> CrashExplanationResponse:
-    """Explain sanitizer crash report for C/C++ code (US-73, US-74, T-18 v2 §16.4)."""
+    """Explain sanitizer crash report for C/C++ code (US-73, US-74, US-76, T-18 v2 §16.4)."""
     request.state.request_id = payload.request_id
     request.state.room_id = payload.room_id
+    request.state.request_type = payload.request_type
+    request.state.language = payload.language
 
     # 1. DR5: Sanitizer crash explanation is supported for C and C++ only
     if payload.language not in ["c", "cpp"]:
+        request.state.error_code = "UNSUPPORTED_LANGUAGE"
         raise HTTPException(
             status_code=422,
             detail={
@@ -299,8 +329,9 @@ async def explain_crash(payload: CrashExplanationRequest, request: Request) -> C
 
     summary = f"Detected {error_type} at line {line_number}."
 
-    # 3. AI Gate (FR12.2, FR35)
+    # 3. Controlled AI pipeline (US-17, FR35, NFR5.3, NFR5.2, US-22, US-75)
     if payload.consent is not True:
+        record_fallback(payload.room_id)
         ai_step = CrashAIStep(
             status="skipped",
             error_code="CONSENT_MISSING",
@@ -308,6 +339,7 @@ async def explain_crash(payload: CrashExplanationRequest, request: Request) -> C
             suggested_fix=None,
         )
     elif payload.ai_enabled is not True:
+        record_fallback(payload.room_id)
         ai_step = CrashAIStep(
             status="skipped",
             error_code="AI_DISABLED",
@@ -315,33 +347,121 @@ async def explain_crash(payload: CrashExplanationRequest, request: Request) -> C
             suggested_fix=None,
         )
     else:
-        try:
-            explanation = await generate_explanation(
-                language=payload.language,
-                consent=payload.consent,
-                ai_enabled=payload.ai_enabled,
-                failure_kind="crash",
-                exit_code=139,
-                stderr=payload.sanitizer_output,
-                timed_out=False,
-                oom_killed=False,
-                code=payload.code_snippet,
-                request_id=payload.request_id,
-            )
+        cache = get_analysis_cache()
+        cache_key = compute_cache_key(
+            code=payload.code_snippet,
+            language=payload.language,
+            request_type="crash_explanation",
+            error_signature=f"{error_type}:{line_number}",
+            error_output=payload.sanitizer_output,
+        )
+        cached = cache.get(cache_key, room_id=payload.room_id)
+        if cached is not None and "explanation" in cached:
             ai_step = CrashAIStep(
                 status="ok",
                 error_code=None,
-                explanation=explanation,
-                suggested_fix=f"Add boundary check before line {line_number}.",
+                explanation=str(cached["explanation"]),
+                suggested_fix=cached.get("suggested_fix"),
             )
-        except Exception as e:
-            logger.warning("Crash explanation LLM call failed: %s", e)
+        elif payload.room_id and not get_room_rate_limiter().check_and_reserve(payload.room_id):
+            record_fallback(payload.room_id)
             ai_step = CrashAIStep(
                 status="skipped",
-                error_code="PROVIDER_ERROR",
+                error_code="ROOM_RATE_LIMITED",
                 explanation=None,
                 suggested_fix=None,
             )
+        else:
+            try:
+                explanation = await generate_explanation(
+                    language=payload.language,
+                    consent=payload.consent,
+                    ai_enabled=payload.ai_enabled,
+                    failure_kind="crash",
+                    exit_code=139,
+                    stderr=payload.sanitizer_output,
+                    timed_out=False,
+                    oom_killed=False,
+                    code=payload.code_snippet,
+                    request_id=payload.request_id,
+                    room_id=payload.room_id,
+                    error_line=line_number,
+                    pre_sliced=True,
+                )
+                suggested_fix = f"Add boundary check before line {line_number}."
+                cache.set(
+                    cache_key,
+                    {"explanation": explanation, "suggested_fix": suggested_fix},
+                    room_id=payload.room_id,
+                )
+                ai_step = CrashAIStep(
+                    status="ok",
+                    error_code=None,
+                    explanation=explanation,
+                    suggested_fix=suggested_fix,
+                )
+            except RoomRateLimitedError:
+                record_fallback(payload.room_id)
+                ai_step = CrashAIStep(
+                    status="skipped",
+                    error_code="ROOM_RATE_LIMITED",
+                    explanation=None,
+                    suggested_fix=None,
+                )
+            except ConsentMissingError:
+                record_fallback(payload.room_id)
+                ai_step = CrashAIStep(
+                    status="skipped",
+                    error_code="CONSENT_MISSING",
+                    explanation=None,
+                    suggested_fix=None,
+                )
+            except AIDisabledError:
+                record_fallback(payload.room_id)
+                ai_step = CrashAIStep(
+                    status="skipped",
+                    error_code="AI_DISABLED",
+                    explanation=None,
+                    suggested_fix=None,
+                )
+            except LLMTimeoutError:
+                logger.warning("Crash explanation LLM call timed out")
+                record_fallback(payload.room_id)
+                ai_step = CrashAIStep(
+                    status="skipped",
+                    error_code="PROVIDER_TIMEOUT",
+                    explanation=None,
+                    suggested_fix=None,
+                )
+            except LLMRateLimitError:
+                logger.warning("Crash explanation LLM call rate limited")
+                record_fallback(payload.room_id)
+                ai_step = CrashAIStep(
+                    status="skipped",
+                    error_code="RATE_LIMITED_PROVIDER",
+                    explanation=None,
+                    suggested_fix=None,
+                )
+            except LLMProviderError as e:
+                logger.warning("Crash explanation LLM provider error: %s", e.code)
+                record_fallback(payload.room_id)
+                ai_step = CrashAIStep(
+                    status="skipped",
+                    error_code=e.code,
+                    explanation=None,
+                    suggested_fix=None,
+                )
+            except Exception as e:
+                logger.warning("Crash explanation LLM call failed: %s", type(e).__name__)
+                record_fallback(payload.room_id)
+                ai_step = CrashAIStep(
+                    status="skipped",
+                    error_code="PROVIDER_ERROR",
+                    explanation=None,
+                    suggested_fix=None,
+                )
+
+    request.state.error_code = ai_step.error_code
 
     return CrashExplanationResponse(
         request_id=payload.request_id,
@@ -356,16 +476,35 @@ async def explain_crash(payload: CrashExplanationRequest, request: Request) -> C
 
 @router.get("/usage")
 @router.get("/analyses/usage")
-async def get_usage() -> dict[str, Any]:
-    """Return telemetry usage counters (Task 5, T-18 v2 §16.5)."""
+async def get_usage(request: Request, room_id: Optional[str] = None) -> dict[str, Any]:
+    """Return telemetry usage counters (Task 5, T-18 v2 section 16.5)."""
+    request.state.request_type = "usage"
+    request.state.language = "none"
+    if room_id:
+        request.state.room_id = room_id
+        return get_room_usage(room_id)
+    return get_total_usage()
+
+
+@router.get("/rooms/{room_id}/usage")
+async def get_room_usage_endpoint(room_id: str, request: Request) -> dict[str, Any]:
+    """Return telemetry usage counters for a specific room (US-75)."""
+    request.state.request_type = "usage"
+    request.state.language = "none"
+    request.state.room_id = room_id
+    return get_room_usage(room_id)
+
+
+@router.delete("/rooms/{room_id}/state")
+async def clear_room_state(room_id: str, request: Request) -> dict[str, Any]:
+    """Clean up room-scoped measurement history, cache, counters, and rate limits when closed/deleted (US-22, US-56, FR32, T-18 section 16.5)."""
+    request.state.request_type = "room_state_delete"
+    request.state.language = "none"
+    request.state.room_id = room_id
+    clear_room(room_id)
+    get_analysis_cache().clear_room(room_id)
+    get_room_rate_limiter().clear_room(room_id)
     return {
-        "total_model_calls": 0,
-        "total_tokens_used": 0,
-        "total_cache_hits": 0,
-        "total_fallback_activations": 0,
-        "monthly_spend_usd": 0.0,
-        "monthly_budget_usd": 10.0,
-        "alert_80_percent_triggered": False,
-        "cost_cap_reached": False,
-        "rooms_tracked": 0,
+        "room_id": room_id,
+        "status": "cleared",
     }

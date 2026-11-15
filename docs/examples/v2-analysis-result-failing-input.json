@@ -1,0 +1,30 @@
+{
+  "type": "analysis-result",
+  "request_id": "3e4f5a6b-7c8d-9e0f-1a2b-3c4d5e6f7a8b",
+  "analysis_id": "4f5a6b7c-8d9e-0f1a-2b3c-4d5e6f7a8b9c",
+  "room_id": "Zq8-Lw2Ef6Th0Yx4Rn7JbA",
+  "task": "failing_input",
+  "status": "ok",
+  "ai_step": {
+    "status": "ok",
+    "error_code": null
+  },
+  "result": {
+    "failure_found": true,
+    "failure_type": "crash",
+    "original_input": "",
+    "minimized_input": "",
+    "expected_output": null,
+    "actual_output": null,
+    "tests_executed": 5,
+    "minimization_status": "completed",
+    "test_case": {
+      "input": "",
+      "expected_output": null,
+      "failure_type": "crash",
+      "language": "python"
+    },
+    "can_save_as_test_case": true
+  },
+  "message": "Failing input discovered: program crashed on empty input."
+}

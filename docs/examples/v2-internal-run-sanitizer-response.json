@@ -1,0 +1,10 @@
+{
+  "request_id": "5a6b7c8d-9e0f-1a2b-3c4d-5e6f7a8b9c0d",
+  "purpose": "sanitizer",
+  "sanitizer_report": {
+    "status": "crashed",
+    "exit_code": 1,
+    "sanitizer_output": "==4210==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x602000000014\nREAD of size 4 at 0x602000000014 thread T0\n    #0 0x401233 in process_buffer /workspace/solution.cpp:14",
+    "execution_time_ms": 115.4
+  }
+}

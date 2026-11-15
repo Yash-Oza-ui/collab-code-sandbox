@@ -1,0 +1,11 @@
+{
+  "total_model_calls": 24,
+  "total_tokens_used": 8450,
+  "total_cache_hits": 41,
+  "total_fallback_activations": 2,
+  "monthly_spend_usd": 0.0296,
+  "monthly_budget_usd": 10.0,
+  "alert_80_percent_triggered": false,
+  "cost_cap_reached": false,
+  "rooms_tracked": 3
+}

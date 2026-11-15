@@ -1,0 +1,14 @@
+{
+  "request_id": "3e4f5a6b-7c8d-9e0f-1a2b-3c4d5e6f7a8b",
+  "room_id": "Zq8-Lw2Ef6Th0Yx4Rn7JbA",
+  "purpose": "test_batch",
+  "language": "python",
+  "code": "values = list(map(int, input().split()))\nprint(max(values))",
+  "inputs": [
+    "",
+    "1",
+    "1 2 3",
+    "10 -5 20",
+    "999999999"
+  ]
+}
