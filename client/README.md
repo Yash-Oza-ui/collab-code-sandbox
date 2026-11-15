@@ -334,9 +334,12 @@ Automated tests verify:
        }
      }
      ```
-5. **Resilient Error Handling:**
-   - Offline / unreachable backend: Displays an informative banner: `"Execution service is unavailable. Please check that the execution service is running."` without interrupting editor editing.
-   - HTTP errors (`QUEUE_FULL`, `UNSUPPORTED_LANGUAGE`, `RUN_NOT_ALLOWED`): Parses structured JSON error envelopes and shows actionable feedback (such as retry duration for `QUEUE_FULL`).
+5. **Resilient Error Handling & Timeout Recovery:**
+   - **Secure UUID v4:** Generates fresh UUIDs via `crypto.randomUUID()` with `crypto.getRandomValues()` RFC 4122 fallback (no hardcoded IDs or Math.random).
+   - **Response Validation:** Validates `stdout`, `stderr`, and `exit_code`, distinguishing malformed server responses (`MALFORMED_RESPONSE`) from network outages.
+   - **Timeout Protection:** Configurable timeout (default 15s) using `AbortController` ensures the Run button never stays disabled indefinitely if the backend hangs, and in-flight requests abort on unmount.
+   - **Offline / Unreachable Backend:** Displays an informative banner: `"Execution service is unavailable. Please check that the execution service is running."` without interrupting editor editing.
+   - **HTTP Errors (`QUEUE_FULL`, `UNSUPPORTED_LANGUAGE`, `RUN_NOT_ALLOWED`):** Parses structured JSON error envelopes and shows actionable feedback (such as retry duration for `QUEUE_FULL`).
 6. **Output Panel Slot:**
    - Reserved output container (`data-testid="run-output-slot"`) ready for Het's output panel (`feature/T-11-run-panel-output`), with clean baseline stdout/stderr previewing.
 
@@ -345,3 +348,12 @@ Run the T-11 test suite:
 ```bash
 npm test src/runCode.test.ts src/RunPanel.test.tsx src/RoomPage.runPanel.test.tsx
 ```
+
+### Manual Real-Backend Verification Steps:
+1. Start `execution-service` on `http://localhost:8082` (requires Java 21 LTS / Docker).
+2. Start `sync-service` on `http://localhost:8081` and client on `http://localhost:3000`.
+3. Open a room, select Python, type `print("hello")`, click **Run**: verify `hello` appears in stdout.
+4. Type `print(input().upper())`, toggle Stdin, enter `echo-test`, click **Run**: verify `ECHO-TEST` is returned.
+5. Introduce a syntax error `def bad(:`: verify stderr is displayed with non-zero exit code.
+6. Stop `execution-service` and click **Run**: verify error banner `"Execution service is unavailable"` appears without freezing the editor.
+7. Click **Run** rapidly: verify only one request is dispatched while running.
