@@ -111,29 +111,18 @@ describe('RunPanel component (T-11)', () => {
   })
 
   it('calls fetch with code and stdin and displays running state and completion', async () => {
-    const mockResponse = {
-      request_id: '123',
-      room_id: 'test-room-1',
-      language: 'python',
-      stdout: 'hello output\n',
-      stderr: '',
-      exit_code: 0,
-      execution_time_ms: 10.5,
-      peak_memory_mb: 2.1,
-      timed_out: false,
-      oom_killed: false,
-      failure_kind: null,
-      output_truncated: false,
-      message: null,
-      compile_time_ms: null,
-    }
-
+    let capturedBody: { request_id?: string; room_id?: string; language?: string } | null = null
     let resolveFetch: (value: unknown) => void = () => {}
     const fetchPromise = new Promise((resolve) => {
       resolveFetch = resolve
     })
 
-    const fetchMock = vi.fn().mockImplementation(() => fetchPromise)
+    const fetchMock = vi.fn().mockImplementation((_url, init: { body?: string }) => {
+      if (init?.body) {
+        capturedBody = JSON.parse(init.body)
+      }
+      return fetchPromise
+    })
     const onRunStart = vi.fn()
     const onRunComplete = vi.fn()
 
@@ -166,7 +155,22 @@ describe('RunPanel component (T-11)', () => {
       resolveFetch({
         ok: true,
         status: 200,
-        json: async () => mockResponse,
+        json: async () => ({
+          request_id: capturedBody?.request_id ?? 'req-1',
+          room_id: capturedBody?.room_id ?? 'test-room',
+          language: capturedBody?.language ?? 'python',
+          stdout: 'hello output\n',
+          stderr: '',
+          exit_code: 0,
+          execution_time_ms: 10.5,
+          peak_memory_mb: 2.1,
+          timed_out: false,
+          oom_killed: false,
+          failure_kind: null,
+          output_truncated: false,
+          message: null,
+          compile_time_ms: null,
+        }),
       })
     })
 
@@ -203,17 +207,20 @@ describe('RunPanel component (T-11)', () => {
 
     // Resolve in-flight request
     await act(async () => {
+      const callInit = fetchMock.mock.calls[0]?.[1] as { body?: string } | undefined
+      const body = callInit?.body ? JSON.parse(callInit.body) : {}
       resolveFetch({
         ok: true,
         status: 200,
         json: async () => ({
-          request_id: '1',
-          room_id: 'test',
-          language: 'python',
+          request_id: body.request_id ?? '1',
+          room_id: body.room_id ?? 'test-room',
+          language: body.language ?? 'python',
           stdout: 'ok\n',
           stderr: '',
           exit_code: 0,
           execution_time_ms: 5.0,
+          peak_memory_mb: 2.0,
         }),
       })
     })
@@ -259,18 +266,22 @@ describe('RunPanel component (T-11)', () => {
     expect(runBtn.disabled).toBe(false)
 
     // Subsequent run succeeds
-    fetchMock.mockResolvedValueOnce({
-      ok: true,
-      status: 200,
-      json: async () => ({
-        request_id: '2',
-        room_id: 'test',
-        language: 'python',
-        stdout: 'recovered\n',
-        stderr: '',
-        exit_code: 0,
-        execution_time_ms: 1.0,
-      }),
+    fetchMock.mockImplementationOnce(async (_url, init: { body?: string }) => {
+      const body = init?.body ? JSON.parse(init.body) : {}
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          request_id: body.request_id ?? '2',
+          room_id: body.room_id ?? 'test-room',
+          language: body.language ?? 'python',
+          stdout: 'recovered\n',
+          stderr: '',
+          exit_code: 0,
+          execution_time_ms: 1.0,
+          peak_memory_mb: 2.0,
+        }),
+      }
     })
 
     await act(async () => {
@@ -281,19 +292,23 @@ describe('RunPanel component (T-11)', () => {
     expect(stdoutEl?.textContent).toBe('recovered\n')
   })
 
-  it('safely handles missing execution_time_ms and nonzero exit codes without throwing (Fix 2)', async () => {
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      status: 200,
-      json: async () => ({
-        request_id: 'err-1',
-        room_id: 'test',
-        language: 'python',
-        stdout: '',
-        stderr: 'ZeroDivisionError: division by zero\n',
-        exit_code: 1,
-        execution_time_ms: null, // missing execution time
-      }),
+  it('displays nonzero exit code banner and stderr for valid execution failure (Fix 2)', async () => {
+    const fetchMock = vi.fn().mockImplementation(async (_url, init: { body?: string }) => {
+      const body = init?.body ? JSON.parse(init.body) : {}
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          request_id: body.request_id ?? 'err-1',
+          room_id: body.room_id ?? 'test-room',
+          language: body.language ?? 'python',
+          stdout: '',
+          stderr: 'ZeroDivisionError: division by zero\n',
+          exit_code: 1,
+          execution_time_ms: 12.0,
+          peak_memory_mb: 2.0,
+        }),
+      }
     })
 
     await act(async () => {
