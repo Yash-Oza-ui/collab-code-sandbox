@@ -96,41 +96,50 @@ describe('generateSecureUUID (Fix 1)', () => {
   })
 })
 
-describe('validateRunResponse (Fix 2)', () => {
-  it('validates a complete, successful response payload', () => {
-    const raw = {
-      request_id: 'req-1',
-      room_id: 'room-1',
-      language: 'python',
-      stdout: 'hello\n',
-      stderr: '',
-      exit_code: 0,
-      execution_time_ms: 12.5,
-      peak_memory_mb: 4.2,
-      timed_out: false,
-      oom_killed: false,
-    }
-    const result = validateRunResponse(raw)
+describe('validateRunResponse (CHECK 1 — Strict API Response Validation)', () => {
+  const validPayload = {
+    request_id: '0b9d2f3e-7a41-4c58-9e1b-5d3c8a6f2e10',
+    room_id: 'test-room-1',
+    language: 'python',
+    stdout: 'hello\n',
+    stderr: '',
+    exit_code: 0,
+    execution_time_ms: 12.5,
+    peak_memory_mb: 4.2,
+    timed_out: false,
+    oom_killed: false,
+  }
+
+  const validContext = {
+    requestId: '0b9d2f3e-7a41-4c58-9e1b-5d3c8a6f2e10',
+    roomId: 'test-room-1',
+    language: 'python',
+  }
+
+  it('validates a complete, successful response payload matching request context', () => {
+    const result = validateRunResponse(validPayload, validContext)
     expect(result.valid).toBe(true)
     if (result.valid) {
+      expect(result.data.request_id).toBe(validContext.requestId)
+      expect(result.data.room_id).toBe(validContext.roomId)
+      expect(result.data.language).toBe('python')
       expect(result.data.stdout).toBe('hello\n')
       expect(result.data.exit_code).toBe(0)
       expect(result.data.execution_time_ms).toBe(12.5)
+      expect(result.data.peak_memory_mb).toBe(4.2)
     }
   })
 
   it('preserves stdout and stderr for legitimate execution failures with nonzero exit codes', () => {
-    const raw = {
-      request_id: 'req-2',
-      room_id: 'room-1',
-      language: 'python',
+    const failPayload = {
+      ...validPayload,
       stdout: 'partial stdout\n',
       stderr: 'Traceback (most recent call last):\nNameError: name "x" is not defined\n',
       exit_code: 1,
       execution_time_ms: 8.0,
       peak_memory_mb: 3.1,
     }
-    const result = validateRunResponse(raw)
+    const result = validateRunResponse(failPayload, validContext)
     expect(result.valid).toBe(true)
     if (result.valid) {
       expect(result.data.exit_code).toBe(1)
@@ -139,25 +148,76 @@ describe('validateRunResponse (Fix 2)', () => {
     }
   })
 
-  it('safely defaults missing or null execution_time_ms without throwing', () => {
-    const raw = {
-      stdout: 'output\n',
-      stderr: '',
-      exit_code: 0,
-      execution_time_ms: null,
+  it('rejects responses missing request_id or with empty request_id', () => {
+    expect(validateRunResponse({ ...validPayload, request_id: undefined }).valid).toBe(false)
+    expect(validateRunResponse({ ...validPayload, request_id: '' }).valid).toBe(false)
+    expect(validateRunResponse({ ...validPayload, request_id: '   ' }).valid).toBe(false)
+  })
+
+  it('rejects responses missing room_id or with empty room_id', () => {
+    expect(validateRunResponse({ ...validPayload, room_id: undefined }).valid).toBe(false)
+    expect(validateRunResponse({ ...validPayload, room_id: '' }).valid).toBe(false)
+    expect(validateRunResponse({ ...validPayload, room_id: '   ' }).valid).toBe(false)
+  })
+
+  it('rejects responses missing language or with unsupported language', () => {
+    expect(validateRunResponse({ ...validPayload, language: undefined }).valid).toBe(false)
+    expect(validateRunResponse({ ...validPayload, language: 'unsupported-lang' }).valid).toBe(false)
+  })
+
+  it('rejects responses when returned request_id does not match submitted request ID', () => {
+    const result = validateRunResponse(validPayload, {
+      ...validContext,
+      requestId: 'different-request-id',
+    })
+    expect(result.valid).toBe(false)
+    if (!result.valid) {
+      expect(result.error).toContain('does not match requested')
     }
-    const result = validateRunResponse(raw)
-    expect(result.valid).toBe(true)
-    if (result.valid) {
-      expect(result.data.execution_time_ms).toBe(0)
+  })
+
+  it('rejects responses when returned room_id does not match requested room', () => {
+    const result = validateRunResponse(validPayload, {
+      ...validContext,
+      roomId: 'different-room',
+    })
+    expect(result.valid).toBe(false)
+    if (!result.valid) {
+      expect(result.error).toContain('does not match requested')
     }
+  })
+
+  it('rejects responses when returned language does not match requested language', () => {
+    const result = validateRunResponse(validPayload, {
+      ...validContext,
+      language: 'javascript',
+    })
+    expect(result.valid).toBe(false)
+    if (!result.valid) {
+      expect(result.error).toContain('does not match requested')
+    }
+  })
+
+  it('rejects responses with invalid numeric fields (exit_code, execution_time_ms, peak_memory_mb)', () => {
+    // exit_code must be an integer
+    expect(validateRunResponse({ ...validPayload, exit_code: 1.5 }).valid).toBe(false)
+    expect(validateRunResponse({ ...validPayload, exit_code: '0' }).valid).toBe(false)
+    expect(validateRunResponse({ ...validPayload, exit_code: NaN }).valid).toBe(false)
+
+    // execution_time_ms must be a non-negative number
+    expect(validateRunResponse({ ...validPayload, execution_time_ms: -1 }).valid).toBe(false)
+    expect(validateRunResponse({ ...validPayload, execution_time_ms: NaN }).valid).toBe(false)
+    expect(validateRunResponse({ ...validPayload, execution_time_ms: '10' }).valid).toBe(false)
+
+    // peak_memory_mb must be a non-negative number
+    expect(validateRunResponse({ ...validPayload, peak_memory_mb: -0.1 }).valid).toBe(false)
+    expect(validateRunResponse({ ...validPayload, peak_memory_mb: NaN }).valid).toBe(false)
   })
 
   it('rejects malformed responses missing required string fields', () => {
     expect(validateRunResponse(null).valid).toBe(false)
-    expect(validateRunResponse({ stdout: 123, stderr: '', exit_code: 0 }).valid).toBe(false)
-    expect(validateRunResponse({ stdout: 'ok', stderr: null, exit_code: 0 }).valid).toBe(false)
-    expect(validateRunResponse({ stdout: 'ok', stderr: '', exit_code: '0' }).valid).toBe(false)
+    expect(validateRunResponse({ ...validPayload, stdout: 123 }).valid).toBe(false)
+    expect(validateRunResponse({ ...validPayload, stderr: null }).valid).toBe(false)
   })
 })
 
@@ -189,27 +249,28 @@ describe('executeRun API client (Fix 1, 2, 3)', () => {
   })
 
   it('builds a valid T-19 inline source request payload with a fresh secure UUID v4', async () => {
-    const mockResponseData = {
-      request_id: 'dummy-id',
-      room_id: 'test-room-123',
-      language: 'python',
-      stdout: 'hello world\n',
-      stderr: '',
-      exit_code: 0,
-      execution_time_ms: 12.5,
-      peak_memory_mb: 4.0,
-      timed_out: false,
-      oom_killed: false,
-      failure_kind: null,
-      output_truncated: false,
-      message: null,
-      compile_time_ms: null,
-    }
-
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      status: 200,
-      json: async () => mockResponseData,
+    const fetchMock = vi.fn().mockImplementation(async (_url, init) => {
+      const parsedBody = JSON.parse(init.body as string)
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          request_id: parsedBody.request_id,
+          room_id: parsedBody.room_id,
+          language: parsedBody.language,
+          stdout: 'hello world\n',
+          stderr: '',
+          exit_code: 0,
+          execution_time_ms: 12.5,
+          peak_memory_mb: 4.0,
+          timed_out: false,
+          oom_killed: false,
+          failure_kind: null,
+          output_truncated: false,
+          message: null,
+          compile_time_ms: null,
+        }),
+      }
     })
 
     const result = await executeRun({
@@ -246,7 +307,7 @@ describe('executeRun API client (Fix 1, 2, 3)', () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
-      json: async () => ({ invalid_payload: true }),
+      json: async () => ({ unexpected_structure: true }),
     })
 
     const result = await executeRun({
@@ -258,6 +319,27 @@ describe('executeRun API client (Fix 1, 2, 3)', () => {
     if (!result.ok) {
       expect(result.code).toBe('MALFORMED_RESPONSE')
       expect(result.error).toContain('Malformed response')
+    }
+  })
+
+  it('handles invalid JSON returned from server without throwing', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => {
+        throw new SyntaxError('Unexpected token < in JSON at position 0')
+      },
+    })
+
+    const result = await executeRun({
+      ...defaultOptions,
+      fetchFn: fetchMock as unknown as typeof fetch,
+    })
+
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.code).toBe('MALFORMED_RESPONSE')
+      expect(result.error).toContain('invalid JSON')
     }
   })
 
