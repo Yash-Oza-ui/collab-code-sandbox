@@ -159,5 +159,4 @@ public class RoomRegistry {
         }
         return null;
     }
-    }
 }

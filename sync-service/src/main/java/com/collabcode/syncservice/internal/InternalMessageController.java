@@ -9,12 +9,15 @@ import com.collabcode.syncservice.room.RoomStore;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import jakarta.servlet.http.HttpServletRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.converter.HttpMessageNotReadableException;
+import org.springframework.web.HttpMediaTypeNotSupportedException;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
@@ -87,19 +90,21 @@ public class InternalMessageController {
             @PathVariable String sessionId,
             @RequestHeader(value = "X-Internal-Token", required = false) String token) {
 
-        // --- Auth check (V2.11, V2.14, section 7.2) ---
+        // --- 1. Auth check (V2.11, V2.14, section 7.2) ---
         if (internalApiToken == null || internalApiToken.isBlank() || !internalApiToken.equals(token)) {
             log.warn("Internal endpoint: unauthorized session lookup for room={}", roomId);
             return error(HttpStatus.UNAUTHORIZED, "UNAUTHORIZED",
                     "Missing or invalid internal token.", null);
         }
 
-        Room room = roomStore.get(roomId);
-        if (room == null) {
+        // --- 2. Room existence check (authoritative RoomStore) ---
+        Room room = roomStore != null ? roomStore.get(roomId) : null;
+        if (room == null || room.isClosed()) {
             return error(HttpStatus.NOT_FOUND, "ROOM_NOT_FOUND",
                     "Room not found: " + roomId, null);
         }
 
+        // --- 3. Session lookup ---
         Member member = roomService.findMemberBySession(roomId, sessionId);
         if (member == null) {
             return error(HttpStatus.NOT_FOUND, "SESSION_NOT_FOUND",
@@ -126,55 +131,79 @@ public class InternalMessageController {
 
     /**
      * Internal broadcast endpoint with optional audience (T-17 V2.10, V2.14).
+     *
+     * <p>Enforces strict validation order:
+     * 1. Validate X-Internal-Token (reject unauthorized before body processing).
+     * 2. Enforce Content-Type and request body presence/size before JSON parsing.
+     * 3. Parse JSON syntax and structure.
+     * 4. Extract request_id safely.
+     * 5. Validate message structure (type field).
+     * 6. Validate audience routing (if specified).
+     * 7. Validate room existence against authoritative RoomStore.
+     * 8. Strip audience, verify serialized size, and deliver to eligible WebSocket control sessions.
      */
     @PostMapping(value = "/rooms/{roomId}/messages",
-                 consumes = MediaType.APPLICATION_JSON_VALUE,
                  produces = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<Map<String, Object>> broadcast(
             @PathVariable String roomId,
             @RequestHeader(value = "X-Internal-Token", required = false) String token,
-            @RequestBody String rawBody) {
+            HttpServletRequest request,
+            @RequestBody(required = false) byte[] rawBodyBytes) {
 
-        // Try extracting request_id for contract error responses (section 7.2 / V2.14)
-        String requestId = null;
-        JsonNode parsedNode = null;
-        if (rawBody != null) {
-            try {
-                parsedNode = objectMapper.readTree(rawBody);
-                if (parsedNode != null && parsedNode.has("request_id") && parsedNode.get("request_id").isTextual()) {
-                    requestId = parsedNode.get("request_id").asText();
-                }
-            } catch (Exception ignored) {
-            }
-        }
-
-        // --- Auth check (section 7.2, V2.14) ---
+        // --- 1. Auth check (section 7.2, V2.14) ---
+        // Must be validated before any body parsing or processing to prevent info leak / resource exhaustion.
         if (internalApiToken == null || internalApiToken.isBlank() || !internalApiToken.equals(token)) {
             log.warn("Internal endpoint: unauthorized broadcast for room={}", roomId);
             return error(HttpStatus.UNAUTHORIZED, "UNAUTHORIZED",
-                    "Missing or invalid internal token.", requestId);
+                    "Missing or invalid internal token.", null);
         }
 
-        // --- Size check (bytes, not chars) (section 7.2, V2.14) ---
-        if (rawBody == null || rawBody.getBytes(StandardCharsets.UTF_8).length > MAX_BODY_BYTES) {
+        // --- 2. Content-Type check ---
+        String contentType = request != null ? request.getContentType() : null;
+        if (contentType != null && !contentType.toLowerCase().contains("application/json")) {
             return error(HttpStatus.BAD_REQUEST, "INVALID_MESSAGE",
-                    "Message body is not valid: larger than 4 MiB.", requestId);
+                    "Message body is not valid: unsupported Content-Type. Expected application/json.", null);
         }
 
-        // --- JSON syntax check (section 7.2, V2.14) ---
-        if (parsedNode == null) {
+        // --- 3. Request body presence & size check (raw bytes, bounded before parsing) ---
+        if (rawBodyBytes == null || rawBodyBytes.length == 0) {
             return error(HttpStatus.BAD_REQUEST, "INVALID_MESSAGE",
-                    "Message body is not valid: not JSON.", requestId);
+                    "Message body is not valid: empty or missing body.", null);
         }
 
-        // --- Validate JSON shape: must have a non-empty string field 'type' (section 7.2, V2.14) ---
+        if (rawBodyBytes.length > MAX_BODY_BYTES) {
+            return error(HttpStatus.BAD_REQUEST, "INVALID_MESSAGE",
+                    "Message body is not valid: larger than 4 MiB.", null);
+        }
+
+        // --- 4. JSON parsing & root object validation ---
+        JsonNode parsedNode;
+        try {
+            parsedNode = objectMapper.readTree(rawBodyBytes);
+        } catch (Exception e) {
+            return error(HttpStatus.BAD_REQUEST, "INVALID_MESSAGE",
+                    "Message body is not valid: not JSON.", null);
+        }
+
+        if (parsedNode == null || !parsedNode.isObject()) {
+            return error(HttpStatus.BAD_REQUEST, "INVALID_MESSAGE",
+                    "Message body is not valid: not JSON.", null);
+        }
+
+        // --- 5. Extract request_id safely for subsequent error responses ---
+        String requestId = null;
+        if (parsedNode.hasNonNull("request_id") && parsedNode.get("request_id").isTextual()) {
+            requestId = parsedNode.get("request_id").asText();
+        }
+
+        // --- 6. Validate JSON shape: must have a non-empty string field 'type' (section 7.2, V2.14) ---
         JsonNode typeNode = parsedNode.get("type");
-        if (typeNode == null || !typeNode.isTextual() || typeNode.asText().isBlank()) {
+        if (typeNode == null || !typeNode.isTextual() || typeNode.asText().trim().isEmpty()) {
             return error(HttpStatus.BAD_REQUEST, "INVALID_MESSAGE",
                     "Message body is not valid: field 'type' is missing.", requestId);
         }
 
-        // --- Parse and validate audience (T-17 V2.10, V2.14) ---
+        // --- 7. Parse and validate audience (T-17 V2.10, V2.14) ---
         JsonNode audienceNode = parsedNode.get("audience");
         Set<String> targetSessions = null;
         boolean roomAudience = true;
@@ -213,49 +242,47 @@ public class InternalMessageController {
             }
         }
 
-        // --- Check room existence (T-17 V2.10) ---
-        boolean roomExists = roomStore != null && roomStore.exists(roomId);
-        boolean hasConnections = registry.hasRoom(roomId);
-        if (!roomExists && !hasConnections) {
+        // --- 8. Check room existence against authoritative RoomStore (T-17 V2.10) ---
+        Room room = roomStore != null ? roomStore.get(roomId) : null;
+        if (room == null || room.isClosed()) {
             return error(HttpStatus.NOT_FOUND, "ROOM_NOT_FOUND",
                     "Room not found: " + roomId, requestId);
         }
 
-        // --- Strip audience before forwarding (T-17 V2.10) ---
+        // --- 9. Strip audience before forwarding and verify serialized size (T-17 V2.10) ---
         if (parsedNode instanceof ObjectNode objNode) {
             objNode.remove("audience");
         }
-        String payloadToSend;
+        byte[] payloadToSendBytes;
         try {
-            payloadToSend = objectMapper.writeValueAsString(parsedNode);
+            payloadToSendBytes = objectMapper.writeValueAsBytes(parsedNode);
         } catch (Exception e) {
             return error(HttpStatus.BAD_REQUEST, "INVALID_MESSAGE",
                     "Message body is not valid: failed to serialize.", requestId);
         }
 
-        if (payloadToSend.getBytes(StandardCharsets.UTF_8).length > MAX_BODY_BYTES) {
+        if (payloadToSendBytes.length > MAX_BODY_BYTES) {
             return error(HttpStatus.BAD_REQUEST, "INVALID_MESSAGE",
                     "Message body is not valid: larger than 4 MiB.", requestId);
         }
 
-        // --- Deliver to targeted connections ---
+        // --- 10. Deliver to targeted control-socket connections ---
         List<WebSocketSession> sessions = roomAudience
                 ? registry.getAll(roomId)
                 : registry.getBySessionIds(roomId, targetSessions);
 
+        String payloadToSend = new String(payloadToSendBytes, StandardCharsets.UTF_8);
         TextMessage frame = new TextMessage(payloadToSend);
         int delivered = 0;
 
         for (WebSocketSession session : sessions) {
             try {
                 if (session.isOpen()) {
-                    synchronized (session) {
-                        session.sendMessage(frame);
-                    }
+                    session.sendMessage(frame);
                     delivered++;
                 }
             } catch (Exception e) {
-                log.warn("Broadcast failed to wsSession={}: {}", session.getId(), e.getMessage());
+                log.warn("Failed to deliver internal message to wsSession={}: {}", session.getId(), e.getMessage());
             }
         }
 
@@ -269,7 +296,23 @@ public class InternalMessageController {
     }
 
     // -----------------------------------------------------------------------
-    // Helpers
+    // Exception Handlers (ensure framework-level rejections match T-17 contract)
+    // -----------------------------------------------------------------------
+
+    @ExceptionHandler(HttpMessageNotReadableException.class)
+    public ResponseEntity<Map<String, Object>> handleMessageNotReadable(HttpMessageNotReadableException ex) {
+        return error(HttpStatus.BAD_REQUEST, "INVALID_MESSAGE",
+                "Message body is not valid: not JSON.", null);
+    }
+
+    @ExceptionHandler(HttpMediaTypeNotSupportedException.class)
+    public ResponseEntity<Map<String, Object>> handleMediaTypeNotSupported(HttpMediaTypeNotSupportedException ex) {
+        return error(HttpStatus.BAD_REQUEST, "INVALID_MESSAGE",
+                "Message body is not valid: unsupported Content-Type. Expected application/json.", null);
+    }
+
+    // -----------------------------------------------------------------------
+    // Helper
     // -----------------------------------------------------------------------
 
     private static ResponseEntity<Map<String, Object>> error(
