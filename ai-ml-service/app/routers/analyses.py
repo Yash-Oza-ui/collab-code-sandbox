@@ -14,6 +14,7 @@ import numpy as np
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from app.config import settings
 from app.cache import compute_cache_key, get_analysis_cache
 from app.counters import (
     clear_room,
@@ -65,6 +66,10 @@ class ComplexityRequest(BaseModel):
     measurements: list[MeasurementItem] = Field(default_factory=list)
     suggested_patch: Optional[str] = None
     suggested_patch_runtimes_ms: Optional[list[float]] = None
+    rules_first: Optional[bool] = Field(
+        default=None,
+        description="US-67: When true, evaluate rules first before AI fallback.",
+    )
 
 
 class SlowPatternItem(BaseModel):
@@ -241,7 +246,14 @@ async def analyze_complexity(payload: ComplexityRequest, request: Request) -> Co
             room_id=payload.room_id,
         )
 
-    # 3. Rules-First Static Analysis with Central Consent/AI Gate (FR12.2, FR12.3, FR35)
+    # 3. Rules-First Static Analysis with Central Consent/AI Gate (FR12.2, FR12.3, FR35, US-67)
+    rules_first = (
+        payload.rules_first is True
+        or request.headers.get("x-rules-first", "").lower() in ("true", "1")
+        or request.query_params.get("rules_first", "").lower() in ("true", "1")
+        or getattr(settings, "RULES_FIRST_AI_AVOIDANCE", False)
+    )
+
     rule_analysis = await run_rule_based_analysis_with_ai_fallback(
         code=payload.code,
         language=payload.language,
@@ -250,6 +262,7 @@ async def analyze_complexity(payload: ComplexityRequest, request: Request) -> Co
         ai_fallback=ai_fallback,
         room_id=payload.room_id,
         request_type="complexity",
+        rules_first=rules_first,
     )
 
     ai_step = rule_analysis["ai_step"]
