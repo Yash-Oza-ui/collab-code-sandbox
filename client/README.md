@@ -301,3 +301,47 @@ Automated tests verify:
 5. Repeat with three windows (Window C as `Charlie` typing `CCCC`), verifying all three windows converge to the same text.
 6. Open a window in a separate room: verify edits in the first room never appear in the second room.
 7. **Pair-mode edit permission verification:** In a Pair-mode room where participant B is an observer or ungranted editor, attempt to type in Window B. Verify that changes are rejected by the server and the permission error banner appears.
+
+---
+
+## 12. Client Run Panel & Execution Controls (T-11 / FR4.1, FR4.2, FR4.5)
+
+**T-11** adds the client interface for executing code in the collaborative sandbox:
+
+1. **Run Button (`RunButton`):**
+   - Dispatches an execution request to `POST ${VITE_EXECUTION_API_URL}/v1/runs`.
+   - Disabled while code execution is in flight (`isRunning`), displaying a loading spinner and preventing duplicate submissions.
+   - Designed with a `disabled` property ready for Observer enforcement (FR9.4 / US-27).
+2. **Language Picker (`LanguagePicker`):**
+   - Lists all five DR1 languages: **Python**, **JavaScript**, **C**, **C++**, and **Java** (`python`, `javascript`, `c`, `cpp`, `java`).
+   - Automatically synchronizes syntax highlighting mode in Monaco editor when the language is changed.
+   - Shows future / unsupported languages as disabled with an informative `"not available yet"` label.
+3. **Optional Standard Input (`StdinInput`):**
+   - Collapsible input area allowing the user to provide stdin text passed directly into the running process.
+4. **T-19 `RunSpec` Inline Source Contract:**
+   - In Pair mode, the request is framed as an inline source payload:
+     ```json
+     {
+       "request_id": "<uuid-v4>",
+       "room_id": "<room_id>",
+       "session_id": "<session_id>",
+       "language": "python",
+       "stdin": "<optional stdin>",
+       "source": {
+         "kind": "inline",
+         "files": [{ "name": "main.py", "content": "<editor code>" }],
+         "entry": "main.py"
+       }
+     }
+     ```
+5. **Resilient Error Handling:**
+   - Offline / unreachable backend: Displays an informative banner: `"Execution service is unavailable. Please check that the execution service is running."` without interrupting editor editing.
+   - HTTP errors (`QUEUE_FULL`, `UNSUPPORTED_LANGUAGE`, `RUN_NOT_ALLOWED`): Parses structured JSON error envelopes and shows actionable feedback (such as retry duration for `QUEUE_FULL`).
+6. **Output Panel Slot:**
+   - Reserved output container (`data-testid="run-output-slot"`) ready for Het's output panel (`feature/T-11-run-panel-output`), with clean baseline stdout/stderr previewing.
+
+### Automated Test Verification:
+Run the T-11 test suite:
+```bash
+npm test src/runCode.test.ts src/RunPanel.test.tsx src/RoomPage.runPanel.test.tsx
+```
