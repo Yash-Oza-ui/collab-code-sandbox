@@ -76,7 +76,7 @@ BODY_NORMAL=$(cat <<EOF
   "room_id":    "$ROOM_ID",
   "session_id": "$SESS_ID_NORMAL",
   "language":   "python",
-  "code":       "print('ready')"
+  "source": { "kind": "inline", "files": [ { "name": "main.py", "content": "print('ready')" } ], "entry": "main.py" }
 }
 EOF
 )
@@ -125,7 +125,7 @@ for i in $(seq 1 "$MAX_QUEUE"); do
   "room_id":    "$ROOM_ID",
   "session_id": "$hold_sess_id",
   "language":   "python",
-  "code":       "import time; time.sleep(3)"
+  "source": { "kind": "inline", "files": [ { "name": "main.py", "content": "import time; time.sleep(3)" } ], "entry": "main.py" }
 }
 EOF
 )
@@ -141,7 +141,7 @@ done
 echo "Verifying queue saturation via observable in-flight state..."
 saturated=false
 in_flight=0
-for attempt in $(seq 1 40); do
+for attempt in $(seq 1 100); do
   h_body="$(curl -s --max-time 2 "$HEALTH_URL" 2>/dev/null || true)"
   in_flight=$(echo "$h_body" | grep -o '"in_flight":[0-9]*' | head -1 | cut -d':' -f2)
   if [ -n "$in_flight" ] && [ "$in_flight" -ge "$MAX_QUEUE" ]; then
@@ -169,7 +169,7 @@ OVERFLOW_BODY=$(cat <<EOF
   "room_id":    "$ROOM_ID",
   "session_id": "$OVERFLOW_SESS_ID",
   "language":   "python",
-  "code":       "print('overflow')"
+  "source": { "kind": "inline", "files": [ { "name": "main.py", "content": "print('overflow')" } ], "entry": "main.py" }
 }
 EOF
 )
@@ -230,7 +230,7 @@ POST_BODY=$(cat <<EOF
   "room_id":    "$ROOM_ID",
   "session_id": "$POST_SESS_ID",
   "language":   "python",
-  "code":       "print('after recovery')"
+  "source": { "kind": "inline", "files": [ { "name": "main.py", "content": "print('after recovery')" } ], "entry": "main.py" }
 }
 EOF
 )

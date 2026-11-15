@@ -213,6 +213,9 @@ code runner. `QueueFullExceptionHandler` maps that to an HTTP 503 response.
 Queue health and observable in-flight state (`in_flight`, `max_queue_length`,
 `retry_after_seconds`) are exposed via Spring Boot Actuator at `GET /actuator/health`
 (`QueueHealthIndicator`) for monitoring and deterministic test coordination.
+The details are hidden by default (`management.endpoint.health.show-details: never`).
+The integration stack turns them on through `MANAGEMENT_HEALTH_SHOW_DETAILS=always`
+in `docker-compose.yml`; do not enable them in production.
 
 > **Note on API scope:** Testing in this PR covers the public endpoint `POST /v1/runs`,
 > verifying that repeated public calls count toward the same queue limit and receive
@@ -291,7 +294,7 @@ execution-service/
     │   │   ├── exception/                            # Contract exception types (V2.12)
     │   │   ├── model/                                # RunRequest, RunResponse, RunSource, etc.
     │   │   ├── permission/                           # Permission lookup service & stubs (V2.11)
-    │   │   ├── queue/                                # RunQueueGate concurrency control (US-11)
+    │   │   ├── queue/                                # RunQueueGate, QueueHealthIndicator (US-11)
     │   │   ├── runner/                               # CodeRunner, ExecutionResult, FakeCodeRunner
     │   │   └── snapshot/                             # SavedVersionReader & snapshot stubs (V2.8)
     │   └── resources/
@@ -301,22 +304,15 @@ execution-service/
             ├── config/
             │   └── ExecutionLimitsPropertiesTest.java
             ├── controller/
-            │   ├── RunControllerTest.java                    # T-03 acceptance tests (updated US-08)
-            │   ├── RunControllerUS08Test.java              # US-08 DoD tests (Jay)
-            │   ├── RunControllerUS11Test.java              # US-11 queue-full MockMvc slice (Yash)
-            │   └── RunControllerQueueIntegrationTest.java  # US-11 queue-full full-stack (Bhavya)
+            │   ├── RunControllerTest.java                    # T-03 acceptance tests
+            │   ├── RunControllerUS08Test.java                # US-08 DoD tests (Jay)
+            │   ├── RunControllerT19Test.java                 # T-19 run spec tests
+            │   ├── RunControllerUS11Test.java                # US-11 queue-full MockMvc slice (Yash)
+            │   └── RunControllerQueueIntegrationTest.java    # US-11 queue-full over real HTTP (Bhavya)
             ├── queue/
-            │   └── RunQueueGateTest.java                    # US-11 gate unit tests (Yash)
+            │   └── RunQueueGateTest.java                     # US-11 gate unit tests (Yash)
             └── runner/
-                └── FakeCodeRunnerTest.java                 # Stub behaviour (Jay)
-            │   ├── RunControllerTest.java
-            │   ├── RunControllerUS08Test.java
-            │   ├── RunControllerUS11Test.java
-            │   └── RunControllerT19Test.java
-            ├── queue/
-            │   └── RunQueueGateTest.java
-            └── runner/
-                └── FakeCodeRunnerTest.java
+                └── FakeCodeRunnerTest.java                   # Stub behaviour (Jay)
 ```
 
 ---

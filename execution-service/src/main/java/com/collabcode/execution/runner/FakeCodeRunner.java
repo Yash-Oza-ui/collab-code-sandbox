@@ -16,7 +16,10 @@ import org.springframework.stereotype.Component;
  *  3. If any file contains "stderr" (case-insensitive), writes "boom\n" to stderr
  *     and exits 2 — simulating a runtime failure ("non_zero_exit").
  *  4. If stdin is non-empty, echoes its UPPER-CASE version to stdout.
- *  5. Otherwise, returns "Hello from <language>!\n" in stdout, exit 0.
+ *  5. If any file contains "sleep" or "delay", the run is held for 0.5 to 5 seconds
+ *     (3 seconds by default) so tests can keep a queue slot busy (US-11, FR16),
+ *     then it continues to case 6.
+ *  6. Otherwise, returns "Hello from <language>!\n" in stdout, exit 0.
  *
  * Quincy's PR replaces this bean with DockerCodeRunner once merged.
  */
@@ -121,8 +124,12 @@ public class FakeCodeRunner implements CodeRunner {
             );
         }
 
-        // Case 5: simulate bounded in-flight execution for testing (FR16 / US-11)
-        if (code != null && (code.toLowerCase().contains("sleep") || code.toLowerCase().contains("delay"))) {
+        // Case 4: simulate bounded in-flight execution for testing (FR16 / US-11)
+        String code = spec.getFiles() == null ? "" : spec.getFiles().stream()
+                .map(RunFile::getContent)
+                .filter(c -> c != null)
+                .collect(java.util.stream.Collectors.joining("\n"));
+        if (code.toLowerCase().contains("sleep") || code.toLowerCase().contains("delay")) {
             long delayMs = 3000;
             java.util.regex.Matcher m = java.util.regex.Pattern.compile("(?:sleep|delay)[\\s_\\(]+(\\d+)").matcher(code.toLowerCase());
             if (m.find()) {
@@ -139,7 +146,7 @@ public class FakeCodeRunner implements CodeRunner {
             }
         }
 
-        // Case 4: normal success
+        // Case 5: normal success
         return new ExecutionResult(
                 /* stdout          */ "Hello from " + language + "!\n",
                 /* stderr          */ "",

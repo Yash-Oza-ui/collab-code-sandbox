@@ -2,6 +2,7 @@ package com.collabcode.execution.controller;
 
 import com.collabcode.execution.broadcast.RoomBroadcastService;
 import com.collabcode.execution.config.ExecutionLimitsProperties;
+import com.collabcode.execution.model.RunSpec;
 import com.collabcode.execution.queue.RunQueueGate;
 import com.collabcode.execution.runner.CodeRunner;
 import org.junit.jupiter.api.DisplayName;
@@ -25,7 +26,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -72,7 +73,11 @@ class RunControllerQueueIntegrationTest {
               "room_id":    "room-us11-inttest",
               "session_id": "ccddee00-2222-4000-bbbb-000000000099",
               "language":   "python",
-              "code":       "print('hello')"
+              "source": {
+                "kind":    "inline",
+                "files":   [ { "name": "main.py", "content": "print('hello')" } ],
+                "entry":   "main.py"
+              }
             }
             """;
 
@@ -134,7 +139,7 @@ class RunControllerQueueIntegrationTest {
             assertThat(error.get("retry_after_seconds")).isEqualTo(expectedRetryAfter);
 
             // The refused run starts no container (codeRunner never invoked) and broadcasts nothing
-            verify(codeRunner, never()).execute(anyString(), anyString(), anyString());
+            verify(codeRunner, never()).execute(any(RunSpec.class));
             verifyNoInteractions(broadcastService);
 
             release.countDown();
@@ -229,7 +234,7 @@ class RunControllerQueueIntegrationTest {
             assertThat(gate.inFlight()).isEqualTo(1); // still 1
 
             // Refused run did not invoke the code runner
-            verify(codeRunner, never()).execute(anyString(), anyString(), anyString());
+            verify(codeRunner, never()).execute(any(RunSpec.class));
 
             // After in-flight run finishes the counter drops to 0
             release.countDown();
@@ -241,7 +246,7 @@ class RunControllerQueueIntegrationTest {
             assertThat(nextRun.getStatusCode()).isEqualTo(HttpStatus.OK);
             assertThat(nextRun.getBody()).isNotNull();
             assertThat(nextRun.getBody().get("stdout")).isEqualTo("Hello from python!\n");
-            verify(codeRunner, times(1)).execute(anyString(), anyString(), anyString());
+            verify(codeRunner, times(1)).execute(any(RunSpec.class));
         } finally {
             release.countDown();
             pool.shutdownNow();

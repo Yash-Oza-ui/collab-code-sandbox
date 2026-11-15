@@ -24,7 +24,7 @@ management:
         include: health
   endpoint:
     health:
-      show-details: ${MANAGEMENT_HEALTH_SHOW_DETAILS:always}
+      show-details: ${MANAGEMENT_HEALTH_SHOW_DETAILS:never}
 
 app:
   # CORS: allow requests from the browser client (T-06 section 2)
