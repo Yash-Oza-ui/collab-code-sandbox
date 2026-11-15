@@ -174,16 +174,61 @@ export interface ExecuteRunOptions {
   signal?: AbortSignal
 }
 
+export interface ExpectedRunContext {
+  requestId?: string
+  roomId?: string
+  language?: string
+}
+
 /**
  * Validates the raw JSON object returned by the execution service.
- * Ensures stdout, stderr, and exit_code exist, and sanitizes numeric execution metrics.
+ * Enforces T-17 / T-19 response schema and verifies request context matching:
+ * 1. request_id must be present and match requested ID
+ * 2. room_id must be present and match requested room
+ * 3. language must be present, supported, and match requested language
+ * 4. stdout and stderr must be strings (preserved on failure)
+ * 5. exit_code must be an integer (valid non-zero exit codes are accepted)
+ * 6. execution_time_ms and peak_memory_mb must be non-negative numbers
  */
-export function validateRunResponse(raw: unknown): { valid: true; data: RunResponseData } | { valid: false; error: string } {
+export function validateRunResponse(
+  raw: unknown,
+  expected?: ExpectedRunContext,
+): { valid: true; data: RunResponseData } | { valid: false; error: string } {
   if (!raw || typeof raw !== 'object') {
     return { valid: false, error: 'Malformed response: server returned a non-object payload.' }
   }
 
   const obj = raw as Record<string, unknown>
+
+  if (typeof obj.request_id !== 'string' || obj.request_id.trim() === '') {
+    return { valid: false, error: 'Malformed response: missing or invalid "request_id" field.' }
+  }
+  if (expected?.requestId && obj.request_id !== expected.requestId) {
+    return {
+      valid: false,
+      error: `Malformed response: returned request_id "${obj.request_id}" does not match requested "${expected.requestId}".`,
+    }
+  }
+
+  if (typeof obj.room_id !== 'string' || obj.room_id.trim() === '') {
+    return { valid: false, error: 'Malformed response: missing or invalid "room_id" field.' }
+  }
+  if (expected?.roomId && obj.room_id !== expected.roomId) {
+    return {
+      valid: false,
+      error: `Malformed response: returned room_id "${obj.room_id}" does not match requested "${expected.roomId}".`,
+    }
+  }
+
+  if (typeof obj.language !== 'string' || !isLanguageSupported(obj.language)) {
+    return { valid: false, error: 'Malformed response: missing or unsupported "language" field.' }
+  }
+  if (expected?.language && obj.language.toLowerCase() !== expected.language.toLowerCase()) {
+    return {
+      valid: false,
+      error: `Malformed response: returned language "${obj.language}" does not match requested "${expected.language}".`,
+    }
+  }
 
   if (typeof obj.stdout !== 'string') {
     return { valid: false, error: 'Malformed response: missing or invalid "stdout" field.' }
@@ -191,29 +236,42 @@ export function validateRunResponse(raw: unknown): { valid: true; data: RunRespo
   if (typeof obj.stderr !== 'string') {
     return { valid: false, error: 'Malformed response: missing or invalid "stderr" field.' }
   }
-  if (typeof obj.exit_code !== 'number' || Number.isNaN(obj.exit_code)) {
-    return { valid: false, error: 'Malformed response: missing or invalid "exit_code" field.' }
+
+  if (typeof obj.exit_code !== 'number' || !Number.isInteger(obj.exit_code)) {
+    return { valid: false, error: 'Malformed response: missing or invalid "exit_code" field (must be an integer).' }
   }
 
-  const executionTimeMs =
-    typeof obj.execution_time_ms === 'number' && !Number.isNaN(obj.execution_time_ms)
-      ? obj.execution_time_ms
-      : 0
+  if (
+    typeof obj.execution_time_ms !== 'number' ||
+    Number.isNaN(obj.execution_time_ms) ||
+    obj.execution_time_ms < 0
+  ) {
+    return {
+      valid: false,
+      error: 'Malformed response: missing or invalid "execution_time_ms" field (must be a non-negative number).',
+    }
+  }
 
-  const peakMemoryMb =
-    typeof obj.peak_memory_mb === 'number' && !Number.isNaN(obj.peak_memory_mb)
-      ? obj.peak_memory_mb
-      : 0
+  if (
+    typeof obj.peak_memory_mb !== 'number' ||
+    Number.isNaN(obj.peak_memory_mb) ||
+    obj.peak_memory_mb < 0
+  ) {
+    return {
+      valid: false,
+      error: 'Malformed response: missing or invalid "peak_memory_mb" field (must be a non-negative number).',
+    }
+  }
 
   const data: RunResponseData = {
-    request_id: typeof obj.request_id === 'string' ? obj.request_id : '',
-    room_id: typeof obj.room_id === 'string' ? obj.room_id : '',
-    language: typeof obj.language === 'string' ? obj.language : '',
+    request_id: obj.request_id,
+    room_id: obj.room_id,
+    language: obj.language,
     stdout: obj.stdout,
     stderr: obj.stderr,
     exit_code: obj.exit_code,
-    execution_time_ms: executionTimeMs,
-    peak_memory_mb: peakMemoryMb,
+    execution_time_ms: obj.execution_time_ms,
+    peak_memory_mb: obj.peak_memory_mb,
     timed_out: Boolean(obj.timed_out),
     oom_killed: Boolean(obj.oom_killed),
     failure_kind: typeof obj.failure_kind === 'string' ? obj.failure_kind : null,
@@ -365,7 +423,11 @@ export async function executeRun(options: ExecuteRunOptions): Promise<RunResult>
       }
     }
 
-    const validation = validateRunResponse(rawJson)
+    const validation = validateRunResponse(rawJson, {
+      requestId,
+      roomId,
+      language,
+    })
     if (!validation.valid) {
       return {
         ok: false,
@@ -397,17 +459,10 @@ export async function executeRun(options: ExecuteRunOptions): Promise<RunResult>
       }
     }
 
-    const message =
-      err instanceof Error && err.message
-        ? err.message
-        : 'Execution service is unavailable. Please check that the execution service is running.'
-
     return {
       ok: false,
       code: 'SERVICE_UNAVAILABLE',
-      error: message.includes('Failed to fetch') || message.includes('NetworkError')
-        ? 'Execution service is unavailable. Please check that the execution service is running.'
-        : message,
+      error: 'Execution service is unavailable. Please check that the execution service is running.',
     }
   } finally {
     clearTimeout(timer)
