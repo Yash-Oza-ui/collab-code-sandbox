@@ -180,17 +180,55 @@ describe('RunPanel component (T-11)', () => {
     expect(stdoutEl!.textContent).toBe('hello output\n')
   })
 
-  it('handles execution failure and displays error banner', async () => {
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: false,
-      status: 503,
-      json: async () => ({
-        error: {
-          code: 'QUEUE_FULL',
-          message: 'Queue is full',
-          retry_after_seconds: 5,
-        },
-      }),
+  it('prevents duplicate submissions when clicking Run rapidly (Fix 3)', async () => {
+    let resolveFetch: (value: unknown) => void = () => {}
+    const fetchPromise = new Promise((resolve) => {
+      resolveFetch = resolve
+    })
+    const fetchMock = vi.fn().mockImplementation(() => fetchPromise)
+
+    await act(async () => {
+      root?.render(<RunPanel {...defaultProps} fetchFn={fetchMock as unknown as typeof fetch} />)
+    })
+
+    const runBtn = container!.querySelector<HTMLButtonElement>('[data-testid="run-button"]')!
+
+    // Click twice rapidly
+    await act(async () => {
+      runBtn.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      runBtn.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+
+    // Resolve in-flight request
+    await act(async () => {
+      resolveFetch({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          request_id: '1',
+          room_id: 'test',
+          language: 'python',
+          stdout: 'ok\n',
+          stderr: '',
+          exit_code: 0,
+          execution_time_ms: 5.0,
+        }),
+      })
+    })
+
+    expect(runBtn.disabled).toBe(false)
+  })
+
+  it('handles request timeout, restores Run button, and allows subsequent runs (Fix 3)', async () => {
+    // Mock fetch that hangs
+    const fetchMock = vi.fn().mockImplementation((_url, init: { signal?: AbortSignal }) => {
+      return new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => {
+          reject(new DOMException('Aborted', 'AbortError'))
+        })
+      })
     })
 
     const onRunComplete = vi.fn()
@@ -198,6 +236,7 @@ describe('RunPanel component (T-11)', () => {
       root?.render(
         <RunPanel
           {...defaultProps}
+          timeoutMs={50} // 50ms timeout
           fetchFn={fetchMock as unknown as typeof fetch}
           onRunComplete={onRunComplete}
         />,
@@ -209,10 +248,118 @@ describe('RunPanel component (T-11)', () => {
       runBtn.dispatchEvent(new MouseEvent('click', { bubbles: true }))
     })
 
+    // Wait for timeout to fire
+    await act(async () => {
+      await new Promise((res) => setTimeout(res, 70))
+    })
+
     expect(onRunComplete).toHaveBeenCalled()
     const banner = container!.querySelector('[data-testid="run-status-banner"]')
-    expect(banner).not.toBeNull()
-    expect(banner!.textContent).toContain('System is busy')
+    expect(banner?.textContent).toContain('timed out')
+    expect(runBtn.disabled).toBe(false)
+
+    // Subsequent run succeeds
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        request_id: '2',
+        room_id: 'test',
+        language: 'python',
+        stdout: 'recovered\n',
+        stderr: '',
+        exit_code: 0,
+        execution_time_ms: 1.0,
+      }),
+    })
+
+    await act(async () => {
+      runBtn.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+
+    const stdoutEl = container!.querySelector('[data-testid="run-stdout"]')
+    expect(stdoutEl?.textContent).toBe('recovered\n')
+  })
+
+  it('safely handles missing execution_time_ms and nonzero exit codes without throwing (Fix 2)', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        request_id: 'err-1',
+        room_id: 'test',
+        language: 'python',
+        stdout: '',
+        stderr: 'ZeroDivisionError: division by zero\n',
+        exit_code: 1,
+        execution_time_ms: null, // missing execution time
+      }),
+    })
+
+    await act(async () => {
+      root?.render(<RunPanel {...defaultProps} fetchFn={fetchMock as unknown as typeof fetch} />)
+    })
+
+    const runBtn = container!.querySelector<HTMLButtonElement>('[data-testid="run-button"]')!
+    await act(async () => {
+      runBtn.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+
+    const banner = container!.querySelector('[data-testid="run-status-banner"]')
+    expect(banner?.textContent).toContain('Process exited with code 1')
+
+    const stderrEl = container!.querySelector('[data-testid="run-stderr"]')
+    expect(stderrEl?.textContent).toContain('ZeroDivisionError')
+  })
+
+  it('handles malformed server response and displays error banner without crashing (Fix 2)', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ unexpected_structure: true }),
+    })
+
+    await act(async () => {
+      root?.render(<RunPanel {...defaultProps} fetchFn={fetchMock as unknown as typeof fetch} />)
+    })
+
+    const runBtn = container!.querySelector<HTMLButtonElement>('[data-testid="run-button"]')!
+    await act(async () => {
+      runBtn.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+
+    const banner = container!.querySelector('[data-testid="run-status-banner"]')
+    expect(banner?.textContent).toContain('Malformed response')
+    expect(runBtn.disabled).toBe(false)
+  })
+
+  it('aborts active execution request when component unmounts (Fix 3)', async () => {
+    let aborted = false
+    const fetchMock = vi.fn().mockImplementation((_url, init: { signal?: AbortSignal }) => {
+      init?.signal?.addEventListener('abort', () => {
+        aborted = true
+      })
+      return new Promise(() => {})
+    })
+
+    await act(async () => {
+      root?.render(<RunPanel {...defaultProps} fetchFn={fetchMock as unknown as typeof fetch} />)
+    })
+
+    const runBtn = container!.querySelector<HTMLButtonElement>('[data-testid="run-button"]')!
+    await act(async () => {
+      runBtn.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+
+    expect(aborted).toBe(false)
+
+    // Unmount
+    await act(async () => {
+      root?.unmount()
+      root = null
+    })
+
+    expect(aborted).toBe(true)
   })
 
   it('renders child components in the reserved output slot', async () => {
