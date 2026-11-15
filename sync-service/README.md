@@ -6,23 +6,18 @@ Spring Boot WebSocket relay for real-time collaborative editing using Yjs CRDTs 
 
 ## 1. Overview
 
-<<<<<<< HEAD
-`sync-service` is an ephemeral, low-latency WebSocket message relay:
-- Clients connect to `ws://localhost:8081/ws/rooms/{room_id}?session_id={session_id}`.
-- Every client in a room receives messages published by other clients in that room.
-- Clients in other rooms receive nothing (strict room isolation).
-- Binary frames (Yjs sync & update messages) are forwarded untouched without server-side parsing or buffering.
-- Yjs awareness frames (first byte `0x01`) are echoed back to the sender so a lone client in a room maintains its heartbeat and does not disconnect.
-- Internal HTTP broadcast endpoint (`POST /internal/rooms/{room_id}/messages`, protected by `X-Internal-Token`) broadcasts execution results and control messages to room members or targeted sessions via WebSocket control sessions.
-- Internal HTTP session lookup endpoint (`GET /internal/rooms/{room_id}/sessions/{session_id}`, protected by `X-Internal-Token`) provides session identity, role, execution permissions (`can_run`, `run_denied_reason`), and room settings (`mode`, `language`, `ai_enabled`) for `execution-service`.
-=======
-`sync-service` provides the server-side room model and WebSocket relay for collaborative editing sessions.
+`sync-service` provides the server-side room model, role and permission enforcement, and low-latency WebSocket message relay for real-time collaborative editing sessions using Yjs CRDTs (T-02, T-20, FR1, FR3, FR9.4, FR17, FR41.4, FR42, CR13).
+
+- Clients connect to `ws://localhost:8081/ws/rooms/{room_id}?session_id={session_id}` (control socket) and `ws://localhost:8081/ws/rooms/{room_id}/docs/{doc_id}?session_id={session_id}` (document socket).
+- Strict room isolation: clients in one room never receive messages published in another room.
+- Document frames (Yjs sync & update messages) are forwarded untouched without server-side document parsing; awareness frames (first byte `0x01`) are echoed back to the sender so a lone client maintains heartbeat.
+- Internal HTTP endpoints (`/internal/rooms/{room_id}/...`) authenticate execution-service callers, verify run permissions, and route execution results to room members or targeted session connections.
 
 ### 1.1 Sockets (T-20)
 
 | Socket | Path | Frame type | Purpose |
 |--------|------|------------|---------|
-| **Control socket** | `/ws/rooms/{room_id}?session_id=` | Text (JSON) | Join, roles, roster, edit-rejected notifications |
+| **Control socket** | `/ws/rooms/{room_id}?session_id=` | Text (JSON) | Join, roles, roster, edit-rejected notifications, internal messages |
 | **Document socket** | `/ws/rooms/{room_id}/docs/{doc_id}?session_id=` | Binary (Yjs) | Yjs sync frames, with awareness echo and edit-permission check |
 
 Both sockets require `session_id` to be a valid UUID v4 query parameter.
@@ -44,17 +39,17 @@ Both sockets require `session_id` to be a valid UUID v4 query parameter.
 |--------|------|-------------|
 | `POST` | `/v1/rooms` | Create a room — returns `room_id`, `owner_token`, `mode`, `preset`, `language` |
 | `GET` | `/v1/rooms/{id}/owner` | Validate the owner token (T-10) |
-| `POST` | `/internal/rooms/{id}/messages` | Broadcast a JSON message to all control-socket sessions in a room (requires `X-Internal-Token`) |
+| `GET` | `/internal/rooms/{room_id}/sessions/{session_id}` | Session lookup for execution-service (requires `X-Internal-Token`) |
+| `POST` | `/internal/rooms/{room_id}/messages` | Broadcast or deliver targeted JSON messages to control sockets (requires `X-Internal-Token`) |
 
-### 1.4 Error Codes (Internal Endpoint)
+### 1.4 Error Codes (Internal Endpoints)
 
 | HTTP | Code | Meaning |
 |------|------|---------|
 | 401 | `UNAUTHORIZED` | Missing or invalid `X-Internal-Token` |
-| 400 | `PAYLOAD_TOO_LARGE` | Body exceeds 4 MiB |
-| 400 | `INVALID_BODY` | Body has no `type` field |
-| 400 | `INVALID_JSON` | Body is not valid JSON |
->>>>>>> origin/main
+| 400 | `INVALID_MESSAGE` | Non-JSON body, missing or blank `type`, payload > 4 MiB, or malformed `audience` |
+| 404 | `ROOM_NOT_FOUND` | Room does not exist or is closed |
+| 404 | `SESSION_NOT_FOUND` | Session has not joined the room (session lookup) |
 
 ---
 

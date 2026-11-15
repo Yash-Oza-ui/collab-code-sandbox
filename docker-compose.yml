@@ -27,6 +27,7 @@ services:
     build: ./sync-service
     environment:
       SERVER_PORT: ${SYNC_SERVICE_PORT:-8081} # Spring Boot reads SERVER_PORT
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-test-internal-token}
     ports:
       - "${SYNC_SERVICE_PORT:-8081}:${SYNC_SERVICE_PORT:-8081}"
 

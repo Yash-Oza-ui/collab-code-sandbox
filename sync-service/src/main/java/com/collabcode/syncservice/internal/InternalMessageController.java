@@ -22,6 +22,9 @@ import org.springframework.web.bind.annotation.*;
 import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
 
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -147,8 +150,7 @@ public class InternalMessageController {
     public ResponseEntity<Map<String, Object>> broadcast(
             @PathVariable String roomId,
             @RequestHeader(value = "X-Internal-Token", required = false) String token,
-            HttpServletRequest request,
-            @RequestBody(required = false) byte[] rawBodyBytes) {
+            HttpServletRequest request) {
 
         // --- 1. Auth check (section 7.2, V2.14) ---
         // Must be validated before any body parsing or processing to prevent info leak / resource exhaustion.
@@ -165,15 +167,42 @@ public class InternalMessageController {
                     "Message body is not valid: unsupported Content-Type. Expected application/json.", null);
         }
 
-        // --- 3. Request body presence & size check (raw bytes, bounded before parsing) ---
-        if (rawBodyBytes == null || rawBodyBytes.length == 0) {
+        // --- 3. Request body presence & bounded stream reading ---
+        // Reads from request stream up to MAX_BODY_BYTES into memory buffer.
+        // Discards excess bytes from socket without buffering them in heap.
+        if (request == null) {
             return error(HttpStatus.BAD_REQUEST, "INVALID_MESSAGE",
                     "Message body is not valid: empty or missing body.", null);
         }
 
-        if (rawBodyBytes.length > MAX_BODY_BYTES) {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        byte[] buffer = new byte[8192];
+        int totalRead = 0;
+        boolean oversized = false;
+        try (InputStream is = request.getInputStream()) {
+            int bytesRead;
+            while ((bytesRead = is.read(buffer)) != -1) {
+                totalRead += bytesRead;
+                if (totalRead > MAX_BODY_BYTES) {
+                    oversized = true;
+                } else {
+                    baos.write(buffer, 0, bytesRead);
+                }
+            }
+        } catch (IOException e) {
+            return error(HttpStatus.BAD_REQUEST, "INVALID_MESSAGE",
+                    "Message body is not valid: error reading stream.", null);
+        }
+
+        if (oversized) {
             return error(HttpStatus.BAD_REQUEST, "INVALID_MESSAGE",
                     "Message body is not valid: larger than 4 MiB.", null);
+        }
+
+        byte[] rawBodyBytes = baos.toByteArray();
+        if (rawBodyBytes.length == 0) {
+            return error(HttpStatus.BAD_REQUEST, "INVALID_MESSAGE",
+                    "Message body is not valid: empty or missing body.", null);
         }
 
         // --- 4. JSON parsing & root object validation ---
