@@ -74,6 +74,8 @@ export default function RoomPage(props: RoomPageProps = {}) {
   const [serverError, setServerError] = useState<string | null>(null)
   const [docError, setDocError] = useState<string | null>(null)
   const [pendingName, setPendingName] = useState<string | null>(null)
+  // Role from the server's `joined` message (T-10 / FR9.5: show the Host)
+  const [role, setRole] = useState<string | null>(null)
 
   // One Y.Doc is created inside effect setup and destroyed in its cleanup (T-01).
   const { docRef } = useRoomDoc(roomId, { docRef: externalDocRef })
@@ -139,11 +141,12 @@ export default function RoomPage(props: RoomPageProps = {}) {
 
     awareness.on('change', handleAwarenessChange)
 
-    // Connect awareness to room WebSocket relay if in a room (US-05 / T-20)
+    // Connect awareness and Yjs document sync to room WebSocket relay if in a room (US-02 / US-05 / T-20)
     let wsCleanup: (() => void) | undefined
     if (roomId) {
       const conn = connectAwarenessWs({
         roomId,
+        doc,
         docId: propDocId,
         resolveDocId,
         awareness,
@@ -151,7 +154,8 @@ export default function RoomPage(props: RoomPageProps = {}) {
         sessionId: wsOptions?.sessionId,
         WebSocketClass: wsOptions?.WebSocketClass,
         joinTimeoutMs: wsOptions?.joinTimeoutMs,
-        onJoined: () => {
+        onJoined: (joined) => {
+          setRole(joined.role)
           const name = pendingNameRef.current
           if (!name) return
 
@@ -228,6 +232,17 @@ export default function RoomPage(props: RoomPageProps = {}) {
           } else if (event.code !== 1000) {
             setDocError(`Presence connection closed (${event.code}). Remote presence synchronization stopped.`)
           }
+        },
+        onEditRejected: (msg) => {
+          let reasonText = 'You do not have permission to edit this document.'
+          if (msg.reason === 'observer') {
+            reasonText = 'Observers cannot edit in this room.'
+          } else if (msg.reason === 'not_module_writer') {
+            reasonText = 'You are not a registered writer for this module.'
+          } else if (msg.reason === 'no_edit_access') {
+            reasonText = 'You do not have edit access in this Pair room.'
+          }
+          setDocError(reasonText)
         },
       })
       connRef.current = conn
@@ -350,6 +365,11 @@ export default function RoomPage(props: RoomPageProps = {}) {
               )}
               <span>You: {displayName}</span>
             </span>
+            {role?.toLowerCase() === 'host' && (
+              <span className="room-host-badge" data-testid="room-host-badge">
+                Host
+              </span>
+            )}
           </>
         )}
         {docError && (

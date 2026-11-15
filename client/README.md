@@ -250,3 +250,54 @@ Both test suites simulate the sync-service T-20 WebSocket relay (Control socket 
      Array.from(window.awareness.getStates().values())
      // -> Both Alice and Bob are present, verified synchronized over the WebSocket relay.
      ```
+
+---
+
+## 11. Merge Simultaneous Edits Safely (US-02 / FR2)
+
+**US-02** enables multiple participants to edit simultaneously in Monaco without overwriting each other's work or losing changes:
+
+1. **Monaco-to-Yjs Binding (`y-monaco`):**
+   - The Monaco editor text model binds directly to `doc.getText('monaco')` upon mount.
+   - Edits in Monaco mutate the shared Y.Text type, and remote Yjs updates automatically project into the Monaco editor model.
+2. **Relay Document Synchronization Protocol (`src/awarenessWs.ts`):**
+   - The Document Socket (`/ws/rooms/{roomId}/docs/{docId}?session_id={sessionId}`) relays both Yjs document sync frames (`MESSAGE_SYNC = 0`) and Awareness frames (`MESSAGE_AWARENESS = 1`, `MESSAGE_QUERY_AWARENESS = 3`).
+   - Upon connection, the client sends both `syncStep1` (querying peer state) and `syncStep2` (advertising local state) as distinct `MESSAGE_SYNC` frames to establish a bidirectional handshake across the stateless relay.
+   - When a peer receives `syncStep1`, it replies with `syncStep2` and dispatches its own reverse `syncStep1` as an independent, correctly prefixed `MESSAGE_SYNC` frame.
+   - Handshake loop protection: reverse `syncStep1` replies are bounded to execute at most once per connection, preventing echo loops.
+   - Multi-message decoding: `handleIncomingSyncFrame` executes a `while (decoding.hasContent(decoder))` loop, guaranteeing all concatenated Yjs sync messages in any incoming frame are parsed and applied.
+   - Local document updates generate `MESSAGE_SYNC` update frames broadcasted to peers in the same room.
+3. **CRDT Conflict-Free Merging:**
+   - Simultaneous edits at identical or overlapping offsets converge deterministically using Yjs's CRDT engine without custom merge locks or central coordinator requirements.
+4. **Room and Mode Isolation:**
+   - **Pair Mode:** Document synchronization is scoped to the shared `main` document.
+   - **Open Mode:** Document synchronization is scoped per module (`docId = module_id`), ensuring concurrent editing in one module never leaks into or overwrites another module.
+   - **Room Isolation:** Sockets in different rooms never receive or merge each other's edits.
+5. **Pair-Mode Edit Permission Enforcement (CR13):**
+   - When a participant attempts to modify a document in Pair mode without edit permission from the host, the relay drops the update and sends an `edit-rejected` message on the control socket.
+   - The client handles `edit-rejected` by displaying an informative banner: `"You do not have permission to edit this document. Contact the host for edit access."`
+
+### Verification Procedure (Automated vs. Manual)
+
+#### Automated Vitest Regression Suites:
+Run the US-02 test suites:
+```bash
+npm test src/awarenessWs.test.ts src/RoomPage.displayName.test.tsx
+```
+Automated tests verify:
+- Reverse `syncStep1` is transmitted as its own prefixed `MESSAGE_SYNC` frame.
+- Multi-message frames are decoded completely via the decoding loop.
+- Pre-existing divergent edits between two clients converge upon connection without requiring additional edits.
+- Late-joining clients with pre-existing local changes synchronize completely with an active host.
+- Three clients with divergent pre-existing edits converge under controlled message ordering.
+- Relay drops document changes from unauthorized participants in Pair mode and emits `edit-rejected`.
+- RoomPage displays an error banner when `edit-rejected` is received.
+
+#### Manual Verification of Simultaneous Edit Merging (Browser):
+1. Open two browser windows pointing to the same room URL (`/room/{room_id}`).
+2. Join as `Alice` in Window A and `Bob` in Window B.
+3. Place cursors on the same line. Type `AAAA` in Window A and `BBBB` in Window B simultaneously.
+4. **Expected Result:** Both windows converge to identical text containing both `AAAA` and `BBBB` without any overwritten or lost characters.
+5. Repeat with three windows (Window C as `Charlie` typing `CCCC`), verifying all three windows converge to the same text.
+6. Open a window in a separate room: verify edits in the first room never appear in the second room.
+7. **Pair-mode edit permission verification:** In a Pair-mode room where participant B is an observer or ungranted editor, attempt to type in Window B. Verify that changes are rejected by the server and the permission error banner appears.
