@@ -1,7 +1,8 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import {
   ALL_LANGUAGE_OPTIONS,
+  DEFAULT_RUN_TIMEOUT_MS,
   DR1_LANGUAGES,
   executeRun,
   type RunResult,
@@ -20,6 +21,7 @@ export interface RunPanelProps {
   initialStdin?: string
   executionApiUrl?: string
   fetchFn?: typeof fetch
+  timeoutMs?: number
   className?: string
   children?: ReactNode
 }
@@ -36,6 +38,7 @@ export default function RunPanel({
   initialStdin = '',
   executionApiUrl,
   fetchFn,
+  timeoutMs = DEFAULT_RUN_TIMEOUT_MS,
   className = '',
   children,
 }: RunPanelProps) {
@@ -43,32 +46,51 @@ export default function RunPanel({
   const [stdin, setStdin] = useState<string>(initialStdin)
   const [showStdin, setShowStdin] = useState<boolean>(Boolean(initialStdin))
   const [isRunning, setIsRunning] = useState<boolean>(false)
-  const [statusMessage, setServerError] = useState<string | null>(null)
+  const [statusMessage, setStatusMessage] = useState<string | null>(null)
   const [statusType, setStatusType] = useState<'idle' | 'running' | 'success' | 'error'>('idle')
   const [lastResult, setLastResult] = useState<RunResult | null>(null)
+
+  const isRunningRef = useRef<boolean>(false)
+  const abortControllerRef = useRef<AbortController | null>(null)
+
+  // Abort any in-flight execution request when the component unmounts
+  useEffect(() => {
+    return () => {
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort()
+        abortControllerRef.current = null
+      }
+      isRunningRef.current = false
+    }
+  }, [])
 
   function handleLanguageChange(newLang: string) {
     const isSupported = DR1_LANGUAGES.some((l) => l.id === newLang)
     if (!isSupported) {
-      setServerError(`Language "${newLang}" is not available yet.`)
+      setStatusMessage(`Language "${newLang}" is not available yet.`)
       setStatusType('error')
       return
     }
 
     const lang = newLang as SupportedLanguage
     setSelectedLanguage(lang)
-    setServerError(null)
+    setStatusMessage(null)
     setStatusType('idle')
     onLanguageChange?.(lang)
   }
 
   async function handleRun() {
-    if (isRunning || disabled) return
+    // Prevent duplicate submissions synchronously while an execution request is active
+    if (isRunningRef.current || isRunning || disabled) return
 
+    isRunningRef.current = true
     setIsRunning(true)
     setStatusType('running')
-    setServerError('Running code...')
+    setStatusMessage('Running code...')
     onRunStart?.()
+
+    const controller = new AbortController()
+    abortControllerRef.current = controller
 
     try {
       const code = getCode()
@@ -79,34 +101,45 @@ export default function RunPanel({
         stdin,
         executionApiUrl,
         fetchFn,
+        timeoutMs,
+        signal: controller.signal,
       })
 
       setLastResult(result)
 
       if (result.ok) {
         setStatusType('success')
+        const executionTime =
+          typeof result.data.execution_time_ms === 'number' && !Number.isNaN(result.data.execution_time_ms)
+            ? result.data.execution_time_ms.toFixed(1)
+            : '0.0'
+
         if (result.data.exit_code === 0) {
-          setServerError(`Execution completed in ${result.data.execution_time_ms.toFixed(1)} ms.`)
+          setStatusMessage(`Execution completed in ${executionTime} ms.`)
         } else {
-          setServerError(`Process exited with code ${result.data.exit_code}.`)
+          setStatusMessage(`Process exited with code ${result.data.exit_code}.`)
         }
       } else {
         setStatusType('error')
-        setServerError(result.error)
+        setStatusMessage(result.error)
       }
 
       onRunComplete?.(result)
     } catch (err) {
       const errorMsg =
-        err instanceof Error
+        err instanceof Error && err.message
           ? err.message
           : 'Execution service is unavailable. Please check that the execution service is running.'
       const errorResult: RunResult = { ok: false, error: errorMsg, code: 'SERVICE_UNAVAILABLE' }
       setStatusType('error')
-      setServerError(errorMsg)
+      setStatusMessage(errorMsg)
       setLastResult(errorResult)
       onRunComplete?.(errorResult)
     } finally {
+      if (abortControllerRef.current === controller) {
+        abortControllerRef.current = null
+      }
+      isRunningRef.current = false
       setIsRunning(false)
     }
   }
