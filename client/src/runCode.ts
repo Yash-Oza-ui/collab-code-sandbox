@@ -70,6 +70,30 @@ export function getEntryFileName(language: string): string {
   return `main.${getLanguageExtension(language)}`
 }
 
+/**
+ * Generates a fresh, cryptographically secure UUID v4.
+ * Uses crypto.randomUUID() when available, with a fallback to crypto.getRandomValues().
+ * Fails gracefully if secure randomness is not available in the environment.
+ */
+export function generateSecureUUID(): string {
+  if (typeof crypto !== 'undefined') {
+    if (typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID()
+    }
+    if (typeof crypto.getRandomValues === 'function') {
+      const bytes = new Uint8Array(16)
+      crypto.getRandomValues(bytes)
+      // RFC 4122 Section 4.4: Set version to 4 (0100)
+      bytes[6] = (bytes[6] & 0x0f) | 0x40
+      // Set variant to RFC 4122 (10xx)
+      bytes[8] = (bytes[8] & 0x3f) | 0x80
+      const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
+      return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`
+    }
+  }
+  throw new Error('Cryptographically secure randomness is not available in this environment.')
+}
+
 export interface RunFile {
   name: string
   content: string
@@ -144,7 +168,70 @@ export interface ExecuteRunOptions {
   sessionId?: string
   executionApiUrl?: string
   fetchFn?: typeof fetch
+  /** Maximum time in milliseconds to wait for execution to complete before timing out */
+  timeoutMs?: number
+  /** Optional external abort signal to cancel execution */
+  signal?: AbortSignal
 }
+
+/**
+ * Validates the raw JSON object returned by the execution service.
+ * Ensures stdout, stderr, and exit_code exist, and sanitizes numeric execution metrics.
+ */
+export function validateRunResponse(raw: unknown): { valid: true; data: RunResponseData } | { valid: false; error: string } {
+  if (!raw || typeof raw !== 'object') {
+    return { valid: false, error: 'Malformed response: server returned a non-object payload.' }
+  }
+
+  const obj = raw as Record<string, unknown>
+
+  if (typeof obj.stdout !== 'string') {
+    return { valid: false, error: 'Malformed response: missing or invalid "stdout" field.' }
+  }
+  if (typeof obj.stderr !== 'string') {
+    return { valid: false, error: 'Malformed response: missing or invalid "stderr" field.' }
+  }
+  if (typeof obj.exit_code !== 'number' || Number.isNaN(obj.exit_code)) {
+    return { valid: false, error: 'Malformed response: missing or invalid "exit_code" field.' }
+  }
+
+  const executionTimeMs =
+    typeof obj.execution_time_ms === 'number' && !Number.isNaN(obj.execution_time_ms)
+      ? obj.execution_time_ms
+      : 0
+
+  const peakMemoryMb =
+    typeof obj.peak_memory_mb === 'number' && !Number.isNaN(obj.peak_memory_mb)
+      ? obj.peak_memory_mb
+      : 0
+
+  const data: RunResponseData = {
+    request_id: typeof obj.request_id === 'string' ? obj.request_id : '',
+    room_id: typeof obj.room_id === 'string' ? obj.room_id : '',
+    language: typeof obj.language === 'string' ? obj.language : '',
+    stdout: obj.stdout,
+    stderr: obj.stderr,
+    exit_code: obj.exit_code,
+    execution_time_ms: executionTimeMs,
+    peak_memory_mb: peakMemoryMb,
+    timed_out: Boolean(obj.timed_out),
+    oom_killed: Boolean(obj.oom_killed),
+    failure_kind: typeof obj.failure_kind === 'string' ? obj.failure_kind : null,
+    output_truncated: Boolean(obj.output_truncated),
+    message: typeof obj.message === 'string' ? obj.message : null,
+    compile_time_ms: typeof obj.compile_time_ms === 'number' ? obj.compile_time_ms : null,
+    runner: (obj.runner && typeof obj.runner === 'object') ? (obj.runner as RunnerMemberInfo) : undefined,
+    ran_at: typeof obj.ran_at === 'string' ? obj.ran_at : undefined,
+    visibility: typeof obj.visibility === 'string' ? obj.visibility : undefined,
+    saved_versions: Array.isArray(obj.saved_versions) ? obj.saved_versions : undefined,
+    failure: obj.failure,
+  }
+
+  return { valid: true, data }
+}
+
+/** Default execution timeout: 15 seconds (accommodates 5s execution limit + container scheduling) */
+export const DEFAULT_RUN_TIMEOUT_MS = 15000
 
 /**
  * Executes code via the execution-service POST /v1/runs endpoint.
@@ -159,6 +246,8 @@ export async function executeRun(options: ExecuteRunOptions): Promise<RunResult>
     sessionId = getSessionId(),
     executionApiUrl = config.executionApiUrl,
     fetchFn = (typeof window !== 'undefined' ? window.fetch.bind(window) : fetch),
+    timeoutMs = DEFAULT_RUN_TIMEOUT_MS,
+    signal,
   } = options
 
   if (!isLanguageSupported(language)) {
@@ -169,10 +258,16 @@ export async function executeRun(options: ExecuteRunOptions): Promise<RunResult>
     }
   }
 
-  const requestId =
-    typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
-      ? crypto.randomUUID()
-      : '00000000-0000-4000-8000-000000000000'
+  let requestId: string
+  try {
+    requestId = generateSecureUUID()
+  } catch {
+    return {
+      ok: false,
+      code: 'RANDOMNESS_UNAVAILABLE',
+      error: 'Cannot generate a secure request ID. Cryptographically secure randomness is unavailable.',
+    }
+  }
 
   const fileName = getEntryFileName(language)
   const payload: RunRequestPayload = {
@@ -193,6 +288,30 @@ export async function executeRun(options: ExecuteRunOptions): Promise<RunResult>
     },
   }
 
+  const controller = new AbortController()
+  let isTimedOut = false
+
+  const timer = setTimeout(() => {
+    isTimedOut = true
+    controller.abort()
+  }, timeoutMs)
+
+  const handleExternalAbort = () => {
+    controller.abort()
+  }
+
+  if (signal) {
+    if (signal.aborted) {
+      clearTimeout(timer)
+      return {
+        ok: false,
+        code: 'REQUEST_ABORTED',
+        error: 'Execution request was cancelled.',
+      }
+    }
+    signal.addEventListener('abort', handleExternalAbort, { once: true })
+  }
+
   try {
     const url = `${executionApiUrl.replace(/\/+$/, '')}/v1/runs`
     const response = await fetchFn(url, {
@@ -201,6 +320,7 @@ export async function executeRun(options: ExecuteRunOptions): Promise<RunResult>
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(payload),
+      signal: controller.signal,
     })
 
     if (!response.ok) {
@@ -233,12 +353,50 @@ export async function executeRun(options: ExecuteRunOptions): Promise<RunResult>
       }
     }
 
-    const data = (await response.json()) as RunResponseData
+    let rawJson: unknown
+    try {
+      rawJson = await response.json()
+    } catch {
+      return {
+        ok: false,
+        code: 'MALFORMED_RESPONSE',
+        error: 'Malformed server response: received invalid JSON from execution service.',
+        status: response.status,
+      }
+    }
+
+    const validation = validateRunResponse(rawJson)
+    if (!validation.valid) {
+      return {
+        ok: false,
+        code: 'MALFORMED_RESPONSE',
+        error: validation.error,
+        status: response.status,
+      }
+    }
+
     return {
       ok: true,
-      data,
+      data: validation.data,
     }
   } catch (err) {
+    if (isTimedOut) {
+      const timeoutSec = Math.round(timeoutMs / 1000)
+      return {
+        ok: false,
+        code: 'REQUEST_TIMEOUT',
+        error: `Execution request timed out after ${timeoutSec} seconds. Please try again.`,
+      }
+    }
+
+    if (err instanceof DOMException && err.name === 'AbortError') {
+      return {
+        ok: false,
+        code: 'REQUEST_ABORTED',
+        error: 'Execution request was cancelled.',
+      }
+    }
+
     const message =
       err instanceof Error && err.message
         ? err.message
@@ -250,6 +408,11 @@ export async function executeRun(options: ExecuteRunOptions): Promise<RunResult>
       error: message.includes('Failed to fetch') || message.includes('NetworkError')
         ? 'Execution service is unavailable. Please check that the execution service is running.'
         : message,
+    }
+  } finally {
+    clearTimeout(timer)
+    if (signal) {
+      signal.removeEventListener('abort', handleExternalAbort)
     }
   }
 }
