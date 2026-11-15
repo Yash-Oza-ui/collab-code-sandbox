@@ -1,4 +1,4 @@
-"""LLM integration module for AI/ML service (T-16, FR12, FR13, US-17)."""
+"""LLM integration module for AI/ML service (T-16, FR12, FR13, US-17, US-22, US-76)."""
 
 from app.llm.client import (
     AIDisabledError,
@@ -7,6 +7,7 @@ from app.llm.client import (
     LLMProviderError,
     LLMRateLimitError,
     LLMTimeoutError,
+    RoomRateLimitedError,
     call_llm_with_consent,
     get_default_llm_client,
     set_default_llm_client,
@@ -18,6 +19,7 @@ from app.llm.explainer import (
     split_sentences,
 )
 from app.llm.prompts import EXPLAIN_SYSTEM_INSTRUCTION, build_explanation_prompt
+from app.section import extract_error_line_from_stderr, extract_relevant_section
 
 __all__ = [
     "AIDisabledError",
@@ -26,6 +28,7 @@ __all__ = [
     "LLMProviderError",
     "LLMRateLimitError",
     "LLMTimeoutError",
+    "RoomRateLimitedError",
     "call_llm_with_consent",
     "get_default_llm_client",
     "set_default_llm_client",
@@ -35,4 +38,6 @@ __all__ = [
     "split_sentences",
     "EXPLAIN_SYSTEM_INSTRUCTION",
     "build_explanation_prompt",
+    "extract_relevant_section",
+    "extract_error_line_from_stderr",
 ]

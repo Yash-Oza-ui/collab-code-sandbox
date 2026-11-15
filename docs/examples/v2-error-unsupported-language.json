@@ -1,0 +1,8 @@
+{
+  "request_id": "7a3e2b10-6c5d-4f8a-9e12-3456789abcde",
+  "error": {
+    "code": "UNSUPPORTED_LANGUAGE",
+    "message": "Sanitizer crash explanation is supported for C and C++ only, received 'python'.",
+    "retry_after_seconds": null
+  }
+}

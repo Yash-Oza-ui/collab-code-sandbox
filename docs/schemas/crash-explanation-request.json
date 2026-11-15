@@ -1,0 +1,36 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "CrashExplanationRequest",
+  "type": "object",
+  "properties": {
+    "request_id": { "type": "string", "format": "uuid" },
+    "room_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{22}$",
+      "description": "22-character unpadded base64url room identifier matching T-17 V2.1."
+    },
+    "analysis_id": { "type": "string", "format": "uuid" },
+    "request_type": { "type": "string", "enum": ["crash_explanation"] },
+    "language": {
+      "type": "string",
+      "enum": ["cpp", "python", "c", "java", "javascript"],
+      "description": "DR1 language identifier; non-C/C++ values pass structural schema validation so the endpoint returns 422 UNSUPPORTED_LANGUAGE (DR5)."
+    },
+    "consent": { "type": "boolean" },
+    "ai_enabled": { "type": "boolean" },
+    "sanitizer_output": { "type": "string", "minLength": 1 },
+    "code_snippet": { "type": "string", "minLength": 1 }
+  },
+  "required": [
+    "request_id",
+    "room_id",
+    "analysis_id",
+    "request_type",
+    "language",
+    "consent",
+    "ai_enabled",
+    "sanitizer_output",
+    "code_snippet"
+  ],
+  "additionalProperties": false
+}

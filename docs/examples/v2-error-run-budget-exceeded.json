@@ -1,0 +1,8 @@
+{
+  "request_id": "7a3e2b10-6c5d-4f8a-9e12-3456789abcde",
+  "error": {
+    "code": "RUN_BUDGET_EXCEEDED",
+    "message": "Aggregate repeated-run execution budget of 20000ms exceeded (NFR14).",
+    "retry_after_seconds": 30
+  }
+}

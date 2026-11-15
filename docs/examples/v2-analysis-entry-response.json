@@ -1,0 +1,6 @@
+{
+  "request_id": "7a3e2b10-6c5d-4f8a-9e12-3456789abcde",
+  "analysis_id": "8b4f3c21-7d6e-4a9b-0f23-456789abcdef",
+  "status": "accepted",
+  "message": "Analysis started in background. Results will arrive via WebSocket."
+}
