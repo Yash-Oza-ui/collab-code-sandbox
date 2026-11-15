@@ -1,6 +1,7 @@
 package com.collabcode.execution.controller;
 
 import com.collabcode.execution.broadcast.RoomBroadcastService;
+import com.collabcode.execution.model.RunSpec;
 import com.collabcode.execution.queue.RunQueueGate;
 import com.collabcode.execution.runner.CodeRunner;
 import com.collabcode.execution.runner.ExecutionResult;
@@ -20,7 +21,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -59,7 +60,16 @@ class RunControllerUS11Test {
               "room_id":    "room-demo-01",
               "session_id": "7c1e4a52-3b0d-4f6a-9a2e-8d5f1b6c3e90",
               "language":   "python",
-              "code":       "print('hello')"
+              "source": {
+                "kind": "inline",
+                "files": [
+                  {
+                    "name": "main.py",
+                    "content": "print('hello')"
+                  }
+                ],
+                "entry": "main.py"
+              }
             }
             """;
 
@@ -97,7 +107,7 @@ class RunControllerUS11Test {
         }
 
         // slot is free again -> the next run is accepted
-        when(codeRunner.execute(anyString(), anyString(), anyString()))
+        when(codeRunner.execute(any(RunSpec.class)))
                 .thenReturn(new ExecutionResult("hello\n", "", 0, 15.0, 4.2,
                         false, false, null, false, null));
         mockMvc.perform(post("/v1/runs").contentType(MediaType.APPLICATION_JSON).content(BODY))
