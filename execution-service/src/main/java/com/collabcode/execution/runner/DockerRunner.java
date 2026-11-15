@@ -1,6 +1,8 @@
 package com.collabcode.execution.runner;
 
 import com.collabcode.execution.config.ExecutionLimitsProperties;
+import com.collabcode.execution.model.RunFile;
+import com.collabcode.execution.model.RunSpec;
 import org.springframework.stereotype.Component;
 
 import java.io.ByteArrayOutputStream;
@@ -10,6 +12,10 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Comparator;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
@@ -17,10 +23,15 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
+/**
+ * Executes Python RunSpecs in a fresh, isolated Docker container.
+ * Additional languages require their own repository-built runtime images.
+ */
 @Component
-public class DockerRunner {
+public class DockerRunner implements CodeRunner {
 
-    private static final String IMAGE = "collab-sandbox-python:0.1.0";
+    private static final String PYTHON_IMAGE = "collab-sandbox-python:0.1.0";
+    private static final String PYTHON_EXECUTABLE = "python";
 
     private final ExecutionLimitsProperties limits;
 
@@ -28,50 +39,18 @@ public class DockerRunner {
         this.limits = limits;
     }
 
-    public record ExecutionResult(
-            String stdout,
-            String stderr,
-            int exitCode,
-            long executionTimeMs,
-            boolean timedOut,
-            boolean outputTruncated,
-            boolean oomKilled
-    ) {
-        public ExecutionResult(
-                String stdout,
-                String stderr,
-                int exitCode,
-                long executionTimeMs
-        ) {
-            this(stdout, stderr, exitCode, executionTimeMs,
-                    false, false, false);
-        }
-
-        public ExecutionResult(
-                String stdout,
-                String stderr,
-                int exitCode,
-                long executionTimeMs,
-                boolean timedOut,
-                boolean outputTruncated
-        ) {
-            this(stdout, stderr, exitCode, executionTimeMs,
-                    timedOut, outputTruncated, false);
-        }
-    }
-
     private record CapturedOutput(String text, boolean truncated) {}
 
-    public ExecutionResult execute(String code, String stdin)
-            throws IOException, InterruptedException {
+    protected String createContainerName() {
+    return "run-" + UUID.randomUUID();
+    }
 
-        validateLimits();
-
-        String runId = UUID.randomUUID().toString();
-        String containerName = "run-" + runId;
-        Path workspace = Files.createTempDirectory("run-" + runId + "-");
-
+    public ExecutionResult execute(RunSpec spec) {
         long start = System.nanoTime();
+       String runId = UUID.randomUUID().toString();
+       String containerName = createContainerName();
+
+        Path workspace = null;
         Process process = null;
         boolean timedOut = false;
         boolean oomKilled = false;
@@ -81,11 +60,21 @@ public class DockerRunner {
         AtomicBoolean outputTruncated = new AtomicBoolean(false);
 
         try {
-            Files.writeString(
-                    workspace.resolve("solution.py"),
-                    code,
-                    StandardCharsets.UTF_8
-            );
+            validateLimits();
+
+            String validationError = validateSpec(spec);
+            if (validationError != null) {
+                return failureResult(
+                        validationError,
+                        2,
+                        "non_zero_exit",
+                        elapsedMillis(start),
+                        null
+                );
+            }
+
+            workspace = Files.createTempDirectory("run-" + runId + "-");
+            writeRunFiles(spec, workspace);
 
             ProcessBuilder builder = new ProcessBuilder(
                     "docker", "run",
@@ -100,38 +89,35 @@ public class DockerRunner {
                     "--mount",
                     "type=bind,source=" + workspace.toAbsolutePath()
                             + ",target=/sandbox/code,readonly",
-                    IMAGE,
-                    "python", "/sandbox/code/solution.py"
+                    PYTHON_IMAGE,
+                    PYTHON_EXECUTABLE,
+                    "/sandbox/code/" + spec.getEntry()
             );
 
-            // Keep the container until its exit state has been inspected.
             process = builder.start();
             Process runningProcess = process;
 
             CompletableFuture<CapturedOutput> stdoutFuture =
-                    CompletableFuture.supplyAsync(
-                            () -> captureStream(
-                                    runningProcess.getInputStream(),
-                                    outputBytes,
-                                    outputTruncated
-                            )
-                    );
+                    CompletableFuture.supplyAsync(() -> captureStream(
+                            runningProcess.getInputStream(),
+                            outputBytes,
+                            outputTruncated
+                    ));
 
             CompletableFuture<CapturedOutput> stderrFuture =
-                    CompletableFuture.supplyAsync(
-                            () -> captureStream(
-                                    runningProcess.getErrorStream(),
-                                    outputBytes,
-                                    outputTruncated
-                            )
-                    );
+                    CompletableFuture.supplyAsync(() -> captureStream(
+                            runningProcess.getErrorStream(),
+                            outputBytes,
+                            outputTruncated
+                    ));
 
             try (var output = process.getOutputStream()) {
+                String stdin = spec.getStdin();
+
                 if (stdin != null && !stdin.isEmpty()) {
                     output.write(stdin.getBytes(StandardCharsets.UTF_8));
                 }
             } catch (IOException e) {
-                // The container may exit before consuming stdin.
                 if (process.isAlive()) {
                     throw e;
                 }
@@ -143,21 +129,13 @@ public class DockerRunner {
             );
 
             if (!finished) {
-                /*
-                 * The deadline expired. Stop the container, then inspect its
-                 * state before removing it. This also handles an OOM event
-                 * that occurred at approximately the same time as the deadline.
-                 */
                 stopContainer(containerName);
-
                 oomKilled = inspectOomKilled(containerName);
 
                 if (oomKilled) {
-                    // Docker confirms that the container was OOM-killed.
                     timedOut = false;
                     exitCode = 137;
                 } else {
-                    // No OOM evidence: classify this as a wall-time timeout.
                     timedOut = true;
                     exitCode = 124;
                 }
@@ -168,8 +146,6 @@ public class DockerRunner {
                 }
             } else {
                 exitCode = process.exitValue();
-
-                // Inspect the state before the finally block removes the container.
                 oomKilled = inspectOomKilled(containerName);
 
                 if (oomKilled) {
@@ -185,54 +161,378 @@ public class DockerRunner {
                     || stdout.truncated()
                     || stderr.truncated();
 
+            String failureKind = classifyFailure(
+                    exitCode,
+                    timedOut,
+                    oomKilled,
+                    stderr.text()
+            );
+
+            String failingModule = "compile_error".equals(failureKind)
+                    ? spec.getEntry()
+                    : null;
+
             return new ExecutionResult(
                     stdout.text(),
                     stderr.text(),
                     exitCode,
-                    (System.nanoTime() - start) / 1_000_000,
+                    elapsedMillis(start),
+                    0.0,
                     timedOut,
+                    oomKilled,
+                    failureKind,
                     truncated,
-                    oomKilled
+                    resultMessage(
+                            exitCode,
+                            timedOut,
+                            oomKilled,
+                            failureKind
+                    ),
+                    null,
+                    failingModule
+            );
+
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+
+            return failureResult(
+                    "Execution was interrupted.",
+                    130,
+                    "non_zero_exit",
+                    elapsedMillis(start),
+                    null
+            );
+
+        } catch (IOException | RuntimeException e) {
+            String detail = e.getMessage() == null
+                    ? e.getClass().getSimpleName()
+                    : e.getMessage();
+
+            return failureResult(
+                    "Docker execution failed: " + detail,
+                    125,
+                    "non_zero_exit",
+                    elapsedMillis(start),
+                    null
             );
 
         } finally {
-            if (process != null && process.isAlive()) {
-                process.destroyForcibly();
+            cleanupAfterExecution(process, containerName, workspace);
+        }
+    }
 
-                try {
-                    process.waitFor();
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
+    /**
+     * Performs best-effort cleanup even when the execution thread was
+     * interrupted. Interrupts received during cleanup are remembered and
+     * restored after all cleanup attempts have been made.
+     */
+    private void cleanupAfterExecution(
+            Process executionProcess,
+            String containerName,
+            Path workspace
+    ) {
+        boolean interrupted = Thread.interrupted();
+
+        try {
+            if (executionProcess != null && executionProcess.isAlive()) {
+                executionProcess.destroyForcibly();
+
+                interrupted |= waitForProcessUninterruptibly(
+                        executionProcess,
+                        5,
+                        TimeUnit.SECONDS
+                );
+            }
+
+            // Stop the container by name because the Docker CLI may have
+            // exited while the container is still running.
+            interrupted |= runCleanupDockerCommand(
+                    3,
+                    TimeUnit.SECONDS,
+                    "stop",
+                    "--time",
+                    "1",
+                    containerName
+            );
+
+            // Always attempt removal, including if the container has
+            // already exited or does not exist.
+            interrupted |= runCleanupDockerCommand(
+                    5,
+                    TimeUnit.SECONDS,
+                    "rm",
+                    "-f",
+                    containerName
+            );
+
+            if (workspace != null) {
+                try (var paths = Files.walk(workspace)) {
+                    paths.sorted(Comparator.reverseOrder())
+                            .forEach(path -> {
+                                try {
+                                    Files.deleteIfExists(path);
+                                } catch (IOException ignored) {
+                                    // Best-effort workspace cleanup.
+                                }
+                            });
+                } catch (IOException ignored) {
+                    // Preserve the original execution result.
                 }
             }
 
-            // Always attempt container cleanup.
-            try {
-                Process cleanup = new ProcessBuilder(
-                        "docker", "rm", "-f", containerName
-                ).start();
-
-                if (!cleanup.waitFor(5, TimeUnit.SECONDS)) {
-                    cleanup.destroyForcibly();
-                    cleanup.waitFor();
-                }
-            } catch (Exception ignored) {
-                // Preserve the original execution result or exception.
-            }
-
-            // Remove the temporary workspace and its contents.
-            try (var paths = Files.walk(workspace)) {
-                paths.sorted(Comparator.reverseOrder()).forEach(path -> {
-                    try {
-                        Files.deleteIfExists(path);
-                    } catch (IOException ignored) {
-                        // Best-effort workspace cleanup.
-                    }
-                });
-            } catch (IOException ignored) {
-                // Preserve the original execution result or exception.
+        } finally {
+            if (interrupted) {
+                Thread.currentThread().interrupt();
             }
         }
+    }
+
+    /**
+     * Runs a Docker cleanup command with a bounded wait.
+     * Returns true if the current thread was interrupted while waiting.
+     */
+    private boolean runCleanupDockerCommand(
+            long timeout,
+            TimeUnit unit,
+            String... arguments
+    ) {
+        Process cleanup = null;
+        boolean interrupted = false;
+
+        try {
+            ProcessBuilder builder = new ProcessBuilder();
+            builder.command(buildDockerCommand(arguments));
+            builder.redirectOutput(ProcessBuilder.Redirect.DISCARD);
+            builder.redirectError(ProcessBuilder.Redirect.DISCARD);
+
+            cleanup = builder.start();
+
+            long deadline = System.nanoTime() + unit.toNanos(timeout);
+
+            while (cleanup.isAlive()) {
+                long remaining = deadline - System.nanoTime();
+
+                if (remaining <= 0) {
+                    cleanup.destroyForcibly();
+                    break;
+                }
+
+                try {
+                    cleanup.waitFor(remaining, TimeUnit.NANOSECONDS);
+                } catch (InterruptedException e) {
+                    interrupted = true;
+                }
+            }
+
+            if (cleanup.isAlive()) {
+                cleanup.destroyForcibly();
+            }
+
+            interrupted |= waitForProcessUninterruptibly(
+                    cleanup,
+                    2,
+                    TimeUnit.SECONDS
+            );
+
+        } catch (IOException ignored) {
+            // Docker may be unavailable; preserve the original result.
+        }
+
+        return interrupted;
+    }
+
+    private List<String> buildDockerCommand(String... arguments) {
+        List<String> command = new java.util.ArrayList<>();
+        command.add("docker");
+        command.addAll(List.of(arguments));
+
+        return command;
+    }
+
+    /**
+     * Waits for a process without abandoning cleanup on interruption.
+     * Returns true if an interrupt was observed.
+     */
+    private boolean waitForProcessUninterruptibly(
+            Process process,
+            long timeout,
+            TimeUnit unit
+    ) {
+        boolean interrupted = false;
+        long deadline = System.nanoTime() + unit.toNanos(timeout);
+
+        while (process.isAlive()) {
+            long remaining = deadline - System.nanoTime();
+
+            if (remaining <= 0) {
+                break;
+            }
+
+            try {
+                process.waitFor(remaining, TimeUnit.NANOSECONDS);
+            } catch (InterruptedException e) {
+                interrupted = true;
+            }
+        }
+
+        return interrupted;
+    }
+
+    private String validateSpec(RunSpec spec) {
+        if (spec == null) {
+            return "Run specification must not be null.";
+        }
+
+        if (spec.getLanguage() == null
+                || !PYTHON_EXECUTABLE.equals(
+                        spec.getLanguage().toLowerCase(Locale.ROOT))) {
+            return "Unsupported language. The configured runtime currently supports Python only.";
+        }
+
+        List<RunFile> files = spec.getFiles();
+
+        if (files == null || files.isEmpty()) {
+            return "Run specification must contain at least one source file.";
+        }
+
+        Set<String> names = new HashSet<>();
+
+        for (RunFile file : files) {
+            if (file == null) {
+                return "Run specification contains a null file.";
+            }
+
+            String name = file.getName();
+
+            if (!isSafeFileName(name)) {
+                return "Invalid source filename. Filenames must be plain names without path components.";
+            }
+
+            if (!names.add(name)) {
+                return "Run specification contains duplicate filename: " + name;
+            }
+
+            if (file.getContent() == null) {
+                return "Source file content must not be null: " + name;
+            }
+        }
+
+        String entry = spec.getEntry();
+
+        if (!isSafeFileName(entry)) {
+            return "Run specification must identify a valid entry filename.";
+        }
+
+        if (!names.contains(entry)) {
+            return "Entry file was not included in the run specification: " + entry;
+        }
+
+        return null;
+    }
+
+    private boolean isSafeFileName(String name) {
+        return name != null
+                && !name.isBlank()
+                && !".".equals(name)
+                && !"..".equals(name)
+                && !name.contains("..")
+                && !name.contains("/")
+                && !name.contains("\\")
+                && name.indexOf('\0') < 0;
+    }
+
+    private void writeRunFiles(RunSpec spec, Path workspace)
+            throws IOException {
+
+        for (RunFile file : spec.getFiles()) {
+            Files.writeString(
+                    workspace.resolve(file.getName()),
+                    file.getContent(),
+                    StandardCharsets.UTF_8
+            );
+        }
+    }
+
+    private String classifyFailure(
+            int exitCode,
+            boolean timedOut,
+            boolean oomKilled,
+            String stderr
+    ) {
+        if (timedOut) {
+            return "timeout";
+        }
+
+        if (exitCode == 0 && !oomKilled) {
+            return null;
+        }
+
+        if (oomKilled) {
+            return "non_zero_exit";
+        }
+
+        String lower = stderr == null
+                ? ""
+                : stderr.toLowerCase(Locale.ROOT);
+
+        if (lower.contains("syntaxerror")
+                || lower.contains("indentationerror")) {
+            return "compile_error";
+        }
+
+        return "non_zero_exit";
+    }
+
+    private String resultMessage(
+            int exitCode,
+            boolean timedOut,
+            boolean oomKilled,
+            String failureKind
+    ) {
+        if (oomKilled) {
+            return "Container was OOM-killed. Peak memory measurement is unavailable.";
+        }
+
+        if (timedOut) {
+            return "Execution exceeded the configured wall-time limit.";
+        }
+
+        if ("compile_error".equals(failureKind)) {
+            return "Python reported a syntax or indentation error. Peak memory measurement is unavailable.";
+        }
+
+        if (exitCode != 0) {
+            return "Program exited with a non-zero status. Peak memory measurement is unavailable.";
+        }
+
+        return "Execution completed. Peak memory measurement is unavailable.";
+    }
+
+    private ExecutionResult failureResult(
+            String message,
+            int exitCode,
+            String failureKind,
+            double executionTimeMs,
+            String failingModule
+    ) {
+        return new ExecutionResult(
+                "",
+                message + System.lineSeparator(),
+                exitCode,
+                executionTimeMs,
+                0.0,
+                "timeout".equals(failureKind),
+                false,
+                failureKind,
+                false,
+                message,
+                null,
+                failingModule
+        );
+    }
+
+    private double elapsedMillis(long startNanos) {
+        return (System.nanoTime() - startNanos) / 1_000_000.0;
     }
 
     private void stopContainer(String containerName) {
@@ -240,18 +540,23 @@ public class DockerRunner {
 
         try {
             stop = new ProcessBuilder(
-                    "docker", "kill", containerName
+                    "docker",
+                    "kill",
+                    containerName
             ).start();
 
             if (!stop.waitFor(3, TimeUnit.SECONDS)) {
                 stop.destroyForcibly();
                 stop.waitFor();
             }
+
         } catch (InterruptedException e) {
             if (stop != null && stop.isAlive()) {
                 stop.destroyForcibly();
             }
+
             Thread.currentThread().interrupt();
+
         } catch (IOException ignored) {
             // The container may already have stopped.
         }
@@ -262,16 +567,17 @@ public class DockerRunner {
 
         try {
             inspect = new ProcessBuilder(
-                    "docker", "inspect",
-                    "--format", "{{.State.OOMKilled}}",
+                    "docker",
+                    "inspect",
+                    "--format",
+                    "{{.State.OOMKilled}}",
                     containerName
             ).start();
 
-            boolean finished = inspect.waitFor(5, TimeUnit.SECONDS);
-
-            if (!finished) {
+            if (!inspect.waitFor(5, TimeUnit.SECONDS)) {
                 inspect.destroyForcibly();
                 inspect.waitFor();
+
                 return false;
             }
 
@@ -280,6 +586,7 @@ public class DockerRunner {
             }
 
             byte[] output;
+
             try (InputStream stream = inspect.getInputStream()) {
                 output = stream.readAllBytes();
             }
@@ -292,12 +599,16 @@ public class DockerRunner {
             if (inspect != null && inspect.isAlive()) {
                 inspect.destroyForcibly();
             }
+
             Thread.currentThread().interrupt();
+
             return false;
+
         } catch (Exception ignored) {
             if (inspect != null && inspect.isAlive()) {
                 inspect.destroyForcibly();
             }
+
             return false;
         }
     }
@@ -320,9 +631,13 @@ public class DockerRunner {
                 while (true) {
                     long used = outputBytes.get();
                     long remaining = Math.max(0, maxBytes - used);
+
                     allowed = (int) Math.min(count, remaining);
 
-                    if (outputBytes.compareAndSet(used, used + allowed)) {
+                    if (outputBytes.compareAndSet(
+                            used,
+                            used + allowed
+                    )) {
                         break;
                     }
                 }
@@ -352,6 +667,7 @@ public class DockerRunner {
                 || limits.getPidsLimit() <= 0
                 || limits.getMaxOutputBytes() <= 0
                 || limits.getMaxRequestBodyBytes() <= 0) {
+
             throw new IllegalStateException(
                     "Execution limits must all be greater than zero."
             );
