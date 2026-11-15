@@ -146,13 +146,14 @@ describe('RoomPage RunPanel integration (T-11)', () => {
 
     const mockFetch = vi.fn().mockImplementation(async (_url, init) => {
       requestPayload = JSON.parse(init.body as string)
+      const payload = requestPayload as { request_id?: string; room_id?: string; language?: string }
       return {
         ok: true,
         status: 200,
         json: async () => ({
-          request_id: 'test-req-id',
-          room_id: 'demo-run-room',
-          language: 'python',
+          request_id: payload.request_id ?? 'test-req-id',
+          room_id: payload.room_id ?? 'demo-run-room',
+          language: payload.language ?? 'python',
           stdout: '42\n',
           stderr: '',
           exit_code: 0,
