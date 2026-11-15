@@ -356,6 +356,8 @@ body {
 .output-empty {
   color: #64748b;
   font-style: italic;
+}
+
 .room-host-badge {
   margin-left: 8px;
   padding: 2px 8px;
