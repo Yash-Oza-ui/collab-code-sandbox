@@ -79,6 +79,8 @@ export default function RoomPage(props: RoomPageProps = {}) {
   const [docError, setDocError] = useState<string | null>(null)
   const [pendingName, setPendingName] = useState<string | null>(null)
   const [currentLanguage, setCurrentLanguage] = useState<SupportedLanguage>('python')
+  // Role from the server's `joined` message (T-10 / FR9.5: show the Host)
+  const [role, setRole] = useState<string | null>(null)
 
   // One Y.Doc is created inside effect setup and destroyed in its cleanup (T-01).
   const { docRef } = useRoomDoc(roomId, { docRef: externalDocRef })
@@ -157,7 +159,8 @@ export default function RoomPage(props: RoomPageProps = {}) {
         sessionId: wsOptions?.sessionId,
         WebSocketClass: wsOptions?.WebSocketClass,
         joinTimeoutMs: wsOptions?.joinTimeoutMs,
-        onJoined: () => {
+        onJoined: (joined) => {
+          setRole(joined.role)
           const name = pendingNameRef.current
           if (!name) return
 
@@ -367,6 +370,11 @@ export default function RoomPage(props: RoomPageProps = {}) {
               )}
               <span>You: {displayName}</span>
             </span>
+            {role?.toLowerCase() === 'host' && (
+              <span className="room-host-badge" data-testid="room-host-badge">
+                Host
+              </span>
+            )}
           </>
         )}
         {docError && (
