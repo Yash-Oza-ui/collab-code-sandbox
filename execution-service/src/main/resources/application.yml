@@ -19,7 +19,7 @@ management:
         include: health
   endpoint:
     health:
-      show-details: never
+      show-details: ${MANAGEMENT_HEALTH_SHOW_DETAILS:always}
 
 app:
   # CORS: allow requests from the browser client (T-06 section 2)

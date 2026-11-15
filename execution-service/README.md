@@ -178,11 +178,20 @@ no container is started, no existing run is disturbed.
 
 ### How it works
 
-Every run path (currently `POST /v1/runs`; later `POST /internal/runs` for
-repeated and batch runs) calls the **one** `RunQueueGate`. The gate holds a
-semaphore whose size is `app.execution.limits.max-queue-length`. When all
+Every public run request (`POST /v1/runs`) calls the **one** `RunQueueGate`. The gate
+holds a semaphore whose size is `app.execution.limits.max-queue-length`. When all
 permits are in use the gate throws `QueueFullException` before invoking the
 code runner. `QueueFullExceptionHandler` maps that to an HTTP 503 response.
+
+Queue health and observable in-flight state (`in_flight`, `max_queue_length`,
+`retry_after_seconds`) are exposed via Spring Boot Actuator at `GET /actuator/health`
+(`QueueHealthIndicator`) for monitoring and deterministic test coordination.
+
+> **Note on API scope:** Testing in this PR covers the public endpoint `POST /v1/runs`,
+> verifying that repeated public calls count toward the same queue limit and receive
+> the 503 `QUEUE_FULL` refusal. The future internal endpoint `POST /internal/runs`
+> (for repeated runs and test batches, US-64/US-65/US-71) is a deferred Sprint 2
+> feature and is not implemented or tested here.
 
 ### Configuration (application.yml)
 

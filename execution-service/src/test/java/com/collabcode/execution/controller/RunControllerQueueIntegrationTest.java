@@ -1,6 +1,7 @@
 package com.collabcode.execution.controller;
 
 import com.collabcode.execution.broadcast.RoomBroadcastService;
+import com.collabcode.execution.config.ExecutionLimitsProperties;
 import com.collabcode.execution.queue.RunQueueGate;
 import com.collabcode.execution.runner.CodeRunner;
 import org.junit.jupiter.api.DisplayName;
@@ -56,6 +57,9 @@ class RunControllerQueueIntegrationTest {
     @Autowired
     private RunQueueGate gate;
 
+    @Autowired
+    private ExecutionLimitsProperties limits;
+
     @MockBean
     private RoomBroadcastService broadcastService;
 
@@ -110,8 +114,12 @@ class RunControllerQueueIntegrationTest {
 
             assertThat(response.getStatusCode()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
 
-            // Retry-After header must be present (contract)
-            assertThat(response.getHeaders().getFirst(HttpHeaders.RETRY_AFTER)).isNotNull();
+            int expectedRetryAfter = limits.getQueueRetryAfterSeconds();
+            assertThat(expectedRetryAfter).isEqualTo(5); // matches configured retry interval (DR3)
+
+            // Retry-After header must equal the exact configured retry value
+            assertThat(response.getHeaders().getFirst(HttpHeaders.RETRY_AFTER))
+                    .isEqualTo(String.valueOf(expectedRetryAfter));
 
             // Body shape: {request_id, error: {code, message, retry_after_seconds}}
             Map<?, ?> body = response.getBody();
@@ -123,7 +131,7 @@ class RunControllerQueueIntegrationTest {
             assertThat(error.get("code")).isEqualTo("QUEUE_FULL");
             assertThat(error.get("message"))
                     .isEqualTo("Execution service is busy, try again in a few seconds.");
-            assertThat(error.get("retry_after_seconds")).isNotNull();
+            assertThat(error.get("retry_after_seconds")).isEqualTo(expectedRetryAfter);
 
             // The refused run starts no container (codeRunner never invoked) and broadcasts nothing
             verify(codeRunner, never()).execute(anyString(), anyString(), anyString());
@@ -138,11 +146,15 @@ class RunControllerQueueIntegrationTest {
     }
 
     // -----------------------------------------------------------------------
-    // Test 2: repeated run requests all count toward the same gate (FR16 v2)
+    // Test 2: repeated public run requests all count toward the same gate (FR16 v2)
+    // Note: This exercises repeated calls to the public POST /v1/runs endpoint.
+    // It verifies that successive public requests count toward the same queue gate.
+    // The internal repeated-run / batch endpoint (POST /internal/runs, US-64/US-65/US-71)
+    // is a deferred feature and is not tested here.
     // -----------------------------------------------------------------------
 
     @Test
-    @DisplayName("Repeated run requests (second and third) all count toward the same gate limit")
+    @DisplayName("Repeated public run requests (second and third) all count toward the same gate limit")
     void repeatedRunRequests_allCountTowardSameGate() throws Exception {
         CountDownLatch started = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
@@ -156,17 +168,25 @@ class RunControllerQueueIntegrationTest {
             }));
             assertThat(started.await(5, TimeUnit.SECONDS)).isTrue();
 
+            int expectedRetryAfter = limits.getQueueRetryAfterSeconds();
+
             // Second request — refused
             ResponseEntity<Map> second = rest.postForEntity("/v1/runs", jsonRequest(), Map.class);
             assertThat(second.getStatusCode()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
-            assertThat(((Map<?, ?>) second.getBody().get("error")).get("code"))
-                    .isEqualTo("QUEUE_FULL");
+            assertThat(second.getHeaders().getFirst(HttpHeaders.RETRY_AFTER))
+                    .isEqualTo(String.valueOf(expectedRetryAfter));
+            Map<?, ?> secondError = (Map<?, ?>) second.getBody().get("error");
+            assertThat(secondError.get("code")).isEqualTo("QUEUE_FULL");
+            assertThat(secondError.get("retry_after_seconds")).isEqualTo(expectedRetryAfter);
 
-            // Third request (simulating a repeated-run feature retry) — also refused
+            // Third request (subsequent public request while queue remains saturated) — also refused
             ResponseEntity<Map> third = rest.postForEntity("/v1/runs", jsonRequest(), Map.class);
             assertThat(third.getStatusCode()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
-            assertThat(((Map<?, ?>) third.getBody().get("error")).get("code"))
-                    .isEqualTo("QUEUE_FULL");
+            assertThat(third.getHeaders().getFirst(HttpHeaders.RETRY_AFTER))
+                    .isEqualTo(String.valueOf(expectedRetryAfter));
+            Map<?, ?> thirdError = (Map<?, ?>) third.getBody().get("error");
+            assertThat(thirdError.get("code")).isEqualTo("QUEUE_FULL");
+            assertThat(thirdError.get("retry_after_seconds")).isEqualTo(expectedRetryAfter);
 
             // In-flight counter must still be 1 (only the held slot)
             assertThat(gate.inFlight()).isEqualTo(1);
@@ -199,8 +219,14 @@ class RunControllerQueueIntegrationTest {
 
             // Refused run must not change inFlight
             assertThat(gate.inFlight()).isEqualTo(1);
-            rest.postForEntity("/v1/runs", jsonRequest(), Map.class);   // refused
-            assertThat(gate.inFlight()).isEqualTo(1);                   // still 1
+            ResponseEntity<Map> refused = rest.postForEntity("/v1/runs", jsonRequest(), Map.class); // refused
+            assertThat(refused.getStatusCode()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+            assertThat(refused.getHeaders().getFirst(HttpHeaders.RETRY_AFTER))
+                    .isEqualTo(String.valueOf(limits.getQueueRetryAfterSeconds()));
+            Map<?, ?> refusedError = (Map<?, ?>) refused.getBody().get("error");
+            assertThat(refusedError.get("code")).isEqualTo("QUEUE_FULL");
+            assertThat(refusedError.get("retry_after_seconds")).isEqualTo(limits.getQueueRetryAfterSeconds());
+            assertThat(gate.inFlight()).isEqualTo(1); // still 1
 
             // Refused run did not invoke the code runner
             verify(codeRunner, never()).execute(anyString(), anyString(), anyString());

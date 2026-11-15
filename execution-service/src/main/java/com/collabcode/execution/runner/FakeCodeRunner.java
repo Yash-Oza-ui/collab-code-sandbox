@@ -78,6 +78,24 @@ public class FakeCodeRunner implements CodeRunner {
             );
         }
 
+        // Case 5: simulate bounded in-flight execution for testing (FR16 / US-11)
+        if (code != null && (code.toLowerCase().contains("sleep") || code.toLowerCase().contains("delay"))) {
+            long delayMs = 3000;
+            java.util.regex.Matcher m = java.util.regex.Pattern.compile("(?:sleep|delay)[\\s_\\(]+(\\d+)").matcher(code.toLowerCase());
+            if (m.find()) {
+                try {
+                    long requested = Long.parseLong(m.group(1));
+                    delayMs = requested <= 10 ? requested * 1000 : requested;
+                    delayMs = Math.min(Math.max(delayMs, 500), 5000);
+                } catch (NumberFormatException ignored) {}
+            }
+            try {
+                Thread.sleep(delayMs);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
+
         // Case 4: normal success
         return new ExecutionResult(
                 /* stdout          */ "Hello from " + language + "!\n",
