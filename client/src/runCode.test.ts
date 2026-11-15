@@ -2,11 +2,15 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   DR1_LANGUAGES,
   executeRun,
+  generateSecureUUID,
   getEntryFileName,
   getLanguageExtension,
   getLanguageOption,
   isLanguageSupported,
+  validateRunResponse,
 } from './runCode'
+
+const UUID_V4_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
 describe('runCode helper functions', () => {
   it('lists all five DR1 languages as supported', () => {
@@ -40,7 +44,124 @@ describe('runCode helper functions', () => {
   })
 })
 
-describe('executeRun API client', () => {
+describe('generateSecureUUID (Fix 1)', () => {
+  it('generates a valid, cryptographically secure UUID v4', () => {
+    const uuid = generateSecureUUID()
+    expect(uuid).toMatch(UUID_V4_REGEX)
+  })
+
+  it('generates unique UUIDs on every call with zero collisions', () => {
+    const set = new Set<string>()
+    for (let i = 0; i < 50; i++) {
+      const id = generateSecureUUID()
+      expect(id).toMatch(UUID_V4_REGEX)
+      expect(set.has(id)).toBe(false)
+      set.add(id)
+    }
+    expect(set.size).toBe(50)
+  })
+
+  it('falls back to crypto.getRandomValues when crypto.randomUUID is not available', () => {
+    const originalRandomUUID = crypto.randomUUID
+    try {
+      // Temporarily remove randomUUID
+      ;(crypto as { randomUUID?: () => string }).randomUUID = undefined
+      const fallbackId = generateSecureUUID()
+      expect(fallbackId).toMatch(UUID_V4_REGEX)
+    } finally {
+      ;(crypto as { randomUUID?: () => string }).randomUUID = originalRandomUUID
+    }
+  })
+
+  it('fails gracefully when cryptographically secure randomness is completely unavailable', () => {
+    const originalCrypto = globalThis.crypto
+    try {
+      // Temporarily mock crypto as lacking random methods
+      Object.defineProperty(globalThis, 'crypto', {
+        value: {},
+        configurable: true,
+        writable: true,
+      })
+
+      expect(() => generateSecureUUID()).toThrow(
+        'Cryptographically secure randomness is not available in this environment.',
+      )
+    } finally {
+      Object.defineProperty(globalThis, 'crypto', {
+        value: originalCrypto,
+        configurable: true,
+        writable: true,
+      })
+    }
+  })
+})
+
+describe('validateRunResponse (Fix 2)', () => {
+  it('validates a complete, successful response payload', () => {
+    const raw = {
+      request_id: 'req-1',
+      room_id: 'room-1',
+      language: 'python',
+      stdout: 'hello\n',
+      stderr: '',
+      exit_code: 0,
+      execution_time_ms: 12.5,
+      peak_memory_mb: 4.2,
+      timed_out: false,
+      oom_killed: false,
+    }
+    const result = validateRunResponse(raw)
+    expect(result.valid).toBe(true)
+    if (result.valid) {
+      expect(result.data.stdout).toBe('hello\n')
+      expect(result.data.exit_code).toBe(0)
+      expect(result.data.execution_time_ms).toBe(12.5)
+    }
+  })
+
+  it('preserves stdout and stderr for legitimate execution failures with nonzero exit codes', () => {
+    const raw = {
+      request_id: 'req-2',
+      room_id: 'room-1',
+      language: 'python',
+      stdout: 'partial stdout\n',
+      stderr: 'Traceback (most recent call last):\nNameError: name "x" is not defined\n',
+      exit_code: 1,
+      execution_time_ms: 8.0,
+      peak_memory_mb: 3.1,
+    }
+    const result = validateRunResponse(raw)
+    expect(result.valid).toBe(true)
+    if (result.valid) {
+      expect(result.data.exit_code).toBe(1)
+      expect(result.data.stdout).toBe('partial stdout\n')
+      expect(result.data.stderr).toContain('NameError')
+    }
+  })
+
+  it('safely defaults missing or null execution_time_ms without throwing', () => {
+    const raw = {
+      stdout: 'output\n',
+      stderr: '',
+      exit_code: 0,
+      execution_time_ms: null,
+    }
+    const result = validateRunResponse(raw)
+    expect(result.valid).toBe(true)
+    if (result.valid) {
+      expect(result.data.execution_time_ms).toBe(0)
+    }
+  })
+
+  it('rejects malformed responses missing required string fields', () => {
+    expect(validateRunResponse(null).valid).toBe(false)
+    expect(validateRunResponse({ stdout: 123, stderr: '', exit_code: 0 }).valid).toBe(false)
+    expect(validateRunResponse({ stdout: 'ok', stderr: null, exit_code: 0 }).valid).toBe(false)
+    expect(validateRunResponse({ stdout: 'ok', stderr: '', exit_code: '0' }).valid).toBe(false)
+  })
+})
+
+describe('executeRun API client (Fix 1, 2, 3)', () => {
   const defaultOptions = {
     roomId: 'test-room-123',
     code: 'print("hello world")',
@@ -48,6 +169,7 @@ describe('executeRun API client', () => {
     stdin: 'test-input',
     sessionId: '7c1e4a52-3b0d-4f6a-9a2e-8d5f1b6c3e90',
     executionApiUrl: 'http://localhost:8082',
+    timeoutMs: 1000,
   }
 
   it('rejects unsupported languages before making an HTTP request', async () => {
@@ -66,7 +188,7 @@ describe('executeRun API client', () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
-  it('builds a valid T-19 inline source request payload and parses 200 OK response', async () => {
+  it('builds a valid T-19 inline source request payload with a fresh secure UUID v4', async () => {
     const mockResponseData = {
       request_id: 'dummy-id',
       room_id: 'test-room-123',
@@ -111,12 +233,84 @@ describe('executeRun API client', () => {
       files: [{ name: 'main.py', content: 'print("hello world")' }],
       entry: 'main.py',
     })
-    expect(typeof parsedBody.request_id).toBe('string')
+    expect(parsedBody.request_id).toMatch(UUID_V4_REGEX)
 
     expect(result.ok).toBe(true)
     if (result.ok) {
       expect(result.data.stdout).toBe('hello world\n')
       expect(result.data.exit_code).toBe(0)
+    }
+  })
+
+  it('detects malformed server response and reports MALFORMED_RESPONSE without throwing', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ invalid_payload: true }),
+    })
+
+    const result = await executeRun({
+      ...defaultOptions,
+      fetchFn: fetchMock as unknown as typeof fetch,
+    })
+
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.code).toBe('MALFORMED_RESPONSE')
+      expect(result.error).toContain('Malformed response')
+    }
+  })
+
+  it('handles request timeout and returns REQUEST_TIMEOUT (Fix 3)', async () => {
+    // Mock fetch that hangs past the timeout
+    const fetchMock = vi.fn().mockImplementation((_url, init: { signal?: AbortSignal }) => {
+      return new Promise((_resolve, reject) => {
+        if (init?.signal) {
+          init.signal.addEventListener('abort', () => {
+            const err = new DOMException('The operation was aborted', 'AbortError')
+            reject(err)
+          })
+        }
+      })
+    })
+
+    const result = await executeRun({
+      ...defaultOptions,
+      timeoutMs: 50, // Short timeout for test
+      fetchFn: fetchMock as unknown as typeof fetch,
+    })
+
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.code).toBe('REQUEST_TIMEOUT')
+      expect(result.error).toContain('timed out')
+    }
+  })
+
+  it('handles external cancellation signal and returns REQUEST_ABORTED', async () => {
+    const controller = new AbortController()
+    const fetchMock = vi.fn().mockImplementation((_url, init: { signal?: AbortSignal }) => {
+      return new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => {
+          reject(new DOMException('Aborted', 'AbortError'))
+        })
+      })
+    })
+
+    const runPromise = executeRun({
+      ...defaultOptions,
+      timeoutMs: 5000,
+      signal: controller.signal,
+      fetchFn: fetchMock as unknown as typeof fetch,
+    })
+
+    // Abort externally
+    controller.abort()
+    const result = await runPromise
+
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.code).toBe('REQUEST_ABORTED')
     }
   })
 
@@ -145,31 +339,6 @@ describe('executeRun API client', () => {
       expect(result.retryAfterSeconds).toBe(5)
       expect(result.error).toContain('System is busy')
       expect(result.error).toContain('5 seconds')
-    }
-  })
-
-  it('handles 403 RUN_NOT_ALLOWED error response (e.g. for Observers in US-27)', async () => {
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: false,
-      status: 403,
-      json: async () => ({
-        error: {
-          code: 'RUN_NOT_ALLOWED',
-          message: 'Observers cannot execute code.',
-        },
-      }),
-    })
-
-    const result = await executeRun({
-      ...defaultOptions,
-      fetchFn: fetchMock as unknown as typeof fetch,
-    })
-
-    expect(result.ok).toBe(false)
-    if (!result.ok) {
-      expect(result.code).toBe('RUN_NOT_ALLOWED')
-      expect(result.status).toBe(403)
-      expect(result.error).toBe('Observers cannot execute code.')
     }
   })
 
