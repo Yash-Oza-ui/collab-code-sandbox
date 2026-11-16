@@ -11,7 +11,8 @@ Enforces the mandatory AI control sequence (US-22):
 
 import ast
 import re
-from typing import Any, Optional
+from collections import deque
+from typing import Any, Iterator, Optional
 
 from app.cache import compute_cache_key, get_analysis_cache
 from app.counters import record_fallback
@@ -239,6 +240,25 @@ def _detect_c_family_slow_patterns(code: str, language: str = "cpp") -> list[dic
     return patterns
 
 
+_NESTED_SCOPE_TYPES = (
+    ast.FunctionDef,
+    ast.AsyncFunctionDef,
+    ast.ClassDef,
+    ast.Lambda,
+)
+
+
+def _walk_local_scope(node: ast.AST) -> Iterator[ast.AST]:
+    """Traverse AST nodes under `node` without entering nested function, class, or lambda scopes (US-67)."""
+    queue: deque[ast.AST] = deque([node])
+    while queue:
+        current = queue.popleft()
+        for child in ast.iter_child_nodes(current):
+            if not isinstance(child, _NESTED_SCOPE_TYPES):
+                yield child
+                queue.append(child)
+
+
 def detect_slow_patterns(code: str, language: str = "python") -> list[dict[str, Any]]:
     """Detect common performance bottlenecks using deterministic AST and regex rules (US-67).
 
@@ -275,9 +295,9 @@ def detect_slow_patterns(code: str, language: str = "python") -> list[dict[str, 
 
             for node in ast.walk(tree):
                 # Rule 1: Nested loops
-                if isinstance(node, (ast.For, ast.While)):
-                    for child in ast.walk(node):
-                        if child is not node and isinstance(child, (ast.For, ast.While)):
+                if isinstance(node, (ast.For, ast.AsyncFor, ast.While)):
+                    for child in _walk_local_scope(node):
+                        if isinstance(child, (ast.For, ast.AsyncFor, ast.While)):
                             line_no = getattr(child, "lineno", getattr(node, "lineno", 1))
                             patterns.append(
                                 {
@@ -289,8 +309,8 @@ def detect_slow_patterns(code: str, language: str = "python") -> list[dict[str, 
                             break
 
                 # Rule 2: Repeated string concatenation in loops
-                if isinstance(node, (ast.For, ast.While)):
-                    for child in ast.walk(node):
+                if isinstance(node, (ast.For, ast.AsyncFor, ast.While)):
+                    for child in _walk_local_scope(node):
                         target_id: Optional[str] = None
                         value_node: Optional[ast.AST] = None
 
@@ -337,8 +357,8 @@ def detect_slow_patterns(code: str, language: str = "python") -> list[dict[str, 
                                 break
 
                 # Rule 3: Linear search in loop
-                if isinstance(node, (ast.For, ast.While)):
-                    for child in ast.walk(node):
+                if isinstance(node, (ast.For, ast.AsyncFor, ast.While)):
+                    for child in _walk_local_scope(node):
                         if isinstance(child, ast.Compare):
                             for op in child.ops:
                                 if isinstance(op, (ast.In, ast.NotIn)):

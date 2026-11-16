@@ -208,5 +208,33 @@ if echo "$body_cpp" | grep -q "nested_loops"; then
 fi
 pass ai-ml-service "regression check: C++ sequential unbraced loops and string comments not reported as nested (US-67)"
 
+# 7. Regression Test: Loop inside nested function not reported as nested in outer loop (PR #107)
+payload_nested_func='{
+  "request_id": "test-int-rules-nested-fn-007",
+  "room_id": "room-int-rules",
+  "analysis_id": "an-rules-nested-fn-007",
+  "request_type": "complexity",
+  "language": "python",
+  "consent": false,
+  "ai_enabled": true,
+  "code": "for item in items:\n    def process():\n        for x in data:\n            print(x)\n",
+  "measurements": [
+    {"input_size": 100, "runtimes_ms": [1.0, 1.1]},
+    {"input_size": 200, "runtimes_ms": [2.0, 2.1]}
+  ]
+}'
+
+resp_nested_fn="$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST "$base/v1/analyses/complexity" \
+  -H "Content-Type: application/json" \
+  -d "$payload_nested_func")"
+
+body_nested_fn="$(echo "$resp_nested_fn" | grep -v 'HTTP_STATUS:')"
+
+if echo "$body_nested_fn" | grep -q "nested_loops"; then
+  fail ai-ml-service "false positive: loop inside nested function reported as nested in outer loop: $body_nested_fn"
+  exit 1
+fi
+pass ai-ml-service "regression check: loop inside nested function not reported as nested (PR #107)"
+
 pass ai-ml-service "all US-67 rules-first integration assertions passed"
 

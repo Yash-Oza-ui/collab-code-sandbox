@@ -993,3 +993,127 @@ void run() {
     assert patterns == [], f"Loops inside actual comments must be ignored: {patterns}"
 
 
+# ============================================================================
+# 7. AST Scope-Crossing Regression Tests (PR #107, US-67)
+# ============================================================================
+
+
+def test_regression_scope_genuinely_nested_loop_detected():
+    """Verify genuinely nested loop within the same execution scope is detected."""
+    code = """def compute(matrix):
+    total = 0
+    for row in matrix:
+        for val in row:
+            total += val
+    return total
+"""
+    patterns = detect_slow_patterns(code, "python")
+    nested = [p for p in patterns if p["pattern"] == "nested_loops"]
+    assert len(nested) == 1
+    assert nested[0]["line"] == 4
+
+
+def test_regression_scope_loop_in_nested_function_not_nested_in_outer_loop():
+    """Verify loop inside nested function is not treated as nested within outer loop."""
+    code = """for item in items:
+    def process():
+        for x in data:
+            print(x)
+"""
+    patterns = detect_slow_patterns(code, "python")
+    assert patterns == [], f"Loop inside nested function must not be treated as nested: {patterns}"
+
+    code_async = """for item in items:
+    async def process():
+        for x in data:
+            print(x)
+"""
+    patterns_async = detect_slow_patterns(code_async, "python")
+    assert patterns_async == [], f"Loop inside async nested function must not be treated as nested: {patterns_async}"
+
+
+def test_regression_scope_loop_in_nested_class_method_not_nested_in_outer_loop():
+    """Verify loop inside nested class method is not treated as nested within outer loop."""
+    code = """for item in items:
+    class Handler:
+        def process(self):
+            for x in data:
+                print(x)
+"""
+    patterns = detect_slow_patterns(code, "python")
+    assert patterns == [], f"Loop inside nested class method must not be treated as nested: {patterns}"
+
+
+def test_regression_scope_string_concat_in_nested_function_not_attributed_to_outer_loop():
+    """Verify string concatenation inside nested function is not attributed to outer loop."""
+    code = """for item in items:
+    def format_item():
+        s = ""
+        s += "hello"
+        return s
+"""
+    patterns = detect_slow_patterns(code, "python")
+    assert patterns == [], f"String concat inside nested function must not be attributed to outer loop: {patterns}"
+
+    code_class = """for item in items:
+    class Formatter:
+        def format_item(self):
+            s = ""
+            s += "hello"
+            return s
+"""
+    patterns_class = detect_slow_patterns(code_class, "python")
+    assert patterns_class == [], f"String concat inside nested class method must not be attributed to outer loop: {patterns_class}"
+
+
+def test_regression_scope_genuine_repeated_string_concat_in_loop_detected():
+    """Verify genuine repeated string concatenation in loop is still detected."""
+    code = """def build_csv(items):
+    s = ""
+    for item in items:
+        s += str(item)
+    return s
+"""
+    patterns = detect_slow_patterns(code, "python")
+    concats = [p for p in patterns if p["pattern"] == "repeated_string_concat"]
+    assert len(concats) == 1
+    assert concats[0]["line"] == 4
+
+
+def test_regression_scope_numeric_accumulation_preserved():
+    """Verify numeric accumulation such as total += number is not reported as string concat."""
+    code = """def sum_numbers(numbers):
+    total = 0
+    for number in numbers:
+        total += number
+    return total
+"""
+    patterns = detect_slow_patterns(code, "python")
+    assert patterns == [], f"Numeric accumulation 'total += number' must not produce slow patterns: {patterns}"
+
+
+def test_regression_scope_lambda_not_crossed():
+    """Verify lambda scopes inside loops are not traversed as local loop execution."""
+    code = """for item in items:
+    fn = lambda: [x for x in data]
+"""
+    patterns = detect_slow_patterns(code, "python")
+    assert patterns == [], f"Lambda definition inside loop must not trigger false slow patterns: {patterns}"
+
+
+def test_regression_scope_nested_loop_inside_nested_function_detected_for_nested_scope():
+    """Verify genuinely nested loops inside a nested function are detected for that function's scope."""
+    code = """for item in items:
+    def process():
+        for x in data:
+            for y in data:
+                print(x, y)
+"""
+    patterns = detect_slow_patterns(code, "python")
+    nested = [p for p in patterns if p["pattern"] == "nested_loops"]
+    assert len(nested) == 1
+    # Line 4: for y in data:
+    assert nested[0]["line"] == 4
+
+
+

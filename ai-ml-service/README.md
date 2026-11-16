@@ -124,6 +124,7 @@ The static rules cover all five supported languages:
 ### False-Positive Protection
 
 - **Sequential Loop Tracking:** Sequential (consecutive, non-nested) loops in both braced (`{ ... }`) and single-statement unbraced formats (`for (...) stmt;`) are tracked using statement boundaries and block depth, ensuring they are strictly **not** reported as nested loops.
+- **Scope-Boundary AST Traversal:** In Python AST analysis, loop body traversal strictly terminates at nested function (`def`, `async def`), class (`class`), and lambda definition boundaries, ensuring loops and string accumulations inside nested definitions are not falsely attributed to the outer loop.
 - **Numeric Accumulation vs. String Concatenation:** Numeric loop accumulation in Python (e.g. `total += i`, `count += 1`, `total = total + i`) is distinguished from string accumulation and is strictly **not** classified as `repeated_string_concat`.
 - **String-Aware Lexical Scanning:** In C-family languages, comments (`//`, `/* */`) are stripped in a string-aware manner; comment markers and braces inside string and character literals (`"//..."`, `"/*...*/"`, `"{...}"`) are preserved as string content and do not corrupt loop or block depth tracking.
 
