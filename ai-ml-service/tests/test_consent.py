@@ -52,6 +52,7 @@ SAMPLE_COMPLEXITY_PAYLOAD = {
     "language": "python",
     "consent": True,
     "ai_enabled": True,
+    "rules_first": False,
     "code": (
         "def find_duplicates(arr):\n"
         "    dups = []\n"

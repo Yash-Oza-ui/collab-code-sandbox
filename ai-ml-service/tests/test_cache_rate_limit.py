@@ -327,8 +327,7 @@ def test_endpoint_complexity_cache_hit_avoids_llm_invocation():
             "def slow_func(arr):\n"
             "    # Comment 1\n"
             "    for i in arr:\n"
-            "        for j in arr:\n"
-            "            pass\n"
+            "        pass\n"
         ),
         "measurements": [
             {"input_size": 10, "runtimes_ms": [1.0, 1.1]},
@@ -348,8 +347,7 @@ def test_endpoint_complexity_cache_hit_avoids_llm_invocation():
             "    \n"
             "    # Completely different comment\n"
             "    for  i  in  arr :\n"
-            "        for  j  in  arr :\n"
-            "            pass\n"
+            "        pass\n"
         ),
         "measurements": [
             {"input_size": 10, "runtimes_ms": [1.0, 1.1]},
@@ -385,7 +383,7 @@ def test_endpoint_complexity_cache_miss_on_code_logic_change():
         "language": "python",
         "consent": True,
         "ai_enabled": True,
-        "code": "for i in arr:\n    for j in arr:\n        pass\n",
+        "code": "for i in arr:\n    x = i * 2\n",
         "measurements": [
             {"input_size": 10, "runtimes_ms": [1.0, 1.1]},
             {"input_size": 20, "runtimes_ms": [4.0, 4.2]},
@@ -1292,7 +1290,7 @@ def test_endpoint_concurrency_at_quota_boundary():
             "language": "python",
             "consent": True,
             "ai_enabled": True,
-            "code": f"def func_{idx}():\n    for i in range(10):\n        for j in range(10):\n            x = {idx}\n",
+            "code": f"def func_{idx}():\n    for i in range(10):\n        x = {idx}\n",
             "measurements": [
                 {"input_size": 10, "runtimes_ms": [1.0, 1.1]},
                 {"input_size": 20, "runtimes_ms": [4.0, 4.2]},
