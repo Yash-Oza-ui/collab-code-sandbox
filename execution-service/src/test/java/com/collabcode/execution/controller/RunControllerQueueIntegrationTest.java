@@ -17,6 +17,7 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.test.context.ActiveProfiles;
 
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
@@ -50,6 +51,7 @@ import static org.mockito.Mockito.verifyNoInteractions;
         webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
         properties = "app.execution.limits.max-queue-length=1"
 )
+@ActiveProfiles({"stub-permissions", "stub-runner"})
 class RunControllerQueueIntegrationTest {
 
     @Autowired
