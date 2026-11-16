@@ -33,7 +33,7 @@ Both sockets require `session_id` to be a valid UUID v4 query parameter.
 | Method | Path | Description |
 |--------|------|-------------|
 | `POST` | `/v1/rooms` | Create a room — returns `room_id`, `owner_token`, `mode`, `preset`, `language` |
-| `GET` | `/v1/rooms/{id}/owner` | Validate the owner token (T-10) |
+| `GET` | `/v1/rooms/{id}/owner` | Validate the owner token sent in `X-Owner-Token` (T-10, FR9.5) |
 | `POST` | `/internal/rooms/{id}/messages` | Broadcast a JSON message to all control-socket sessions in a room (requires `X-Internal-Token`) |
 
 ### 1.4 Error Codes (Internal Endpoint)
@@ -114,7 +114,43 @@ ws://localhost:8081/ws/rooms/{room_id}/docs/{doc_id}?session_id={uuid-v4}
 
 ---
 
-## 4. Prerequisites
+## 4. Room Creation & Owner Token Verification (T-10, FR9.5)
+
+### Security and token lifecycle
+1. **Generation:** `POST /v1/rooms` generates a 256-bit random owner token (`OwnerTokens.generate()`, base64url, no padding) next to the server-generated room id.
+2. **Client storage:** the plaintext token is returned **once** and kept in the browser (`localStorage`, keyed by room id; contract section 8).
+3. **Usage:** the Host sends the token in the control-socket `join` message (never in the URL) and in `X-Owner-Token` on `GET /v1/rooms/{room_id}/owner`, so ownership survives a refresh or reconnect.
+4. **Hashing:** only the SHA-256 hash is stored in `Room` state. The plaintext token is never stored.
+5. **Constant-time check:** the presented token is hashed and compared with `MessageDigest.isEqual`.
+6. **Confidentiality:** the token is never logged, never put in URLs or shared links, and never broadcast.
+7. **Errors:** the common error envelope with `request_id: null`.
+
+### Check it with curl
+```bash
+# 1. Create a room -> 201 {"room_id","owner_token","mode","preset","language"}
+curl -s -X POST http://localhost:8081/v1/rooms \
+  -H "Content-Type: application/json" \
+  -d '{"mode":"open","language":"python"}'
+
+# 2. Right token -> 200 {"room_id":"<id>","is_owner":true}
+curl -i -H "X-Owner-Token: <token>" http://localhost:8081/v1/rooms/<room_id>/owner
+
+# 3. Wrong token -> 403 NOT_OWNER
+curl -i -H "X-Owner-Token: wrong" http://localhost:8081/v1/rooms/<room_id>/owner
+
+# 4. No header -> 403 NOT_OWNER
+curl -i http://localhost:8081/v1/rooms/<room_id>/owner
+
+# 5. Unknown room -> 404 ROOM_NOT_FOUND
+curl -i -H "X-Owner-Token: <token>" http://localhost:8081/v1/rooms/NonExistentRoom123456/owner
+```
+Error body (403): `{"request_id":null,"error":{"code":"NOT_OWNER","message":"Missing or invalid owner token.","retry_after_seconds":null}}`
+
+The same five checks run in `tests/integration/test-owner-token.sh` against the live stack.
+
+---
+
+## 5. Prerequisites
 
 - **Java**: 21 LTS (e.g. Eclipse Temurin 21)
 - **Maven**: 3.9+ (or use IDE bundled Maven)
@@ -122,7 +158,7 @@ ws://localhost:8081/ws/rooms/{room_id}/docs/{doc_id}?session_id={uuid-v4}
 
 ---
 
-## 5. How to Run & Test
+## 6. How to Run & Test
 
 ### Run the Service Locally
 ```bash
@@ -176,9 +212,10 @@ docker run -p 8081:8081 sync-service
 
 ---
 
-## 6. Known Limitations
+## 7. Known Limitations
 
 - **Pair mode**: one document (`doc_id = "main"`). Open mode per-module documents tracked by `doc_id = module_id`.
 - **No Server-Side Document State**: `sync-service` is a relay. If all users disconnect, the document is cleared. Persistent storage is a later decision (FR11).
 - **Edit mode rules** (US-35, US-43): the `canEdit` flag at join is set by the Pair preset. Per-module write access in Open mode is applied in US-43 on top of the check already implemented here.
 - **ROOM_FULL / USER_BLOCKED** defined in US-63 / US-28 respectively.
+- **In-memory platform state** (T-05, `docs/decisions/platform-home.md`): room metadata and members live behind `RoomStore` in memory. A `sync-service` restart clears all rooms, so owner tokens issued before it stop working. Durable storage is a later decision.
