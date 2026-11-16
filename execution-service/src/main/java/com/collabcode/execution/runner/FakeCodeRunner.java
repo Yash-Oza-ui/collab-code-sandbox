@@ -132,7 +132,29 @@ public class FakeCodeRunner implements CodeRunner {
             );
         }
 
-        // Case 4: normal success.
+        // Case 4: simulate bounded in-flight execution for testing (FR16 / US-11)
+        String code = spec.getFiles() == null ? "" : spec.getFiles().stream()
+                .map(RunFile::getContent)
+                .filter(c -> c != null)
+                .collect(java.util.stream.Collectors.joining("\n"));
+        if (code.toLowerCase().contains("sleep") || code.toLowerCase().contains("delay")) {
+            long delayMs = 3000;
+            java.util.regex.Matcher m = java.util.regex.Pattern.compile("(?:sleep|delay)[\\s_\\(]+(\\d+)").matcher(code.toLowerCase());
+            if (m.find()) {
+                try {
+                    long requested = Long.parseLong(m.group(1));
+                    delayMs = requested <= 10 ? requested * 1000 : requested;
+                    delayMs = Math.min(Math.max(delayMs, 500), 5000);
+                } catch (NumberFormatException ignored) {}
+            }
+            try {
+                Thread.sleep(delayMs);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
+
+        // Case 5: normal success
         return new ExecutionResult(
                 "Hello from " + language + "!\n",
                 "",

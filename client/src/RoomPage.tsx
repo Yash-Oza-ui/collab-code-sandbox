@@ -79,8 +79,9 @@ export default function RoomPage(props: RoomPageProps = {}) {
   const [docError, setDocError] = useState<string | null>(null)
   const [pendingName, setPendingName] = useState<string | null>(null)
   const [currentLanguage, setCurrentLanguage] = useState<SupportedLanguage>('python')
-  // Role from the server's `joined` message (T-10 / FR9.5: show the Host)
+  // Role from the server's `joined` or `roster` message (T-10 Host badge / US-27 Observer mode)
   const [role, setRole] = useState<string | null>(null)
+  const isObserver = role?.toLowerCase() === 'observer'
 
   // One Y.Doc is created inside effect setup and destroyed in its cleanup (T-01).
   const { docRef } = useRoomDoc(roomId, { docRef: externalDocRef })
@@ -91,10 +92,19 @@ export default function RoomPage(props: RoomPageProps = {}) {
   const joinStatusRef = useRef<RoomJoinStatus>('prompt')
   const onDisplayNameAcceptedRef = useRef(onDisplayNameAccepted)
   const bindingRef = useRef<MonacoBinding | null>(null)
+  const editorRef = useRef<MonacoEditor.IStandaloneCodeEditor | null>(null)
+  const myMemberIdRef = useRef<string | null>(null)
 
   useEffect(() => {
     onDisplayNameAcceptedRef.current = onDisplayNameAccepted
   }, [onDisplayNameAccepted])
+
+  // Dynamically update Monaco Editor readOnly state if role changes while editor is mounted (US-27)
+  useEffect(() => {
+    if (editorRef.current) {
+      editorRef.current.updateOptions({ readOnly: isObserver })
+    }
+  }, [isObserver])
 
   // Manage Awareness instance lifecycle tied to active Y.Doc and WebSocket relay
   useEffect(() => {
@@ -160,6 +170,7 @@ export default function RoomPage(props: RoomPageProps = {}) {
         WebSocketClass: wsOptions?.WebSocketClass,
         joinTimeoutMs: wsOptions?.joinTimeoutMs,
         onJoined: (joined) => {
+          myMemberIdRef.current = joined.member_id ?? null
           setRole(joined.role)
           const name = pendingNameRef.current
           if (!name) return
@@ -175,6 +186,19 @@ export default function RoomPage(props: RoomPageProps = {}) {
           setJoinStatus('joined')
           joinStatusRef.current = 'joined'
           onDisplayNameAcceptedRef.current?.(name, color)
+        },
+        onRoster: (roster) => {
+          if (myMemberIdRef.current) {
+            const me = roster.members?.find((m) => m.member_id === myMemberIdRef.current)
+            if (me?.role) {
+              setRole(me.role)
+            }
+          } else if (pendingNameRef.current) {
+            const me = roster.members?.find((m) => m.display_name === pendingNameRef.current)
+            if (me?.role) {
+              setRole(me.role)
+            }
+          }
         },
         onJoinRefused: (msg) => {
           let message = msg.message
@@ -375,6 +399,11 @@ export default function RoomPage(props: RoomPageProps = {}) {
                 Host
               </span>
             )}
+            {isObserver && (
+              <span className="room-observer-badge" data-testid="room-observer-badge">
+                Observer
+              </span>
+            )}
           </>
         )}
         {docError && (
@@ -395,6 +424,8 @@ export default function RoomPage(props: RoomPageProps = {}) {
         onLanguageChange={(lang) => setCurrentLanguage(lang)}
         executionApiUrl={wsOptions?.executionApiUrl}
         fetchFn={wsOptions?.fetchFn}
+        disabled={isObserver}
+        disabledReason={isObserver ? 'Observers cannot run code' : undefined}
       />
       <div className="room-editor">
         <Editor
@@ -402,7 +433,10 @@ export default function RoomPage(props: RoomPageProps = {}) {
           language={currentLanguage}
           defaultLanguage="python"
           defaultValue=""
+          options={{ readOnly: isObserver }}
           onMount={(editor: MonacoEditor.IStandaloneCodeEditor) => {
+            editorRef.current = editor
+            editor.updateOptions({ readOnly: isObserver })
             const doc = docRef.current
             const awareness = awarenessInstanceRef.current
             if (doc && awareness) {

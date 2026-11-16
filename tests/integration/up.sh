@@ -24,6 +24,11 @@ fi
 
 cd "$REPO_ROOT"
 
+# The queue-full test polls /actuator/health for in_flight / max_queue_length.
+# docker-compose.yml hides those details by default ("never"); turn them on
+# here, for this test stack only. A value already exported in the shell (CI)
+# or set in .env wins.
+export MANAGEMENT_HEALTH_SHOW_DETAILS="${MANAGEMENT_HEALTH_SHOW_DETAILS:-always}"
 # Build the Python runtime image used by DockerRunner.
 docker build \
   -t collab-sandbox-python:0.1.0 \

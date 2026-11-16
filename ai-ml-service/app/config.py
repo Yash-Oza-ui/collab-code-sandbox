@@ -26,6 +26,9 @@ class Settings:
         self.SECTION_MAX_LINES: int = int(os.getenv("SECTION_MAX_LINES", "30"))
         self.SECTION_FALLBACK_LINES: int = int(os.getenv("SECTION_FALLBACK_LINES", "20"))
 
+        # Rules-first AI call avoidance (FR36.4, US-67)
+        self.RULES_FIRST_AI_AVOIDANCE: bool = os.getenv("RULES_FIRST_AI_AVOIDANCE", "false").lower() in ("true", "1")
+
     def __repr__(self) -> str:
         # Never print or log the actual API key (NFR8.2)
         key_status = "set" if self.LLM_API_KEY else "unset"

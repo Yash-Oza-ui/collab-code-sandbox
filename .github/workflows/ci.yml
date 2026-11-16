@@ -205,6 +205,8 @@ jobs:
     timeout-minutes: 35 # headroom for up.sh's one build retry on a transient flake
     env:
       SMOKE_TIMEOUT: "120" # cold CI builds start slower than a laptop
+      # Queue-full test polls /actuator/health details; compose defaults to "never".
+      MANAGEMENT_HEALTH_SHOW_DETAILS: always
     steps:
       - uses: actions/checkout@v4
 

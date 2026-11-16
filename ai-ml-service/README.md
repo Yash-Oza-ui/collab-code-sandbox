@@ -95,6 +95,44 @@ AI steps across all analysis endpoints enforce the controlled execution sequence
 4. **Room State Cleanup (`US-56`, `FR32`):**
    - `DELETE /v1/rooms/{room_id}/state` evicts room-scoped cache keys and resets that room's rate-limit counters.
 
+## Rules-First Static Analysis (US-67, FR36.4)
+
+Before the system makes a paid AI call regarding slow code, simple deterministic rules look for obvious causes so that AI cost stays low (`FR36.4`, `US-67`).
+
+### Covered Patterns & Static Analysis Rules
+
+1. **Nested Loops (`nested_loops`):**
+   - Detects loop-within-a-loop constructs causing quadratic or polynomial time complexity ($O(n^2)$ or worse).
+   - Identifies the exact line number of the inner loop construct.
+2. **Repeated String Concatenation (`repeated_string_concat`):**
+   - Detects iterative string accumulation inside loop bodies (e.g. `s += str(x)`, `res = res + item`, `strcat`, `.concat()`).
+   - Advises using string buffers, pre-allocated lists, or join operations.
+3. **Linear Search in Loops (`linear_search_in_loop`):**
+   - Detects linear membership testing (`item in list`, `.indexOf()`, `.includes()`, `std::find`) inside an outer loop.
+   - Advises replacing linear collections with hash sets or hash maps for $O(1)$ lookups.
+
+### Supported Languages (DR1)
+
+The static rules cover all five supported languages:
+
+- **Python (`python`):** Full AST-based parsing via Python's standard-library `ast.parse` for exact syntactic node walking; gracefully falls back to lexical line scanning if the user code contains syntax errors.
+- **C++ (`cpp`):** Comment- and string-aware block depth scanner tracking brace nesting levels and regex patterns for loop headers (`for`, `while`, `do {`) and string modifications.
+- **C (`c`):** Comment- and string-aware brace scanner detecting nested loops and library string mutations (`strcat`, `strncat`).
+- **Java (`java`):** Comment- and string-aware brace scanner detecting standard/enhanced for-loops, while-loops, and string concatenation (`+=`, `.concat()`).
+- **JavaScript (`javascript`):** Comment- and string-aware brace scanner supporting standard for-loops, `for..of`, `for..in`, while-loops, and string accumulation.
+
+### False-Positive Protection
+
+- **Sequential Loop Tracking:** Sequential (consecutive, non-nested) loops in both braced (`{ ... }`) and single-statement unbraced formats (`for (...) stmt;`) are tracked using statement boundaries and block depth, ensuring they are strictly **not** reported as nested loops.
+- **Scope-Boundary AST Traversal:** In Python AST analysis, loop body traversal strictly terminates at nested function (`def`, `async def`), class (`class`), and lambda definition boundaries, ensuring loops and string accumulations inside nested definitions are not falsely attributed to the outer loop.
+- **Numeric Accumulation vs. String Concatenation:** Numeric loop accumulation in Python (e.g. `total += i`, `count += 1`, `total = total + i`) is distinguished from string accumulation and is strictly **not** classified as `repeated_string_concat`.
+- **String-Aware Lexical Scanning:** In C-family languages, comments (`//`, `/* */`) are stripped in a string-aware manner; comment markers and braces inside string and character literals (`"//..."`, `"/*...*/"`, `"{...}"`) are preserved as string content and do not corrupt loop or block depth tracking.
+
+### Analysis Flow (Rules versus AI)
+1. **Rule Evaluation (Default & AI-Free):** Evaluates deterministic static rules by default for complexity analysis requests; works without network or AI models regardless of consent.
+2. **Rule Match Avoids AI:** When any rule fires, findings are reported in `slow_patterns` and `ai_step` is marked `status: "skipped"` with `error_code: null`, making **zero outbound AI calls** and incurring $0 cost.
+3. **Controlled AI Fallback:** An AI call is made only when rules find no likely issues (clean code), and strictly subject to user consent (`FR12`, `US-17`) and the room AI switch (`FR35`, `US-59`). Clients may optionally pass `rules_first: false` to request direct AI analysis.
+
 ## Running the Service
 
 Start the FastAPI application using Uvicorn:
