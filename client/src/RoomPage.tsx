@@ -6,6 +6,7 @@ import type * as Y from 'yjs'
 import Editor from '@monaco-editor/react'
 import { MonacoBinding } from 'y-monaco'
 import DisplayNamePrompt from './DisplayNamePrompt'
+import RunPanel from './RunPanel'
 import {
   createAwareness,
   getExistingUserColors,
@@ -16,6 +17,7 @@ import { connectAwarenessWs, type AwarenessWsConnection, type JoinedMessage } fr
 import { ownerTokenKey } from './createRoom'
 import { getRoomIdFromPath } from './roomId'
 import { useRoomDoc } from './roomDoc'
+import type { SupportedLanguage } from './runCode'
 import { pickUserColor } from './userColor'
 
 export interface RoomPageProps {
@@ -48,6 +50,8 @@ export interface RoomPageProps {
     sessionId?: string
     WebSocketClass?: typeof WebSocket
     joinTimeoutMs?: number
+    executionApiUrl?: string
+    fetchFn?: typeof fetch
   }
 }
 
@@ -74,6 +78,9 @@ export default function RoomPage(props: RoomPageProps = {}) {
   const [serverError, setServerError] = useState<string | null>(null)
   const [docError, setDocError] = useState<string | null>(null)
   const [pendingName, setPendingName] = useState<string | null>(null)
+  const [currentLanguage, setCurrentLanguage] = useState<SupportedLanguage>('python')
+  // Role from the server's `joined` message (T-10 / FR9.5: show the Host)
+  const [role, setRole] = useState<string | null>(null)
 
   // One Y.Doc is created inside effect setup and destroyed in its cleanup (T-01).
   const { docRef } = useRoomDoc(roomId, { docRef: externalDocRef })
@@ -152,7 +159,8 @@ export default function RoomPage(props: RoomPageProps = {}) {
         sessionId: wsOptions?.sessionId,
         WebSocketClass: wsOptions?.WebSocketClass,
         joinTimeoutMs: wsOptions?.joinTimeoutMs,
-        onJoined: () => {
+        onJoined: (joined) => {
+          setRole(joined.role)
           const name = pendingNameRef.current
           if (!name) return
 
@@ -362,6 +370,11 @@ export default function RoomPage(props: RoomPageProps = {}) {
               )}
               <span>You: {displayName}</span>
             </span>
+            {role?.toLowerCase() === 'host' && (
+              <span className="room-host-badge" data-testid="room-host-badge">
+                Host
+              </span>
+            )}
           </>
         )}
         {docError && (
@@ -375,10 +388,19 @@ export default function RoomPage(props: RoomPageProps = {}) {
           </span>
         )}
       </header>
+      <RunPanel
+        roomId={roomId || ''}
+        getCode={() => docRef.current?.getText('monaco').toString() ?? ''}
+        initialLanguage={currentLanguage}
+        onLanguageChange={(lang) => setCurrentLanguage(lang)}
+        executionApiUrl={wsOptions?.executionApiUrl}
+        fetchFn={wsOptions?.fetchFn}
+      />
       <div className="room-editor">
         <Editor
           height="100%"
-          defaultLanguage="plaintext"
+          language={currentLanguage}
+          defaultLanguage="python"
           defaultValue=""
           onMount={(editor: MonacoEditor.IStandaloneCodeEditor) => {
             const doc = docRef.current
