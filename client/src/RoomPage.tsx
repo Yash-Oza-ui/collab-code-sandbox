@@ -13,12 +13,19 @@ import {
   setUserAwareness,
   type AwarenessUserState,
 } from './awareness'
-import { connectAwarenessWs, type AwarenessWsConnection, type JoinedMessage } from './awarenessWs'
+import {
+  connectAwarenessWs,
+  getCollabSessionId,
+  type AwarenessWsConnection,
+  type JoinedMessage,
+  type RosterMember,
+} from './awarenessWs'
 import { ownerTokenKey } from './createRoom'
 import { getRoomIdFromPath } from './roomId'
 import { useRoomDoc } from './roomDoc'
 import type { SupportedLanguage } from './runCode'
 import { pickUserColor } from './userColor'
+import { config } from './config'
 
 export interface RoomPageProps {
   /**
@@ -79,8 +86,13 @@ export default function RoomPage(props: RoomPageProps = {}) {
   const [docError, setDocError] = useState<string | null>(null)
   const [pendingName, setPendingName] = useState<string | null>(null)
   const [currentLanguage, setCurrentLanguage] = useState<SupportedLanguage>('python')
-  // Role from the server's `joined` message (T-10 / FR9.5: show the Host)
+  // Role from the server's `joined` or `roster` message (T-10 Host badge / US-27 Observer mode)
   const [role, setRole] = useState<string | null>(null)
+  const [myMemberId, setMyMemberId] = useState<string | null>(null)
+  const [roster, setRoster] = useState<RosterMember[]>([])
+  const [roleChangeError, setRoleChangeError] = useState<string | null>(null)
+  const [changingRoleFor, setChangingRoleFor] = useState<string | null>(null)
+  const isObserver = role?.toLowerCase() === 'observer'
 
   // One Y.Doc is created inside effect setup and destroyed in its cleanup (T-01).
   const { docRef } = useRoomDoc(roomId, { docRef: externalDocRef })
@@ -91,10 +103,20 @@ export default function RoomPage(props: RoomPageProps = {}) {
   const joinStatusRef = useRef<RoomJoinStatus>('prompt')
   const onDisplayNameAcceptedRef = useRef(onDisplayNameAccepted)
   const bindingRef = useRef<MonacoBinding | null>(null)
+  const editorRef = useRef<MonacoEditor.IStandaloneCodeEditor | null>(null)
+  const sessionIdRef = useRef<string | null>(null)
+  const myMemberIdRef = useRef<string | null>(null)
 
   useEffect(() => {
     onDisplayNameAcceptedRef.current = onDisplayNameAccepted
   }, [onDisplayNameAccepted])
+
+  // Dynamically update Monaco Editor readOnly state if role changes while editor is mounted (US-27)
+  useEffect(() => {
+    if (editorRef.current) {
+      editorRef.current.updateOptions({ readOnly: isObserver })
+    }
+  }, [isObserver])
 
   // Manage Awareness instance lifecycle tied to active Y.Doc and WebSocket relay
   useEffect(() => {
@@ -149,6 +171,8 @@ export default function RoomPage(props: RoomPageProps = {}) {
     // Connect awareness and Yjs document sync to room WebSocket relay if in a room (US-02 / US-05 / T-20)
     let wsCleanup: (() => void) | undefined
     if (roomId) {
+      const sessionId = wsOptions?.sessionId ?? getCollabSessionId()
+      sessionIdRef.current = sessionId
       const conn = connectAwarenessWs({
         roomId,
         doc,
@@ -156,10 +180,12 @@ export default function RoomPage(props: RoomPageProps = {}) {
         resolveDocId,
         awareness,
         syncWsUrl: wsOptions?.syncWsUrl,
-        sessionId: wsOptions?.sessionId,
+        sessionId,
         WebSocketClass: wsOptions?.WebSocketClass,
         joinTimeoutMs: wsOptions?.joinTimeoutMs,
         onJoined: (joined) => {
+          myMemberIdRef.current = joined.member_id ?? null
+          setMyMemberId(joined.member_id ?? null)
           setRole(joined.role)
           const name = pendingNameRef.current
           if (!name) return
@@ -175,6 +201,16 @@ export default function RoomPage(props: RoomPageProps = {}) {
           setJoinStatus('joined')
           joinStatusRef.current = 'joined'
           onDisplayNameAcceptedRef.current?.(name, color)
+        },
+        onRoster: (roster) => {
+          setRoster(roster.members ?? [])
+
+          if (myMemberIdRef.current) {
+            const me = roster.members?.find((m) => m.member_id === myMemberIdRef.current)
+            if (me?.role) {
+              setRole(me.role)
+            }
+          }
         },
         onJoinRefused: (msg) => {
           let message = msg.message
@@ -310,6 +346,56 @@ export default function RoomPage(props: RoomPageProps = {}) {
     connRef.current?.join(name, ownerToken)
   }
 
+  async function handleMakeObserver(member: RosterMember) {
+    if (!roomId || role?.toLowerCase() !== 'host') return
+    if (member.member_id === myMemberIdRef.current) return
+    if (member.role.toLowerCase() === 'observer') return
+
+    setRoleChangeError(null)
+    setChangingRoleFor(member.member_id)
+
+    try {
+      const ownerToken = localStorage.getItem(ownerTokenKey(roomId))
+      const sessionId = sessionIdRef.current
+
+      if (!ownerToken || !sessionId) {
+        setRoleChangeError('Missing Host credentials. Please rejoin the room.')
+        return
+      }
+
+      const fetchFn = wsOptions?.fetchFn ?? fetch
+      const response = await fetchFn(
+        `${config.platformApiUrl}/v1/rooms/${encodeURIComponent(roomId)}/members/${encodeURIComponent(member.member_id)}`,
+        {
+          method: 'PATCH',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Session-Id': sessionId,
+            'X-Owner-Token': ownerToken,
+          },
+          body: JSON.stringify({ role: 'observer' }),
+        },
+      )
+
+      if (!response.ok) {
+        let errorMessage = `Could not change role (HTTP ${response.status}).`
+
+        try {
+          const errorBody = await response.json() as { code?: string; message?: string }
+          errorMessage = errorBody.message || errorBody.code || errorMessage
+        } catch {
+          // Keep the HTTP status message when the response has no JSON body.
+        }
+
+        setRoleChangeError(errorMessage)
+      }
+    } catch {
+      setRoleChangeError('Could not connect to the room server. Please try again.')
+    } finally {
+      setChangingRoleFor(null)
+    }
+  }
+
   if (isInvalidRoomId) {
     return (
       <div className="room-page">
@@ -375,6 +461,11 @@ export default function RoomPage(props: RoomPageProps = {}) {
                 Host
               </span>
             )}
+            {isObserver && (
+              <span className="room-observer-badge" data-testid="room-observer-badge">
+                Observer
+              </span>
+            )}
           </>
         )}
         {docError && (
@@ -388,6 +479,51 @@ export default function RoomPage(props: RoomPageProps = {}) {
           </span>
         )}
       </header>
+      <section className="room-participants" aria-label="Room participants">
+        <h3>Participants ({roster.length})</h3>
+
+        {roster.length === 0 ? (
+          <p>No participant information available.</p>
+        ) : (
+          <ul>
+            {roster.map((member) => {
+              const isSelf = member.member_id === myMemberId
+              const isMemberObserver = member.role.toLowerCase() === 'observer'
+
+              return (
+                <li key={member.member_id} data-testid={`participant-${member.member_id}`}>
+                  <span>
+                    {member.display_name}
+                    {isSelf ? ' (You)' : ''}
+                  </span>
+
+                  <span>{member.role}</span>
+
+                  {role?.toLowerCase() === 'host' && !isSelf && !isMemberObserver && (
+                    <button
+                      type="button"
+                      onClick={() => void handleMakeObserver(member)}
+                      disabled={changingRoleFor === member.member_id}
+                    >
+                      {changingRoleFor === member.member_id
+                        ? 'Changing...'
+                        : 'Make Observer'}
+                    </button>
+                  )}
+
+                  {isMemberObserver && <span>Read-only</span>}
+                </li>
+              )
+            })}
+          </ul>
+        )}
+
+        {roleChangeError && (
+          <p role="alert" data-testid="role-change-error">
+            {roleChangeError}
+          </p>
+        )}
+      </section>
       <RunPanel
         roomId={roomId || ''}
         getCode={() => docRef.current?.getText('monaco').toString() ?? ''}
@@ -395,6 +531,8 @@ export default function RoomPage(props: RoomPageProps = {}) {
         onLanguageChange={(lang) => setCurrentLanguage(lang)}
         executionApiUrl={wsOptions?.executionApiUrl}
         fetchFn={wsOptions?.fetchFn}
+        disabled={isObserver}
+        disabledReason={isObserver ? 'Observers cannot run code' : undefined}
       />
       <div className="room-editor">
         <Editor
@@ -402,7 +540,10 @@ export default function RoomPage(props: RoomPageProps = {}) {
           language={currentLanguage}
           defaultLanguage="python"
           defaultValue=""
+          options={{ readOnly: isObserver }}
           onMount={(editor: MonacoEditor.IStandaloneCodeEditor) => {
+            editorRef.current = editor
+            editor.updateOptions({ readOnly: isObserver })
             const doc = docRef.current
             const awareness = awarenessInstanceRef.current
             if (doc && awareness) {

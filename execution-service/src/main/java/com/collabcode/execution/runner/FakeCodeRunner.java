@@ -10,9 +10,18 @@ import java.util.Locale;
 /**
  * Deterministic in-memory stub for CodeRunner.
  *
- * This bean is available only when the "stub-runner" Spring profile is active.
- * The normal application uses DockerRunner; this stub remains available for
- * controlled offline development and tests that explicitly select the profile.
+ * Updated in T-19 (Decision 8 & 9, Jay and Yash) to execute RunSpec and produce Decision 9 fields:
+ *  1. If any file contains "oom", simulates an out-of-memory kill:
+ *     oom_killed: true, failure_kind: "non_zero_exit", exit 137.
+ *  2. If any file contains "syntax_error" (case-insensitive), writes a compiler
+ *     error to stderr, exit 1, failure_kind "compile_error".
+ *  3. If any file contains "stderr" (case-insensitive), writes "boom\n" to stderr
+ *     and exits 2 — simulating a runtime failure ("non_zero_exit").
+ *  4. If stdin is non-empty, echoes its UPPER-CASE version to stdout.
+ *  5. If any file contains "sleep" or "delay", the run is held for 0.5 to 5 seconds
+ *     (3 seconds by default) so tests can keep a queue slot busy (US-11, FR16),
+ *     then it continues to case 6.
+ *  6. Otherwise, returns "Hello from <language>!\n" in stdout, exit 0.
  *
  * Simulated outcomes:
  *  1. Content containing an OOM marker returns exit 137,
@@ -132,7 +141,29 @@ public class FakeCodeRunner implements CodeRunner {
             );
         }
 
-        // Case 4: normal success.
+        // Case 4: simulate bounded in-flight execution for testing (FR16 / US-11)
+        String code = spec.getFiles() == null ? "" : spec.getFiles().stream()
+                .map(RunFile::getContent)
+                .filter(c -> c != null)
+                .collect(java.util.stream.Collectors.joining("\n"));
+        if (code.toLowerCase().contains("sleep") || code.toLowerCase().contains("delay")) {
+            long delayMs = 3000;
+            java.util.regex.Matcher m = java.util.regex.Pattern.compile("(?:sleep|delay)[\\s_\\(]+(\\d+)").matcher(code.toLowerCase());
+            if (m.find()) {
+                try {
+                    long requested = Long.parseLong(m.group(1));
+                    delayMs = requested <= 10 ? requested * 1000 : requested;
+                    delayMs = Math.min(Math.max(delayMs, 500), 5000);
+                } catch (NumberFormatException ignored) {}
+            }
+            try {
+                Thread.sleep(delayMs);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
+
+        // Case 5: normal success
         return new ExecutionResult(
                 "Hello from " + language + "!\n",
                 "",

@@ -4,6 +4,7 @@ import { createRoot } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import RoomPage from './RoomPage'
 import { ownerTokenKey } from './createRoom'
+import { config } from './config'
 
 // T-10 (FR9.5): the room header shows "Host" for the owner, and the stored
 // owner token is sent in the join message, never in a URL.
@@ -29,7 +30,8 @@ class FakeSocket {
   static role = 'host'
   static urls: string[] = []
   static joinFrames: Array<Record<string, unknown>> = []
-
+  static rosterMembers: Array<Record<string, unknown>> | null = null
+  static instances: FakeSocket[] = []
   readyState = 0
   binaryType = 'arraybuffer'
   url: string
@@ -40,6 +42,7 @@ class FakeSocket {
 
   constructor(url: string) {
     this.url = url
+    FakeSocket.instances.push(this)
     FakeSocket.urls.push(url)
     queueMicrotask(() => {
       this.readyState = 1
@@ -64,6 +67,17 @@ class FakeSocket {
           }),
         }),
       )
+
+      if (FakeSocket.rosterMembers) {
+        this.onmessage?.(
+          new MessageEvent('message', {
+            data: JSON.stringify({
+              type: 'roster',
+              members: FakeSocket.rosterMembers,
+            }),
+          }),
+        )
+      }
     }, 0)
   }
 
@@ -100,6 +114,8 @@ describe('RoomPage Host indicator and owner token (T-10, FR9.5)', () => {
     FakeSocket.role = 'host'
     FakeSocket.urls = []
     FakeSocket.joinFrames = []
+    FakeSocket.rosterMembers = null
+    FakeSocket.instances = []
     vi.stubGlobal('localStorage', makeStorage())
     originalPathname = window.location.pathname
     window.history.replaceState({}, '', `/room/${ROOM_ID}`)
@@ -190,5 +206,182 @@ describe('RoomPage Host indicator and owner token (T-10, FR9.5)', () => {
 
     expect(FakeSocket.joinFrames).toHaveLength(1)
     expect('owner_token' in FakeSocket.joinFrames[0]).toBe(false)
+  })
+  it('displays participant names and roles from the server roster', async () => {
+    FakeSocket.role = 'host'
+    FakeSocket.rosterMembers = [
+      {
+        member_id: 'member-1',
+        display_name: 'Alice',
+        role: 'host',
+        permissions: { can_edit: true, can_run: true },
+      },
+      {
+        member_id: 'member-2',
+        display_name: 'Bob',
+        role: 'participant',
+        permissions: { can_edit: true, can_run: true },
+      },
+    ]
+
+    await joinAs('Alice')
+
+    const participants = container?.querySelector(
+      '[aria-label="Room participants"]',
+    )
+
+    expect(participants).not.toBeNull()
+    expect(participants?.textContent).toContain('Participants (2)')
+    expect(participants?.textContent).toContain('Alice')
+    expect(participants?.textContent).toContain('Bob')
+    expect(participants?.textContent).toContain('host')
+    expect(participants?.textContent).toContain('participant')
+  })
+  it('sends the correct PATCH request when the Host makes a participant an Observer', async () => {
+    FakeSocket.role = 'host'
+    FakeSocket.rosterMembers = [
+      {
+        member_id: 'member-1',
+        display_name: 'Alice',
+        role: 'host',
+        permissions: { can_edit: true, can_run: true },
+      },
+      {
+        member_id: 'member-2',
+        display_name: 'Bob',
+        role: 'participant',
+        permissions: { can_edit: true, can_run: true },
+      },
+    ]
+
+    localStorage.setItem(ownerTokenKey(ROOM_ID), OWNER_TOKEN)
+
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await joinAs('Alice')
+
+    const makeObserverButton = Array.from(
+      container?.querySelectorAll<HTMLButtonElement>('button') ?? [],
+    ).find((button) => button.textContent?.includes('Make Observer'))
+
+    expect(makeObserverButton).toBeDefined()
+
+    await act(async () => {
+      makeObserverButton?.click()
+    })
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+
+    const [url, options] = fetchMock.mock.calls[0] as [
+      string,
+      RequestInit,
+    ]
+
+    expect(url).toBe(
+      `${config.platformApiUrl}/v1/rooms/${ROOM_ID}/members/member-2`,
+    )
+    expect(options.method).toBe('PATCH')
+    expect(options.headers).toEqual({
+      'Content-Type': 'application/json',
+      'X-Session-Id': SESSION_ID,
+      'X-Owner-Token': OWNER_TOKEN,
+    })
+    expect(options.body).toBe(JSON.stringify({ role: 'observer' }))
+
+    // The UI must wait for the authoritative roster broadcast.
+    expect(
+      container?.querySelector('[data-testid="participant-member-2"]')?.textContent,
+    ).toContain('participant')
+  })
+  it('does not show Make Observer controls to a participant', async () => {
+    FakeSocket.role = 'participant'
+    FakeSocket.rosterMembers = [
+      {
+        member_id: 'member-1',
+        display_name: 'Bob',
+        role: 'participant',
+        permissions: { can_edit: true, can_run: true },
+      },
+      {
+        member_id: 'member-2',
+        display_name: 'Alice',
+        role: 'participant',
+        permissions: { can_edit: true, can_run: true },
+      },
+    ]
+
+    await joinAs('Bob')
+
+    const makeObserverButtons = Array.from(
+      container?.querySelectorAll<HTMLButtonElement>('button') ?? [],
+    ).filter((button) => button.textContent?.includes('Make Observer'))
+
+    expect(makeObserverButtons).toHaveLength(0)
+  })
+  it('updates a participant role only after receiving the new roster', async () => {
+    FakeSocket.role = 'host'
+    FakeSocket.rosterMembers = [
+      {
+        member_id: 'member-1',
+        display_name: 'Alice',
+        role: 'host',
+        permissions: { can_edit: true, can_run: true },
+      },
+      {
+        member_id: 'member-2',
+        display_name: 'Bob',
+        role: 'participant',
+        permissions: { can_edit: true, can_run: true },
+      },
+    ]
+
+    await joinAs('Alice')
+
+    const participant = container?.querySelector(
+      '[data-testid="participant-member-2"]',
+    )
+
+    expect(participant?.textContent).toContain('participant')
+    expect(participant?.textContent).not.toContain('Read-only')
+    const controlSocket = FakeSocket.instances.find(
+      (socket) => !socket.url.includes('/docs/'),
+    )
+
+    expect(controlSocket).toBeDefined()
+
+    await act(async () => {
+      controlSocket?.onmessage?.(
+        new MessageEvent('message', {
+          data: JSON.stringify({
+            type: 'roster',
+            members: [
+              {
+                member_id: 'member-1',
+                display_name: 'Alice',
+                role: 'host',
+                permissions: { can_edit: true, can_run: true },
+              },
+              {
+                member_id: 'member-2',
+                display_name: 'Bob',
+                role: 'observer',
+                permissions: { can_edit: false, can_run: false },
+              },
+            ],
+          }),
+        }),
+      )
+    })
+
+    const updatedParticipant = container?.querySelector(
+      '[data-testid="participant-member-2"]',
+    )
+
+    expect(updatedParticipant?.textContent).toContain('observer')
+    expect(updatedParticipant?.textContent).toContain('Read-only')
   })
 })

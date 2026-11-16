@@ -440,7 +440,7 @@ def test_complexity_endpoint_cache_hit_skips_llm_and_records_hit():
         "language": "python",
         "consent": True,
         "ai_enabled": True,
-        "code": "def f(arr):\n    for x in arr:\n        for y in arr:\n            pass",
+        "code": "def f(arr):\n    for x in arr:\n        pass",
         "measurements": [
             {"input_size": 100, "runtimes_ms": [1.0, 1.1]},
             {"input_size": 200, "runtimes_ms": [4.0, 4.1]},
@@ -451,7 +451,7 @@ def test_complexity_endpoint_cache_hit_skips_llm_and_records_hit():
         **payload_1,
         "request_id": "req-cache-2",
         "analysis_id": "ana-cache-2",
-        "code": "# comment should be ignored\ndef f(arr):\n    for x in arr:\n        for y in arr:\n            pass\n\n",
+        "code": "# comment should be ignored\ndef f(arr):\n    for x in arr:\n        pass\n\n",
     }
 
     with (

@@ -492,6 +492,7 @@ def test_endpoint_explain_sends_relevant_section_and_never_whole_file():
         "language": "cpp",
         "consent": True,
         "ai_enabled": True,
+        "rules_first": False,
         "code": full_code,
         "stderr": "/workspace/solution.cpp:22: error: out of bounds",
         "error_line": 22,
@@ -561,6 +562,7 @@ def test_endpoint_complexity_sends_detected_slow_pattern_section_not_top20():
         "language": "python",
         "consent": True,
         "ai_enabled": True,
+        "rules_first": False,
         "code": full_code,
         "measurements": [
             {"input_size": 100, "runtimes_ms": [1.0, 1.1]},
