@@ -1,5 +1,5 @@
 package com.collabcode.execution.controller;
-import org.springframework.test.context.ActiveProfiles;
+
 import com.collabcode.execution.broadcast.RoomBroadcastService;
 import com.collabcode.execution.config.ExecutionLimitsProperties;
 import com.collabcode.execution.model.RunSpec;
@@ -50,7 +50,6 @@ import static org.mockito.Mockito.verifyNoInteractions;
         webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
         properties = "app.execution.limits.max-queue-length=1"
 )
-@ActiveProfiles({"stub-permissions", "stub-runner"})
 class RunControllerQueueIntegrationTest {
 
     @Autowired

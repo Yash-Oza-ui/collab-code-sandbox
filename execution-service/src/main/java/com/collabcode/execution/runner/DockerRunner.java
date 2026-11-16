@@ -3,7 +3,6 @@ package com.collabcode.execution.runner;
 import com.collabcode.execution.config.ExecutionLimitsProperties;
 import com.collabcode.execution.model.RunFile;
 import com.collabcode.execution.model.RunSpec;
-import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Component;
 
 import java.io.ByteArrayOutputStream;
@@ -29,7 +28,6 @@ import java.util.concurrent.atomic.AtomicLong;
  * Additional languages require their own repository-built runtime images.
  */
 @Component
-@Profile("!stub-runner")
 public class DockerRunner implements CodeRunner {
 
     private static final String PYTHON_IMAGE = "collab-sandbox-python:0.1.0";
