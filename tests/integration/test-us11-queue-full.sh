@@ -33,15 +33,15 @@ check() {
   fi
 }
 
-gen_uuid() {
-  if command -v python >/dev/null 2>&1; then
-    python -c 'import uuid; print(uuid.uuid4())' 2>/dev/null && return 0
-  fi
-  if command -v uuidgen >/dev/null 2>&1; then
-    uuidgen 2>/dev/null | tr '[:upper:]' '[:lower:]' && return 0
-  fi
-  printf "%04x%04x-%04x-4000-8000-%04x%04x%04x\n" \
-    $RANDOM $RANDOM $RANDOM $RANDOM $RANDOM $RANDOM
+# Pure-bash UUID v4 (no python/uuidgen/subshell). The saturation step below
+# launches many requests back to back; spawning a process per UUID is slow on
+# Git Bash / Windows and on busy CI runners, and made the holding requests
+# start so late that the first ones finished before the last had begun.
+# Sets the global REPLY (no command substitution, so no fork).
+new_uuid() {
+  printf -v REPLY '%04x%04x-%04x-4%03x-%x%03x-%04x%04x%04x' \
+    $RANDOM $RANDOM $RANDOM $((RANDOM % 4096)) $((8 + RANDOM % 4)) $((RANDOM % 4096)) \
+    $RANDOM $RANDOM $RANDOM
 }
 
 # ── Step 1: Confirm service is healthy and query queue configuration ─────────
@@ -73,8 +73,8 @@ echo "Configured queue capacity: $MAX_QUEUE slot(s), retry_after: ${EXPECTED_RET
 
 # ── Step 2: Verify normal run on an empty queue (HTTP 200) ───────────────────
 
-REQ_ID_NORMAL="$(gen_uuid)"
-SESS_ID_NORMAL="$(gen_uuid)"
+new_uuid; REQ_ID_NORMAL="$REPLY"
+new_uuid; SESS_ID_NORMAL="$REPLY"
 ROOM_ID="room-us11-bash-test"
 
 BODY_NORMAL=$(cat <<EOF
@@ -118,26 +118,24 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# Launch MAX_QUEUE holding requests with bounded mock runner execution (3 seconds sleep)
-echo "Launching $MAX_QUEUE holding request(s) to occupy all queue slots..."
+# Hold each slot for HOLD_SECONDS. FakeCodeRunner honours "sleep N" in the
+# submitted code (N seconds, capped at 5), so 5 s is the longest hold possible.
+# A long hold plus a fast launch loop keeps all slots busy together even on a
+# slow machine.
+HOLD_SECONDS=5
+HOLD_CODE="import time; time.sleep($HOLD_SECONDS)"
+
+# Build every body first (pure bash, no forks), then fire all requests at once.
+HOLD_BODIES=()
 for i in $(seq 1 "$MAX_QUEUE"); do
-  hold_req_id="$(gen_uuid)"
-  hold_sess_id="$(gen_uuid)"
-  hold_tmp="$(mktemp)"
-  TMP_FILES+=("$hold_tmp")
+  new_uuid; hold_req_id="$REPLY"
+  new_uuid; hold_sess_id="$REPLY"
+  HOLD_BODIES+=("{\"request_id\":\"$hold_req_id\",\"room_id\":\"$ROOM_ID\",\"session_id\":\"$hold_sess_id\",\"language\":\"python\",\"source\":{\"kind\":\"inline\",\"files\":[{\"name\":\"main.py\",\"content\":\"$HOLD_CODE\"}],\"entry\":\"main.py\"}}")
+done
 
-  hold_body=$(cat <<EOF
-{
-  "request_id": "$hold_req_id",
-  "room_id":    "$ROOM_ID",
-  "session_id": "$hold_sess_id",
-  "language":   "python",
-  "source": { "kind": "inline", "files": [ { "name": "main.py", "content": "import time; time.sleep(3)" } ], "entry": "main.py" }
-}
-EOF
-)
-
-  curl -s -o "$hold_tmp" -w '%{http_code}' --max-time 15 \
+echo "Launching $MAX_QUEUE holding request(s) to occupy all queue slots..."
+for hold_body in "${HOLD_BODIES[@]}"; do
+  curl -s -o /dev/null --max-time 20 \
     -X POST "$RUNS_URL" \
     -H "Content-Type: application/json" \
     -d "$hold_body" > /dev/null 2>&1 &
@@ -167,8 +165,8 @@ fi
 
 # ── Step 4: Submit overflow request while queue is full ───────────────────────
 
-OVERFLOW_REQ_ID="$(gen_uuid)"
-OVERFLOW_SESS_ID="$(gen_uuid)"
+new_uuid; OVERFLOW_REQ_ID="$REPLY"
+new_uuid; OVERFLOW_SESS_ID="$REPLY"
 
 OVERFLOW_BODY=$(cat <<EOF
 {
@@ -229,8 +227,8 @@ for attempt in $(seq 1 40); do
 done
 
 # Verify a new request succeeds once slots are free
-POST_REQ_ID="$(gen_uuid)"
-POST_SESS_ID="$(gen_uuid)"
+new_uuid; POST_REQ_ID="$REPLY"
+new_uuid; POST_SESS_ID="$REPLY"
 POST_BODY=$(cat <<EOF
 {
   "request_id": "$POST_REQ_ID",
