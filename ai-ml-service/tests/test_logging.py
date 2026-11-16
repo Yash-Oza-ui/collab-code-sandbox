@@ -116,9 +116,8 @@ def _complexity_payload(
         "language": language,
         "code": (
             f"# {marker}\n"
-            "for i in range(10):\n"
-            "    for j in range(10):\n"
-            "        pass\n"
+            "def compute(arr):\n"
+            "    return len(arr)\n"
         ),
         "measurements": [
             {"input_size": 100, "runtimes_ms": [1.1, 1.2]},

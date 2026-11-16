@@ -122,12 +122,15 @@ The static rules cover all five supported languages:
 - **JavaScript (`javascript`):** Comment- and string-aware brace scanner supporting standard for-loops, `for..of`, `for..in`, while-loops, and string accumulation.
 
 ### False-Positive Protection
-Sequential (consecutive, non-nested) loops are tracked using block depth counters and are strictly **not** reported as nested loops.
+
+- **Sequential Loop Tracking:** Sequential (consecutive, non-nested) loops in both braced (`{ ... }`) and single-statement unbraced formats (`for (...) stmt;`) are tracked using statement boundaries and block depth, ensuring they are strictly **not** reported as nested loops.
+- **Numeric Accumulation vs. String Concatenation:** Numeric loop accumulation in Python (e.g. `total += i`, `count += 1`, `total = total + i`) is distinguished from string accumulation and is strictly **not** classified as `repeated_string_concat`.
+- **String-Aware Lexical Scanning:** In C-family languages, comments (`//`, `/* */`) are stripped in a string-aware manner; comment markers and braces inside string and character literals (`"//..."`, `"/*...*/"`, `"{...}"`) are preserved as string content and do not corrupt loop or block depth tracking.
 
 ### Analysis Flow (Rules versus AI)
-1. **Rule Evaluation (Always First & AI-Free):** Evaluates deterministic static rules unconditionally; works without network or AI models regardless of consent.
-2. **Rule Match Avoids AI:** When any rule fires, findings are reported in `slow_patterns` and `ai_step` is marked `status: "skipped"` with `error_code: null`, making **zero outbound AI calls** and incurring \$0 cost.
-3. **Controlled AI Fallback:** An AI call is made only when rules find no likely issues (clean code), and strictly subject to user consent (`FR12`, `US-17`) and the room AI switch (`FR35`, `US-59`).
+1. **Rule Evaluation (Default & AI-Free):** Evaluates deterministic static rules by default for complexity analysis requests; works without network or AI models regardless of consent.
+2. **Rule Match Avoids AI:** When any rule fires, findings are reported in `slow_patterns` and `ai_step` is marked `status: "skipped"` with `error_code: null`, making **zero outbound AI calls** and incurring $0 cost.
+3. **Controlled AI Fallback:** An AI call is made only when rules find no likely issues (clean code), and strictly subject to user consent (`FR12`, `US-17`) and the room AI switch (`FR35`, `US-59`). Clients may optionally pass `rules_first: false` to request direct AI analysis.
 
 ## Running the Service
 

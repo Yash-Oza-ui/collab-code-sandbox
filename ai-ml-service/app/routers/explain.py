@@ -116,6 +116,7 @@ async def explain_failure(payload: ExplainRequest, request: Request) -> ExplainR
             room_id=payload.room_id,
             request_type=payload.request_type,
             error_output=payload.stderr,
+            rules_first=False,
             cache_context={
                 "failure_kind": payload.failure_kind,
                 "exit_code": payload.exit_code,

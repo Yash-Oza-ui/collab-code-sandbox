@@ -67,8 +67,8 @@ class ComplexityRequest(BaseModel):
     suggested_patch: Optional[str] = None
     suggested_patch_runtimes_ms: Optional[list[float]] = None
     rules_first: Optional[bool] = Field(
-        default=None,
-        description="US-67: When true, evaluate rules first before AI fallback.",
+        default=True,
+        description="US-67: When true (default), evaluate rules first before AI fallback.",
     )
 
 
@@ -248,10 +248,9 @@ async def analyze_complexity(payload: ComplexityRequest, request: Request) -> Co
 
     # 3. Rules-First Static Analysis with Central Consent/AI Gate (FR12.2, FR12.3, FR35, US-67)
     rules_first = (
-        payload.rules_first is True
-        or request.headers.get("x-rules-first", "").lower() in ("true", "1")
-        or request.query_params.get("rules_first", "").lower() in ("true", "1")
-        or getattr(settings, "RULES_FIRST_AI_AVOIDANCE", False)
+        payload.rules_first is not False
+        and request.headers.get("x-rules-first", "").lower() not in ("false", "0")
+        and request.query_params.get("rules_first", "").lower() not in ("false", "0")
     )
 
     rule_analysis = await run_rule_based_analysis_with_ai_fallback(

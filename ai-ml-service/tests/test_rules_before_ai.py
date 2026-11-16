@@ -707,3 +707,289 @@ def test_rules_privacy_no_code_in_logs(caplog):
     assert secret_marker not in caplog.text
     assert "for j in range(10)" not in caplog.text
 
+
+# ============================================================================
+# 6. Review Feedback Regression Tests (US-67, PR #73)
+# ============================================================================
+
+
+def test_regression_rules_first_is_default_on_ordinary_complexity_requests():
+    """Verify rules-first runs by default when rules_first is omitted from request payload (US-67)."""
+    payload = {
+        "request_id": "req-reg-default-001",
+        "room_id": "room-reg-default",
+        "analysis_id": "ana-reg-default-001",
+        "request_type": "complexity",
+        "language": "python",
+        "consent": True,
+        "ai_enabled": True,
+        # rules_first is deliberately omitted to prove default behavior
+        "code": SEEDED_PYTHON_NESTED_LOOPS,
+        "measurements": [
+            {"input_size": 100, "runtimes_ms": [1.0, 1.1]},
+            {"input_size": 200, "runtimes_ms": [4.0, 4.2]},
+        ],
+    }
+
+    mock_llm_complete = AsyncMock(return_value="Should not run because rules fire.")
+    with patch("app.llm.client.LLMClient.complete", mock_llm_complete):
+        response = client.post("/v1/analyses/complexity", json=payload)
+
+    assert response.status_code == 200
+    data = response.json()
+    assert any(p["pattern"] == "nested_loops" for p in data["slow_patterns"])
+    assert data["ai_step"]["status"] == "skipped"
+    assert data["ai_step"]["error_code"] is None
+    assert mock_llm_complete.call_count == 0, "Ordinary complexity request must evaluate rules first by default"
+
+
+def test_regression_rules_first_default_allows_clean_program_to_reach_ai():
+    """Verify clean program reaches AI step with consent and AI enabled under default rules-first."""
+    payload = {
+        "request_id": "req-reg-clean-002",
+        "room_id": "room-reg-clean",
+        "analysis_id": "ana-reg-clean-002",
+        "request_type": "complexity",
+        "language": "python",
+        "consent": True,
+        "ai_enabled": True,
+        # rules_first omitted: defaults to True
+        "code": CLEAN_PYTHON_PROGRAM,
+        "measurements": [
+            {"input_size": 100, "runtimes_ms": [1.0, 1.1]},
+            {"input_size": 200, "runtimes_ms": [1.0, 1.1]},
+        ],
+    }
+
+    mock_llm_complete = AsyncMock(return_value="Algorithm is optimal O(1).")
+    with patch("app.llm.client.LLMClient.complete", mock_llm_complete):
+        response = client.post("/v1/analyses/complexity", json=payload)
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["slow_patterns"] == []
+    assert data["ai_step"]["status"] == "ok"
+    assert data["ai_step"]["suggested_fix"] == "Algorithm is optimal O(1)."
+    assert mock_llm_complete.call_count == 1
+
+
+def test_regression_rules_first_opt_out_reaches_ai():
+    """Verify explicit rules_first: false opts out of rules avoidance and reaches AI fallback."""
+    payload = {
+        "request_id": "req-reg-optout-003",
+        "room_id": "room-reg-optout",
+        "analysis_id": "ana-reg-optout-003",
+        "request_type": "complexity",
+        "language": "python",
+        "consent": True,
+        "ai_enabled": True,
+        "rules_first": False,
+        "code": SEEDED_PYTHON_NESTED_LOOPS,
+        "measurements": [
+            {"input_size": 100, "runtimes_ms": [1.0, 1.1]},
+            {"input_size": 200, "runtimes_ms": [4.0, 4.2]},
+        ],
+    }
+
+    mock_llm_complete = AsyncMock(return_value="Optimization suggestion for nested loops.")
+    with patch("app.llm.client.LLMClient.complete", mock_llm_complete):
+        response = client.post("/v1/analyses/complexity", json=payload)
+
+    assert response.status_code == 200
+    data = response.json()
+    assert any(p["pattern"] == "nested_loops" for p in data["slow_patterns"])
+    assert data["ai_step"]["status"] == "ok"
+    assert mock_llm_complete.call_count == 1
+
+
+def test_regression_python_numeric_accumulation_not_string_concat():
+    """Verify numeric accumulation like total += i or count += 1 is NOT reported as repeated_string_concat."""
+    code_total_accum = """def compute_total(arr):
+    total = 0
+    for i in arr:
+        total += i
+    return total
+"""
+    patterns = detect_slow_patterns(code_total_accum, "python")
+    assert not any(p["pattern"] == "repeated_string_concat" for p in patterns), (
+        f"Numeric accumulation 'total += i' must not be classified as repeated_string_concat: {patterns}"
+    )
+
+    code_counter = """def count_positives(arr):
+    count = 0
+    for x in arr:
+        if x > 0:
+            count += 1
+    return count
+"""
+    patterns = detect_slow_patterns(code_counter, "python")
+    assert not any(p["pattern"] == "repeated_string_concat" for p in patterns), (
+        f"Numeric increment 'count += 1' must not be classified as repeated_string_concat: {patterns}"
+    )
+
+    code_binop = """def compute_sum(arr):
+    total = 0
+    for i in arr:
+        total = total + i
+    return total
+"""
+    patterns = detect_slow_patterns(code_binop, "python")
+    assert not any(p["pattern"] == "repeated_string_concat" for p in patterns), (
+        f"Numeric addition 'total = total + i' must not be classified as repeated_string_concat: {patterns}"
+    )
+
+
+def test_regression_python_string_concat_accurately_detected():
+    """Verify actual string concatenation in Python loops is detected."""
+    code_str_call = """def stringify(items):
+    s = ""
+    for item in items:
+        s += str(item)
+    return s
+"""
+    patterns = detect_slow_patterns(code_str_call, "python")
+    assert any(p["pattern"] == "repeated_string_concat" for p in patterns)
+
+    code_str_literal = """def build_csv(items):
+    csv = ""
+    for item in items:
+        csv += "data,"
+    return csv
+"""
+    patterns = detect_slow_patterns(code_str_literal, "python")
+    assert any(p["pattern"] == "repeated_string_concat" for p in patterns)
+
+    code_fstring = """def format_all(items):
+    res = ""
+    for item in items:
+        res += f"item:{item}"
+    return res
+"""
+    patterns = detect_slow_patterns(code_fstring, "python")
+    assert any(p["pattern"] == "repeated_string_concat" for p in patterns)
+
+
+def test_regression_c_family_sequential_unbraced_loops_no_false_positive():
+    """Verify sequential unbraced loops in C/C++/Java/JS are NOT reported as nested_loops."""
+    # 1. C++ sequential unbraced single line
+    cpp_single_line = """void run() {
+    for (int i = 0; i < n; i++) x++;
+    for (int j = 0; j < n; j++) y++;
+}
+"""
+    patterns = detect_slow_patterns(cpp_single_line, "cpp")
+    assert not any(p["pattern"] == "nested_loops" for p in patterns), (
+        f"Single-line sequential unbraced loops falsely reported as nested: {patterns}"
+    )
+
+    # 2. C++ sequential unbraced multiline
+    cpp_multiline = """void run() {
+    for (int i = 0; i < n; i++)
+        x++;
+    for (int j = 0; j < n; j++)
+        y++;
+}
+"""
+    patterns = detect_slow_patterns(cpp_multiline, "cpp")
+    assert not any(p["pattern"] == "nested_loops" for p in patterns), (
+        f"Multiline sequential unbraced loops falsely reported as nested: {patterns}"
+    )
+
+    # 3. Java sequential unbraced
+    java_code = """class Solution {
+    void process() {
+        for (int i = 0; i < n; i++)
+            x++;
+        for (int j = 0; j < n; j++)
+            y++;
+    }
+}
+"""
+    patterns = detect_slow_patterns(java_code, "java")
+    assert not any(p["pattern"] == "nested_loops" for p in patterns), (
+        f"Java sequential unbraced loops falsely reported as nested: {patterns}"
+    )
+
+    # 4. JavaScript sequential unbraced
+    js_code = """function process() {
+    for (let i = 0; i < n; i++)
+        x++;
+    for (let j = 0; j < n; j++)
+        y++;
+}
+"""
+    patterns = detect_slow_patterns(js_code, "javascript")
+    assert not any(p["pattern"] == "nested_loops" for p in patterns), (
+        f"JS sequential unbraced loops falsely reported as nested: {patterns}"
+    )
+
+    # 5. While sequential unbraced
+    while_code = """void process() {
+    while (i < n) i++;
+    while (j < n) j++;
+}
+"""
+    patterns = detect_slow_patterns(while_code, "c")
+    assert not any(p["pattern"] == "nested_loops" for p in patterns), (
+        f"Sequential unbraced while loops falsely reported as nested: {patterns}"
+    )
+
+
+def test_regression_c_family_nested_unbraced_loops_detected():
+    """Verify genuinely nested unbraced loops are detected."""
+    cpp_nested_unbraced = """void run() {
+    for (int i = 0; i < n; i++)
+        for (int j = 0; j < n; j++)
+            x++;
+}
+"""
+    patterns = detect_slow_patterns(cpp_nested_unbraced, "cpp")
+    assert any(p["pattern"] == "nested_loops" for p in patterns), (
+        f"Nested unbraced loops must be detected: {patterns}"
+    )
+
+
+def test_regression_comment_stripping_string_aware():
+    """Verify comment markers and braces inside string literals do not corrupt C-family code scanning."""
+    code_with_string_comment_markers = """#include <string>
+void run() {
+    std::string s1 = "http://example.com/api";
+    std::string s2 = "/* not a comment */";
+    std::string s3 = "// not a comment";
+    for (int i = 0; i < n; i++) x++;
+    for (int j = 0; j < n; j++) y++;
+}
+"""
+    patterns = detect_slow_patterns(code_with_string_comment_markers, "cpp")
+    assert not any(p["pattern"] == "nested_loops" for p in patterns), (
+        f"Comment markers in string literals corrupted parsing: {patterns}"
+    )
+
+    code_with_braces_in_strings = """#include <string>
+void run() {
+    std::string braces = "{{{ }}}";
+    for (int i = 0; i < n; i++) {
+        x++;
+    }
+    for (int j = 0; j < n; j++) {
+        y++;
+    }
+}
+"""
+    patterns = detect_slow_patterns(code_with_braces_in_strings, "cpp")
+    assert not any(p["pattern"] == "nested_loops" for p in patterns), (
+        f"Braces in string literals corrupted brace depth: {patterns}"
+    )
+
+    code_with_real_commented_loops = """void run() {
+    // for (int i = 0; i < n; i++) for (int j = 0; j < n; j++) x++;
+    /* for (int i = 0; i < n; i++) {
+           for (int j = 0; j < n; j++) { x++; }
+       } */
+    int a = 1;
+}
+"""
+    patterns = detect_slow_patterns(code_with_real_commented_loops, "c")
+    assert patterns == [], f"Loops inside actual comments must be ignored: {patterns}"
+
+
