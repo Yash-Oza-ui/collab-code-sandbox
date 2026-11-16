@@ -19,6 +19,11 @@ _load_env_defaults() {
 _load_env_defaults "$REPO_ROOT/.env"
 _load_env_defaults "$REPO_ROOT/.env.example"
 
+# Dedicated test-only fixture token for local integration testing if not explicitly configured
+if [ -z "${INTERNAL_API_TOKEN:-}" ]; then
+  export INTERNAL_API_TOKEN="test-only-integration-token-fixture"
+fi
+
 # Every service the stack knows about: "<name> <folder> <port-var> <health-path-var>".
 # Add a line here when a new service joins the stack.
 SERVICES=(

@@ -27,6 +27,7 @@ services:
     build: ./sync-service
     environment:
       SERVER_PORT: ${SYNC_SERVICE_PORT:-8081} # Spring Boot reads SERVER_PORT
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN}
     ports:
       - "${SYNC_SERVICE_PORT:-8081}:${SYNC_SERVICE_PORT:-8081}"
 
@@ -35,6 +36,11 @@ services:
     build: ./execution-service
     environment:
       SERVER_PORT: ${EXECUTION_SERVICE_PORT:-8082}
+      APP_EXECUTION_LIMITS_MAX_QUEUE_LENGTH: ${EXECUTION_MAX_QUEUE_LENGTH:-10}
+      # Health details (in_flight, max_queue_length, retry_after_seconds) stay
+      # hidden by default because this port is published. Only the integration
+      # harness (tests/integration/up.sh, CI) sets this to "always".
+      MANAGEMENT_HEALTH_SHOW_DETAILS: ${MANAGEMENT_HEALTH_SHOW_DETAILS:-never}
     ports:
       - "${EXECUTION_SERVICE_PORT:-8082}:${EXECUTION_SERVICE_PORT:-8082}"
     # The execution service starts sandbox containers itself. T-03 decides how
