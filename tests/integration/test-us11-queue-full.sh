@@ -55,6 +55,13 @@ pass "health" "$HEALTH_URL -> 200"
 
 health_body="$(curl -s --max-time 5 "$HEALTH_URL" 2>/dev/null || true)"
 
+# Details are hidden by default (MANAGEMENT_HEALTH_SHOW_DETAILS=never); this test
+# needs them to observe queue saturation. up.sh enables them for the test stack.
+if ! echo "$health_body" | grep -q '"in_flight"'; then
+  fail "health-details" "$HEALTH_URL has no queue details; start the stack with MANAGEMENT_HEALTH_SHOW_DETAILS=always (bash tests/integration/up.sh does this)"
+  exit 1
+fi
+
 # Inspect configured max-queue-length and retry-after from actuator health
 configured_max_q=$(echo "$health_body" | grep -o '"max_queue_length":[0-9]*' | head -1 | cut -d':' -f2)
 configured_retry=$(echo "$health_body" | grep -o '"retry_after_seconds":[0-9]*' | head -1 | cut -d':' -f2)

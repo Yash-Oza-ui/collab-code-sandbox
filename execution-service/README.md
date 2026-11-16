@@ -214,8 +214,9 @@ Queue health and observable in-flight state (`in_flight`, `max_queue_length`,
 `retry_after_seconds`) are exposed via Spring Boot Actuator at `GET /actuator/health`
 (`QueueHealthIndicator`) for monitoring and deterministic test coordination.
 The details are hidden by default (`management.endpoint.health.show-details: never`).
-The integration stack turns them on through `MANAGEMENT_HEALTH_SHOW_DETAILS=always`
-in `docker-compose.yml`; do not enable them in production.
+`docker-compose.yml` keeps them hidden too (default `never`). Only the integration harness
+(`tests/integration/up.sh` and the CI `integration` job) sets `MANAGEMENT_HEALTH_SHOW_DETAILS=always`;
+do not enable it in production.
 
 > **Note on API scope:** Testing in this PR covers the public endpoint `POST /v1/runs`,
 > verifying that repeated public calls count toward the same queue limit and receive
