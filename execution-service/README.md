@@ -10,7 +10,7 @@ Spring Boot service that runs user code in isolated Docker containers.
 > The run endpoint consumes the unified **RunSpec** object (Decision 8) and returns
 > enriched execution results with Decision 9 fields (`runner`, `ran_at`, `visibility`,
 > `saved_versions`, `failure`, `compile_time_ms`).
-> Calls **FakeCodeRunner** — a deterministic in-process stub until the Docker runner (PR #40) lands.
+> Runs code through **DockerRunner** (US-09, PR #40) by default. **FakeCodeRunner** is a deterministic in-process stub that is used only when the `stub-runner` Spring profile is active.
 > Gated by **RunQueueGate** (US-11) for concurrency limiting.
 
 ---
@@ -253,6 +253,95 @@ Retry-After: 5
 
 ---
 
+## Docker isolation, Docker access and its risk (FR5.1, FR5.2, US-09)
+
+### Runner interface
+
+`RunController` talks only to the `CodeRunner` interface:
+
+```java
+ExecutionResult execute(RunSpec spec);   // never throws for a normal outcome
+```
+
+`RunSpec` carries `language`, `files` (plain file names and content), `entry` and `stdin`.
+`ExecutionResult` carries stdout, stderr, exit code, time, flags and `failure_kind`
+(an out-of-memory kill is `non_zero_exit` with `oom_killed: true`, never `"oom"`).
+
+| Implementation   | When it is used                                   |
+|------------------|---------------------------------------------------|
+| `DockerRunner`   | Default (every profile except `stub-runner`)      |
+| `FakeCodeRunner` | Only with the `stub-runner` Spring profile (tests, no Docker needed) |
+
+### One container per run
+
+For every run `DockerRunner` starts a brand-new container with a unique name
+(`run-<uuid>`), runs the code, collects stdout, stderr and the exit code, and then
+**always** stops and removes the container and deletes the run's workspace folder, also
+when the run crashes, times out or is killed for memory. Nothing is reused between runs.
+Each container is started with:
+
+| Option | Meaning |
+|--------|---------|
+| `--network none` | no network access |
+| `--user 1001:1001` | non-root user |
+| `--memory`, `--pids-limit` | limits read from `app.execution.limits` (DR3) |
+| `--read-only` and `--tmpfs /tmp:rw,noexec,nosuid,size=16m` | read-only root file system, small writable `/tmp` that is thrown away with the container |
+| `--mount type=bind,...,target=/sandbox/code,readonly` | the run's own workspace folder, mounted read-only |
+
+The Docker image is fixed in code (`collab-sandbox-python:0.1.0`). A run request chooses
+only the language, the files, the entry file and stdin; it can never add or change a Docker
+option. The wall-time limit is enforced by the runner (the container is stopped). The other
+limits and the compile stage are added in US-13.
+
+### How the service reaches Docker, and the risk
+
+`DockerRunner` starts the `docker` command line tool as a child process. That means:
+
+- **Local run (`./mvnw spring-boot:run`):** it uses the Docker engine of your own machine.
+- **docker compose:** the service image contains `docker-cli` (see `execution-service/Dockerfile`)
+  and `docker-compose.yml` mounts the host's `/var/run/docker.sock` into the
+  `execution-service` container.
+
+**Risk.** Access to the Docker socket is equivalent to root access on the host. Whoever can
+make this service start an arbitrary container could mount host folders or start a privileged
+container. The service therefore must be treated as a trusted component:
+
+- Never expose the execution-service port to the public internet; only the other services
+  and the client's own backend calls reach it.
+- Never mount the Docker socket, the host's sensitive folders or any extra host folder into a
+  **run** container, and never add `--privileged`, extra capabilities or another network mode.
+- Keep the Docker options in `DockerRunner` fixed (not taken from a request).
+- Never execute user code on the host, not even in tests: tests use `FakeCodeRunner`
+  or the real `DockerRunner`.
+
+Hardening options such as rootless Docker or a Docker socket proxy are not part of US-09.
+
+### How to verify US-09
+
+Build the image once (from the repository root), then run the isolation tests:
+
+```bash
+docker build -t collab-sandbox-python:0.1.0 execution-service/runtime-images/python
+cd execution-service
+./mvnw -Dtest=DockerRunnerTest,DockerRunnerIsolationTest test      # mvnw.cmd on Windows
+```
+
+`DockerRunnerIsolationTest` is skipped (not failed) when Docker or the image is missing.
+It covers: a second run cannot see a file written by the first, a container is removed after
+success, a crash, a timeout and an out-of-memory kill, five parallel runs use five distinct
+containers and leave none behind, an outside network connection fails, and the run's
+workspace folder is removed.
+
+To check by hand, count the runner's containers before and after a run:
+
+```bash
+docker ps -a --filter "name=run-" --format '{{.Names}}' | wc -l      # before
+# trigger one run through the service
+docker ps -a --filter "name=run-" --format '{{.Names}}' | wc -l      # expected: same count
+```
+
+---
+
 ## Resource limits (DR3)
 
 Limits are read from `src/main/resources/application.yml` under `app.execution.limits`.
@@ -296,7 +385,7 @@ execution-service/
     │   │   ├── model/                                # RunRequest, RunResponse, RunSource, etc.
     │   │   ├── permission/                           # Permission lookup service & stubs (V2.11)
     │   │   ├── queue/                                # RunQueueGate, QueueHealthIndicator (US-11)
-    │   │   ├── runner/                               # CodeRunner, ExecutionResult, FakeCodeRunner
+    │   │   ├── runner/                               # CodeRunner, DockerRunner (US-09), ExecutionResult, FakeCodeRunner
     │   │   └── snapshot/                             # SavedVersionReader & snapshot stubs (V2.8)
     │   └── resources/
     │       └── application.yml
@@ -313,6 +402,8 @@ execution-service/
             ├── queue/
             │   └── RunQueueGateTest.java                     # US-11 gate unit tests (Yash)
             └── runner/
+                ├── DockerRunnerTest.java                     # US-09 runner tests (Quincy)
+                ├── DockerRunnerIsolationTest.java            # US-09 cleanup, parallel, network tests (Bhavya)
                 └── FakeCodeRunnerTest.java                   # Stub behaviour (Jay)
 ```
 
