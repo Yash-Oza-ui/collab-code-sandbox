@@ -6,13 +6,18 @@ Spring Boot WebSocket relay for real-time collaborative editing using Yjs CRDTs 
 
 ## 1. Overview
 
-`sync-service` provides the server-side room model and WebSocket relay for collaborative editing sessions.
+`sync-service` provides the server-side room model, role and permission enforcement, and low-latency WebSocket message relay for real-time collaborative editing sessions using Yjs CRDTs (T-02, T-20, FR1, FR3, FR9.4, FR17, FR41.4, FR42, CR13).
+
+- Clients connect to `ws://localhost:8081/ws/rooms/{room_id}?session_id={session_id}` (control socket) and `ws://localhost:8081/ws/rooms/{room_id}/docs/{doc_id}?session_id={session_id}` (document socket).
+- Strict room isolation: clients in one room never receive messages published in another room.
+- Document frames (Yjs sync & update messages) are forwarded untouched without server-side document parsing; awareness frames (first byte `0x01`) are echoed back to the sender so a lone client maintains heartbeat.
+- Internal HTTP endpoints (`/internal/rooms/{room_id}/...`) authenticate execution-service callers, verify run permissions, and route execution results to room members or targeted session connections.
 
 ### 1.1 Sockets (T-20)
 
 | Socket | Path | Frame type | Purpose |
 |--------|------|------------|---------|
-| **Control socket** | `/ws/rooms/{room_id}?session_id=` | Text (JSON) | Join, roles, roster, edit-rejected notifications |
+| **Control socket** | `/ws/rooms/{room_id}?session_id=` | Text (JSON) | Join, roles, roster, edit-rejected notifications, internal messages |
 | **Document socket** | `/ws/rooms/{room_id}/docs/{doc_id}?session_id=` | Binary (Yjs) | Yjs sync frames, with awareness echo and edit-permission check |
 
 Both sockets require `session_id` to be a valid UUID v4 query parameter.
@@ -33,17 +38,20 @@ Both sockets require `session_id` to be a valid UUID v4 query parameter.
 | Method | Path | Description |
 |--------|------|-------------|
 | `POST` | `/v1/rooms` | Create a room — returns `room_id`, `owner_token`, `mode`, `preset`, `language` |
+| `GET` | `/v1/rooms/{id}/owner` | Validate the owner token (T-10) |
+| `GET` | `/internal/rooms/{room_id}/sessions/{session_id}` | Session lookup for execution-service (requires `X-Internal-Token`) |
+| `POST` | `/internal/rooms/{room_id}/messages` | Broadcast or deliver targeted JSON messages to control sockets (requires `X-Internal-Token`) |
 | `GET` | `/v1/rooms/{id}/owner` | Validate the owner token sent in `X-Owner-Token` (T-10, FR9.5) |
 | `POST` | `/internal/rooms/{id}/messages` | Broadcast a JSON message to all control-socket sessions in a room (requires `X-Internal-Token`) |
 
-### 1.4 Error Codes (Internal Endpoint)
+### 1.4 Error Codes (Internal Endpoints)
 
 | HTTP | Code | Meaning |
 |------|------|---------|
 | 401 | `UNAUTHORIZED` | Missing or invalid `X-Internal-Token` |
-| 400 | `PAYLOAD_TOO_LARGE` | Body exceeds 4 MiB |
-| 400 | `INVALID_BODY` | Body has no `type` field |
-| 400 | `INVALID_JSON` | Body is not valid JSON |
+| 400 | `INVALID_MESSAGE` | Non-JSON body, missing or blank `type`, payload > 4 MiB, or malformed `audience` |
+| 404 | `ROOM_NOT_FOUND` | Room does not exist or is closed |
+| 404 | `SESSION_NOT_FOUND` | Session has not joined the room (session lookup) |
 
 ---
 
@@ -179,6 +187,7 @@ Test classes:
 - `RoomServiceTest` — join/roster logic, roles, NAME_TAKEN (Femina's part, used by control handler).
 - `RoomControllerTest` — POST /v1/rooms validation.
 - `OwnerControllerTest` — GET /v1/rooms/{id}/owner.
+- `InternalEndpointsIntegrationTest` — session lookup (`GET /internal/rooms/{room_id}/sessions/{session_id}`), audience routing & multi-tab delivery (`POST /internal/rooms/{room_id}/messages`), and T-17 V2.14 contract error codes.
 
 ### Check Health Endpoint
 ```bash
@@ -209,6 +218,53 @@ wscat -b -c "ws://localhost:8081/ws/rooms/<id>/docs/main?session_id=a0000000-000
 docker build -t sync-service .
 docker run -p 8081:8081 sync-service
 ```
+
+---
+
+## 6. Internal API Endpoints (T-17 V2.10, V2.11, V2.14, T-20)
+
+Both internal endpoints are protected by the `X-Internal-Token` header.
+
+### 6.1 Session Lookup (`GET /internal/rooms/{room_id}/sessions/{session_id}`)
+Used by `execution-service` on every run request to authenticate the caller, determine their role and execution permissions, and inspect room configuration.
+
+- **Request**:
+  ```http
+  GET /internal/rooms/room-123/sessions/a0000000-0000-4000-8000-000000000001 HTTP/1.1
+  X-Internal-Token: <INTERNAL_API_TOKEN>
+  ```
+- **Response (`200 OK`)**:
+  ```json
+  {
+    "member_id": "m_1",
+    "display_name": "Alice",
+    "role": "host",
+    "mode": "pair",
+    "language": null,
+    "can_run": true,
+    "run_denied_reason": null,
+    "ai_enabled": true
+  }
+  ```
+- **Error Codes**:
+  - `401 Unauthorized` (`UNAUTHORIZED`): Missing or invalid `X-Internal-Token`.
+  - `404 Not Found` (`ROOM_NOT_FOUND`): Room does not exist.
+  - `404 Not Found` (`SESSION_NOT_FOUND`): Session has not joined the room.
+
+### 6.2 Internal Delivery (`POST /internal/rooms/{room_id}/messages`)
+Transmits control messages and run execution results from backend services to active WebSocket control sessions.
+
+- **Audience Routing**:
+  - `{"kind": "room"}` (default): Delivers to every active control socket in the room.
+  - `{"kind": "sessions", "session_ids": ["..."]}`: Targeted delivery to every open connection matching the given session IDs (e.g. multiple tabs of the same session in Open mode).
+  - The `audience` field is stripped before frames are forwarded across WebSocket connections.
+- **Frame Limits & Constraints**:
+  - Messages larger than 4 MiB are rejected with `400 INVALID_MESSAGE`.
+  - Only text control sockets (`docId == null`) receive internal messages; binary Yjs document sockets are untouched.
+- **Error Codes**:
+  - `400 Bad Request` (`INVALID_MESSAGE`): Non-JSON body, missing `type`, payload > 4 MiB, or malformed `audience`.
+  - `401 Unauthorized` (`UNAUTHORIZED`): Missing or invalid `X-Internal-Token`.
+  - `404 Not Found` (`ROOM_NOT_FOUND`): Target room does not exist.
 
 ---
 
