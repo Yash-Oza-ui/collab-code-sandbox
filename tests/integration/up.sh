@@ -23,6 +23,12 @@ if [ "${#profiles[@]}" -eq 0 ]; then
 fi
 
 cd "$REPO_ROOT"
+
+# Build the Python runtime image used by DockerRunner.
+docker build \
+  -t collab-sandbox-python:0.1.0 \
+  -f execution-service/runtime-images/python/Dockerfile \
+  execution-service/runtime-images/python
 export COMPOSE_PROFILES="$(IFS=,; echo "${profiles[*]}")"
 
 # Build and start, retrying once on a transient failure. Image pulls and the
