@@ -359,12 +359,15 @@ class InternalEndpointsIntegrationTest {
     @DisplayName("Unsupported Content-Type returns 400 INVALID_MESSAGE")
     void broadcast_unsupportedContentType_returns400() throws Exception {
         String body = "{\"type\":\"run-result\"}";
-        HttpResponse<String> resp = postInternalWithContentType("any-room", body, TOKEN, "text/plain");
-        assertThat(resp.statusCode()).isEqualTo(400);
 
-        JsonNode json = objectMapper.readTree(resp.body());
-        assertThat(json.get("error").get("code").asText()).isEqualTo("INVALID_MESSAGE");
-        assertThat(json.get("error").get("message").asText()).contains("unsupported Content-Type");
+        for (String unsupported : List.of("text/plain", "text/x-application/json", "application/octet-stream")) {
+            HttpResponse<String> resp = postInternalWithContentType("any-room", body, TOKEN, unsupported);
+            assertThat(resp.statusCode()).isEqualTo(400);
+
+            JsonNode json = objectMapper.readTree(resp.body());
+            assertThat(json.get("error").get("code").asText()).isEqualTo("INVALID_MESSAGE");
+            assertThat(json.get("error").get("message").asText()).contains("unsupported Content-Type");
+        }
     }
 
     @Test
@@ -480,6 +483,7 @@ class InternalEndpointsIntegrationTest {
         List<String> invalidBodies = List.of(
                 "{\"type\":\"run-result\",\"audience\":{\"kind\":\"sessions\"}}",
                 "{\"type\":\"run-result\",\"audience\":{\"kind\":\"sessions\",\"session_ids\":\"not-an-array\"}}",
+                "{\"type\":\"run-result\",\"audience\":{\"kind\":\"sessions\",\"session_ids\":[]}}",
                 "{\"type\":\"run-result\",\"audience\":{\"kind\":\"sessions\",\"session_ids\":[\"   \"]}}",
                 "{\"type\":\"run-result\",\"audience\":{\"kind\":\"sessions\",\"session_ids\":[123]}}"
         );
@@ -702,6 +706,49 @@ class InternalEndpointsIntegrationTest {
             assertThat(controlClient.pollText(3, TimeUnit.SECONDS)).isNotNull();
             assertThat(docClient.pollText(300, TimeUnit.MILLISECONDS)).isNull();
             assertThat(docClient.pollBinary(300, TimeUnit.MILLISECONDS)).isNull();
+        }
+    }
+
+    @Test
+    @DisplayName("Concurrent broadcasts to the same session serialize safely without exceptions or lost frames")
+    void concurrentBroadcasts_toSameSession_threadSafe() throws Exception {
+        String roomId = "room-concurrent-broadcast";
+        Room room = new Room(roomId, RoomMode.PAIR, "debug_together", null, "hash");
+        roomStore.put(room);
+
+        try (WsClient client = connect(roomId, SESSION_1)) {
+            int threadCount = 10;
+            java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors.newFixedThreadPool(threadCount);
+            java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(threadCount);
+            java.util.concurrent.atomic.AtomicInteger successCount = new java.util.concurrent.atomic.AtomicInteger(0);
+
+            for (int i = 0; i < threadCount; i++) {
+                final int idx = i;
+                pool.submit(() -> {
+                    try {
+                        String body = "{\"type\":\"concurrent-msg\",\"seq\":" + idx + "}";
+                        HttpResponse<String> resp = postInternal(roomId, body, TOKEN);
+                        if (resp.statusCode() == 200) {
+                            successCount.incrementAndGet();
+                        }
+                    } catch (Exception e) {
+                        e.printStackTrace();
+                    } finally {
+                        latch.countDown();
+                    }
+                });
+            }
+
+            assertThat(latch.await(10, TimeUnit.SECONDS)).isTrue();
+            pool.shutdown();
+            assertThat(successCount.get()).isEqualTo(threadCount);
+
+            // Verify all 10 messages were received without exception or loss
+            for (int i = 0; i < threadCount; i++) {
+                String frame = client.pollText(5, TimeUnit.SECONDS);
+                assertThat(frame).isNotNull();
+                assertThat(frame).contains("concurrent-msg");
+            }
         }
     }
 

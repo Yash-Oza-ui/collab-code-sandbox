@@ -162,17 +162,33 @@ public class InternalMessageController {
 
         // --- 2. Content-Type check ---
         String contentType = request != null ? request.getContentType() : null;
-        if (contentType != null && !contentType.toLowerCase().contains("application/json")) {
+        if (contentType == null || contentType.isBlank()) {
+            return error(HttpStatus.BAD_REQUEST, "INVALID_MESSAGE",
+                    "Message body is not valid: unsupported Content-Type. Expected application/json.", null);
+        }
+        try {
+            MediaType mediaType = MediaType.parseMediaType(contentType);
+            if (!mediaType.isCompatibleWith(MediaType.APPLICATION_JSON)) {
+                return error(HttpStatus.BAD_REQUEST, "INVALID_MESSAGE",
+                        "Message body is not valid: unsupported Content-Type. Expected application/json.", null);
+            }
+        } catch (IllegalArgumentException e) {
             return error(HttpStatus.BAD_REQUEST, "INVALID_MESSAGE",
                     "Message body is not valid: unsupported Content-Type. Expected application/json.", null);
         }
 
         // --- 3. Request body presence & bounded stream reading ---
-        // Reads from request stream up to MAX_BODY_BYTES into memory buffer.
-        // Discards excess bytes from socket without buffering them in heap.
+        // Bounded stream reading: reject immediately if Content-Length exceeds 4 MiB,
+        // and stop stream reading immediately if total bytes read exceed 4 MiB.
         if (request == null) {
             return error(HttpStatus.BAD_REQUEST, "INVALID_MESSAGE",
                     "Message body is not valid: empty or missing body.", null);
+        }
+
+        long contentLength = request.getContentLengthLong();
+        if (contentLength > MAX_BODY_BYTES) {
+            return error(HttpStatus.BAD_REQUEST, "INVALID_MESSAGE",
+                    "Message body is not valid: larger than 4 MiB.", null);
         }
 
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
@@ -185,9 +201,9 @@ public class InternalMessageController {
                 totalRead += bytesRead;
                 if (totalRead > MAX_BODY_BYTES) {
                     oversized = true;
-                } else {
-                    baos.write(buffer, 0, bytesRead);
+                    break;
                 }
+                baos.write(buffer, 0, bytesRead);
             }
         } catch (IOException e) {
             return error(HttpStatus.BAD_REQUEST, "INVALID_MESSAGE",
@@ -253,9 +269,9 @@ public class InternalMessageController {
             } else if ("sessions".equals(kind)) {
                 roomAudience = false;
                 JsonNode sessionIdsNode = audienceNode.get("session_ids");
-                if (sessionIdsNode == null || !sessionIdsNode.isArray()) {
+                if (sessionIdsNode == null || !sessionIdsNode.isArray() || sessionIdsNode.isEmpty()) {
                     return error(HttpStatus.BAD_REQUEST, "INVALID_MESSAGE",
-                            "Message body is not valid: audience.session_ids must be an array.", requestId);
+                            "Message body is not valid: audience.session_ids must be a non-empty array.", requestId);
                 }
                 targetSessions = new HashSet<>();
                 for (JsonNode elem : sessionIdsNode) {
@@ -307,7 +323,9 @@ public class InternalMessageController {
         for (WebSocketSession session : sessions) {
             try {
                 if (session.isOpen()) {
-                    session.sendMessage(frame);
+                    synchronized (session) {
+                        session.sendMessage(frame);
+                    }
                     delivered++;
                 }
             } catch (Exception e) {
