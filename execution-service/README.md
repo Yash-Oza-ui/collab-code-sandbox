@@ -198,6 +198,61 @@ curl -i -X POST http://localhost:8082/v1/runs \
 
 ---
 
+## Queue gate (FR16, US-11)
+
+When the run queue is full the service refuses the new request immediately --
+no container is started, no existing run is disturbed.
+
+### How it works
+
+Every public run request (`POST /v1/runs`) calls the **one** `RunQueueGate`. The gate
+holds a semaphore whose size is `app.execution.limits.max-queue-length`. When all
+permits are in use the gate throws `QueueFullException` before invoking the
+code runner. `QueueFullExceptionHandler` maps that to an HTTP 503 response.
+
+Queue health and observable in-flight state (`in_flight`, `max_queue_length`,
+`retry_after_seconds`) are exposed via Spring Boot Actuator at `GET /actuator/health`
+(`QueueHealthIndicator`) for monitoring and deterministic test coordination.
+The details are hidden by default (`management.endpoint.health.show-details: never`).
+`docker-compose.yml` keeps them hidden too (default `never`). Only the integration harness
+(`tests/integration/up.sh` and the CI `integration` job) sets `MANAGEMENT_HEALTH_SHOW_DETAILS=always`;
+do not enable it in production.
+
+> **Note on API scope:** Testing in this PR covers the public endpoint `POST /v1/runs`,
+> verifying that repeated public calls count toward the same queue limit and receive
+> the 503 `QUEUE_FULL` refusal. The future internal endpoint `POST /internal/runs`
+> (for repeated runs and test batches, US-64/US-65/US-71) is a deferred Sprint 2
+> feature and is not implemented or tested here.
+
+### Configuration (application.yml)
+
+| Key                                              | Default | Notes                                          |
+|--------------------------------------------------|---------|------------------------------------------------|
+| `app.execution.limits.max-queue-length`          | `10`    | Max concurrent runs; tune per host (US-16)     |
+| `app.execution.limits.queue-retry-after-seconds` | `5`     | Sent in `Retry-After` and `error.retry_after_seconds` |
+
+### QUEUE_FULL error shape (docs/api-contracts.md §7.1)
+
+```http
+HTTP 503 Service Unavailable
+Retry-After: 5
+
+{
+  "request_id": "<uuid echoed from request>",
+  "error": {
+    "code":                "QUEUE_FULL",
+    "message":             "Execution service is busy, try again in a few seconds.",
+    "retry_after_seconds": 5
+  }
+}
+```
+
+> **Important (FR16 v2):** repeated runs, including those triggered by
+> automated batch features, count toward the same limit and receive the same
+> refusal. Never add a second gate or bypass this one.
+
+---
+
 ## Resource limits (DR3)
 
 Limits are read from `src/main/resources/application.yml` under `app.execution.limits`.
@@ -240,7 +295,7 @@ execution-service/
     │   │   ├── exception/                            # Contract exception types (V2.12)
     │   │   ├── model/                                # RunRequest, RunResponse, RunSource, etc.
     │   │   ├── permission/                           # Permission lookup service & stubs (V2.11)
-    │   │   ├── queue/                                # RunQueueGate concurrency control (US-11)
+    │   │   ├── queue/                                # RunQueueGate, QueueHealthIndicator (US-11)
     │   │   ├── runner/                               # CodeRunner, ExecutionResult, FakeCodeRunner
     │   │   └── snapshot/                             # SavedVersionReader & snapshot stubs (V2.8)
     │   └── resources/
@@ -250,14 +305,15 @@ execution-service/
             ├── config/
             │   └── ExecutionLimitsPropertiesTest.java
             ├── controller/
-            │   ├── RunControllerTest.java
-            │   ├── RunControllerUS08Test.java
-            │   ├── RunControllerUS11Test.java
-            │   └── RunControllerT19Test.java
+            │   ├── RunControllerTest.java                    # T-03 acceptance tests
+            │   ├── RunControllerUS08Test.java                # US-08 DoD tests (Jay)
+            │   ├── RunControllerT19Test.java                 # T-19 run spec tests
+            │   ├── RunControllerUS11Test.java                # US-11 queue-full MockMvc slice (Yash)
+            │   └── RunControllerQueueIntegrationTest.java    # US-11 queue-full over real HTTP (Bhavya)
             ├── queue/
-            │   └── RunQueueGateTest.java
+            │   └── RunQueueGateTest.java                     # US-11 gate unit tests (Yash)
             └── runner/
-                └── FakeCodeRunnerTest.java
+                └── FakeCodeRunnerTest.java                   # Stub behaviour (Jay)
 ```
 
 ---

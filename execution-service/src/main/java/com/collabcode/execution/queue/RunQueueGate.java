@@ -72,4 +72,14 @@ public class RunQueueGate {
     public int inFlight() {
         return maxQueueLength - slots.availablePermits();
     }
+
+    /** Maximum queue length (configured capacity). */
+    public int getMaxQueueLength() {
+        return maxQueueLength;
+    }
+
+    /** Configured retry-after duration in seconds for QUEUE_FULL. */
+    public int getRetryAfterSeconds() {
+        return retryAfterSeconds;
+    }
 }

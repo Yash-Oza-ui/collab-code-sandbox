@@ -127,3 +127,11 @@ It copies `.env.example` to `.env`, runs `up.sh`, then `run-all.sh` (the smoke t
 `test-*.sh`). It is part of the `build-and-test` required check. On failure it prints
 `docker compose ps` and the last 200 log lines, and it always tears the stack down.
 A service folder without a `Dockerfile` is skipped, so the job passes while scaffolds are landing.
+
+### Health details
+
+`docker-compose.yml` hides actuator health details by default (`MANAGEMENT_HEALTH_SHOW_DETAILS=never`),
+because the execution-service port is published. `test-us11-queue-full.sh` needs `in_flight` and
+`max_queue_length` from `/actuator/health`, so `up.sh` and the CI `integration` job set
+`MANAGEMENT_HEALTH_SHOW_DETAILS=always` for the test stack only. If you start the stack some other
+way, export that variable first or the test fails with a `health-details` message.
