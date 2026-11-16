@@ -73,7 +73,19 @@ public class DockerRunner implements CodeRunner {
                 );
             }
 
-            workspace = Files.createTempDirectory("run-" + runId + "-");
+            Path workspaceRoot = Path.of("/tmp/collab-code-workspaces");
+            Files.createDirectories(workspaceRoot);
+
+            workspace = Files.createTempDirectory(
+                    workspaceRoot,
+                    "run-" + runId + "-"
+            );
+
+            // Allow non-root runtime user (1001) to access the workspace.
+            if (!workspace.toFile().setReadable(true, false)
+                    || !workspace.toFile().setExecutable(true, false)) {
+                throw new IOException("Unable to set workspace permissions");
+            }
             writeRunFiles(spec, workspace);
 
             ProcessBuilder builder = new ProcessBuilder(
@@ -445,11 +457,19 @@ public class DockerRunner implements CodeRunner {
             throws IOException {
 
         for (RunFile file : spec.getFiles()) {
+            Path filePath = workspace.resolve(file.getName());
+
             Files.writeString(
-                    workspace.resolve(file.getName()),
+                    filePath,
                     file.getContent(),
                     StandardCharsets.UTF_8
             );
+
+            if (!filePath.toFile().setReadable(true, false)) {
+                throw new IOException(
+                        "Unable to make source file readable: " + file.getName()
+                );
+            }
         }
     }
 

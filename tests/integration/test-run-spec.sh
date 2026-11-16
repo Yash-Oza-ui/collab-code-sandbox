@@ -133,7 +133,7 @@ resp_oom="$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST "$endpoint" \
       "files": [
         {
           "name": "main.py",
-          "content": "allocate_oom_trigger()\n"
+          "content": "chunks = []\nwhile True:\n    chunks.append(bytearray(10 * 1024 * 1024))\n"
         }
       ],
       "entry": "main.py"
