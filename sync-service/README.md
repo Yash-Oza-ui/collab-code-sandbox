@@ -53,6 +53,28 @@ Both sockets require `session_id` to be a valid UUID v4 query parameter.
 | 404 | `ROOM_NOT_FOUND` | Room does not exist or is closed |
 | 404 | `SESSION_NOT_FOUND` | Session has not joined the room (session lookup) |
 
+### 1.5 Room IDs (NFR16, US-62)
+
+Room ids are the only secret in a join link (`/room/{room_id}`), so they must
+be unguessable. `RoomIds.generate()` draws **16 bytes (128 bits) from
+`java.security.SecureRandom`** and encodes them as base64url without padding,
+giving a **22-character id from `[A-Za-z0-9_-]`** (well inside the §3.2 1–64
+character rule).
+
+- The **client cannot choose the id**: `POST /v1/rooms` has no `room_id` field
+  (`CreateRoomRequest` is `mode`/`preset`/`language` only), so any `room_id`
+  sent in the body is ignored and the server-generated id is returned.
+- A **guessed or unknown id opens nothing**: the control and document sockets
+  close an unknown room with **4404** (`ControlHandler.CLOSE_UNKNOWN_ROOM`), and
+  an unknown id never creates a room.
+- **No endpoint enumerates room ids**, and the unknown-room error
+  (`ROOM_NOT_FOUND`) does not reveal whether a similar id exists.
+- Room ids are never logged next to owner tokens or session ids.
+
+This satisfies **NFR16**. See `RoomIdsTest` (length, charset, 128-bit decode,
+no repeats in a 10 000-id batch), `RoomControllerTest.clientSuppliedRoomId_isIgnored`,
+and `RelayIntegrationTest` (unknown room → 4404).
+
 ---
 
 ## 2. Control Socket Protocol
