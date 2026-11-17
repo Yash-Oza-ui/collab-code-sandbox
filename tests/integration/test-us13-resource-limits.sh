@@ -71,7 +71,7 @@ TIMEOUT_BODY=$(cat <<EOF
   "language":   "python",
   "source": {
     "kind": "inline",
-    "files": [ { "name": "main.py", "content": "while True: pass  # infinite_loop" } ],
+    "files": [ { "name": "main.py", "content": "while True:\n    pass\n" } ],
     "entry": "main.py"
   }
 }
@@ -105,7 +105,7 @@ OOM_BODY=$(cat <<EOF
   "language":   "python",
   "source": {
     "kind": "inline",
-    "files": [ { "name": "main.py", "content": "# trigger oom allocation" } ],
+    "files": [ { "name": "main.py", "content": "chunks = []\nwhile True:\n    chunks.append(bytearray(10 * 1024 * 1024))\n" } ],
     "entry": "main.py"
   }
 }
@@ -139,7 +139,7 @@ FLOOD_BODY=$(cat <<EOF
   "language":   "python",
   "source": {
     "kind": "inline",
-    "files": [ { "name": "main.py", "content": "# output_flood" } ],
+    "files": [ { "name": "main.py", "content": "for _ in range(50000):\n    print('A' * 40)\n" } ],
     "entry": "main.py"
   }
 }
