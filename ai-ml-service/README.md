@@ -12,6 +12,9 @@ The AI/ML microservice for **Collab Code Sandbox** (IT-314, Group 32). This serv
 
 - **Scaffold (T-04):** FastAPI web service running on port 8000, health check at `/health`.
 - **Contracts (T-07 / T-18 v2):** Endpoints and payloads conform to `../docs/ai-ml-contract.md`.
+- **Configurable Limits (DR3 / US-16):**
+  - `ai-ml-service` owns AI rate and cost limits: `AI_SLOWDOWN_FACTOR` (FR37.2, default `1.0`), `AI_MAX_TOKENS_PER_REQUEST` (FR40.4, default `4096`), `LLM_TIMEOUT_SECONDS` (FR40.4, default `10.0`), `ROOM_HOURLY_LIMIT` (NFR5.3, default `20`), `MONTHLY_BUDGET_USD` (NFR7.2, default `10.0`), `TOKEN_COST_PER_TOKEN` (default `0.0000035`).
+  - See [docs/host-config.md](../docs/host-config.md) for details on host configuration and overrides. Final per-host values are determined only after host benchmarking.
 - **Endpoints:**
   - `GET /health`: Liveness probe for container orchestration and smoke tests.
   - `POST /v1/analyses/complexity`: Rules-first time complexity analysis with verified AI fallback (FR36, US-17, US-22).
