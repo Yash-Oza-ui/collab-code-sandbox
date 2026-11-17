@@ -9,13 +9,18 @@ export function ownerTokenKey(roomId: string): string {
   return `${OWNER_TOKEN_KEY_PREFIX}${roomId}`
 }
 
-// PLACEHOLDER (US-01, temporary): the real mode/preset/language choice comes from
-// US-34 (FR17). Pair is used because the open-link flow joins the shared "main"
-// document, which only Pair rooms have. The preset is a guess, not verified.
-export const PLACEHOLDER_CREATE_ROOM_BODY = {
-  mode: 'pair',
-  preset: 'debug_together',
-} as const
+export type RoomMode = 'pair' | 'open'
+export type PairPreset = 'teach_interview' | 'debug_together'
+export type WorkspaceLanguage = 'cpp' | 'python' | 'c' | 'java' | 'javascript'
+export type CreateRoomChoice =
+  | { mode: 'pair'; preset: PairPreset }
+  | { mode: 'open'; language: WorkspaceLanguage }
+
+export function buildCreateRoomBody(choice: CreateRoomChoice): CreateRoomChoice {
+  return choice.mode === 'pair'
+    ? { mode: 'pair', preset: choice.preset }
+    : { mode: 'open', language: choice.language }
+}
 
 export interface CreatedRoom {
   roomId: string
@@ -38,6 +43,7 @@ function errorMessageFrom(body: unknown, status: number): string {
 // stored here. It is never logged, shown or put in a URL, and is not yet sent in
 // "join" (follow-up PR after T-10).
 export async function createRoom(
+  choice: CreateRoomChoice,
   platformApiUrl: string = config.platformApiUrl,
 ): Promise<CreatedRoom> {
   const url = `${platformApiUrl.replace(/\/+$/, '')}/v1/rooms`
@@ -47,7 +53,7 @@ export async function createRoom(
     response = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(PLACEHOLDER_CREATE_ROOM_BODY),
+      body: JSON.stringify(buildCreateRoomBody(choice)),
     })
   } catch {
     throw new Error(
