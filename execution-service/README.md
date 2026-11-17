@@ -35,6 +35,20 @@ Content-Type: application/json
 
 > **Legacy field:** A body containing `code` is rejected with HTTP `422 INVALID_REQUEST`.
 
+### Supported languages so far (US-08, DR1)
+
+The endpoint accepts the five DR1 languages: `cpp`, `python`, `c`, `java`, `javascript`.
+Any other value is refused with HTTP `422 UNSUPPORTED_LANGUAGE` before anything runs.
+
+| Language | Runs end to end today? | Notes |
+|----------|------------------------|-------|
+| `python` | **Yes** | Image `collab-sandbox-python:0.1.0` (T-14), run by `DockerRunner` (US-09). |
+| `cpp`, `c`, `java`, `javascript` | Not yet | Accepted by the endpoint, but `DockerRunner` has no image for them. The run returns HTTP 200 with `exit_code: 2`, `failure_kind: "non_zero_exit"` and a stderr message saying the runtime currently supports Python only. The images arrive with US-14. |
+
+A program that fails (non-zero exit, syntax error, exception) is **a result, not a server error**:
+HTTP 200 with the program's stderr and exit code (FR4.2). A syntax error in Python gives
+`failure_kind: "compile_error"`.
+
 ### Three source shapes
 
 1. **Pair mode (inline source):**
@@ -224,6 +238,38 @@ curl -i -X POST http://localhost:8082/v1/runs \
     "code":       "print(1)"
   }'
 ```
+
+---
+
+## How to verify US-08 with the real Docker runner
+
+Build the Python image once (from the repository root) and run the end-to-end tests:
+
+```bash
+docker build -t collab-sandbox-python:0.1.0 execution-service/runtime-images/python
+cd execution-service
+./mvnw -Dtest=RunControllerUS08DockerTest test       # Windows PowerShell: .\mvnw.cmd "-Dtest=RunControllerUS08DockerTest" test
+```
+
+`RunControllerUS08DockerTest` calls `POST /v1/runs` through the real `DockerRunner`
+(only the delivery to sync-service is mocked) and is skipped, not failed, when Docker or
+the image is missing. It covers: success (`hello`), failure (`boom`, exit 2), stdin
+(`abc` gives `ABC`), a Python syntax error, an unsupported language (422), and delivery of
+the real result to the room (FR4.5). `RunControllerUS08Test` covers the same endpoint
+contract with a mocked runner.
+
+By hand, with the service running (`./mvnw spring-boot:run`, Docker running):
+
+```bash
+RUN="http://localhost:8082/v1/runs"
+curl -s -X POST "$RUN" -H "Content-Type: application/json" -d '{
+  "request_id":"0b9d2f3e-7a41-4c58-9e1b-5d3c8a6f2e10","room_id":"room-demo-01",
+  "session_id":"7c1e4a52-3b0d-4f6a-9a2e-8d5f1b6c3e90","language":"python","stdin":"abc",
+  "source":{"kind":"inline","files":[{"name":"main.py","content":"print(input().upper())"}],"entry":"main.py"}}'
+# expected: "stdout":"ABC\n", "exit_code":0
+```
+
+The two-browser room check needs the client run panel (T-11, #17); close issue #14 when it passes.
 
 ---
 
@@ -427,6 +473,7 @@ execution-service/
             │   ├── RunControllerUS08Test.java                # US-08 DoD tests (Jay)
             │   ├── RunControllerT19Test.java                 # T-19 run spec tests
             │   ├── RunControllerUS11Test.java                # US-11 queue-full MockMvc slice (Yash)
+            │   ├── RunControllerUS08DockerTest.java          # US-08 end-to-end with the real DockerRunner (Quincy)
             │   └── RunControllerQueueIntegrationTest.java    # US-11 queue-full over real HTTP (Bhavya)
             ├── queue/
             │   └── RunQueueGateTest.java                     # US-11 gate unit tests (Yash)
