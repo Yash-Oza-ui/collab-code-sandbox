@@ -119,6 +119,31 @@ export interface RunnerMemberInfo {
   display_name?: string
 }
 
+export interface SavedVersionAuthor {
+  member_id?: string
+  display_name: string
+}
+
+export interface SavedVersionInfo {
+  module_id: string
+  name: string
+  version: number
+  saved_by?: SavedVersionAuthor
+  saved_at?: string
+}
+
+export interface FailureParticipantInfo {
+  member_id?: string
+  display_name: string
+}
+
+export interface RunFailureInfo {
+  module_id?: string
+  name?: string
+  owner?: FailureParticipantInfo
+  last_saved_by?: FailureParticipantInfo
+}
+
 export interface RunResponseData {
   request_id: string
   room_id: string
@@ -137,8 +162,8 @@ export interface RunResponseData {
   runner?: RunnerMemberInfo
   ran_at?: string
   visibility?: string
-  saved_versions?: unknown[]
-  failure?: unknown
+  saved_versions?: SavedVersionInfo[]
+  failure?: RunFailureInfo | null
 }
 
 export interface RunErrorEnvelope {
@@ -281,8 +306,15 @@ export function validateRunResponse(
     runner: (obj.runner && typeof obj.runner === 'object') ? (obj.runner as RunnerMemberInfo) : undefined,
     ran_at: typeof obj.ran_at === 'string' ? obj.ran_at : undefined,
     visibility: typeof obj.visibility === 'string' ? obj.visibility : undefined,
-    saved_versions: Array.isArray(obj.saved_versions) ? obj.saved_versions : undefined,
-    failure: obj.failure,
+    saved_versions: Array.isArray(obj.saved_versions)
+      ? (obj.saved_versions as SavedVersionInfo[])
+      : undefined,
+    failure:
+      obj.failure && typeof obj.failure === 'object'
+        ? (obj.failure as RunFailureInfo)
+        : obj.failure === null
+          ? null
+          : undefined,
   }
 
   return { valid: true, data }
