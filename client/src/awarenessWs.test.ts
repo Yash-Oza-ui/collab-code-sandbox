@@ -2105,6 +2105,90 @@ describe('US-04 Open-mode registered module recovery', () => {
   })
 })
 
+describe('US-04 approved module lifecycle', () => {
+  it('discovers all approved modules and closes revoked sockets on reconnect', async () => {
+    const relay = new TestRelay()
+    const roomId = 'us04-approved-lifecycle'
+    relay.roomModes.set(roomId, 'open')
+    relay.roomModules.set(roomId, new Set(['module_alpha', 'module_beta', 'module_gamma']))
+    const approved = new Set(['module_alpha', 'module_beta', 'module_gamma'])
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => [...approved].map((module_id) => ({
+        module_id, is_entry: module_id === 'module_alpha', pending: false,
+      })),
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+    const doc = new Y.Doc()
+    const awareness = createAwareness(doc)
+    const conn = connectAwarenessWs({
+      roomId, doc, awareness,
+      sessionId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      syncWsUrl: 'ws://localhost:8081/ws/rooms',
+      WebSocketClass: function (url: string) {
+        return relay.createClient(url)
+      } as unknown as typeof WebSocket,
+    })
+    try {
+      conn.join('Alice')
+      await vi.waitFor(() => {
+        expect(conn.docWs?.readyState).toBe(WebSocket.OPEN)
+        expect(conn.moduleSockets.get('module_beta')?.readyState).toBe(WebSocket.OPEN)
+        expect(conn.moduleSockets.get('module_gamma')?.readyState).toBe(WebSocket.OPEN)
+      })
+      const revokedSocket = conn.moduleSockets.get('module_gamma')!
+      approved.delete('module_gamma')
+      relay.roomModules.get(roomId)!.delete('module_gamma')
+      ;(conn.controlWs as unknown as TestWebSocket).close(1006, 'Network lost')
+      await vi.waitFor(() => {
+        expect(fetchMock).toHaveBeenCalledTimes(2)
+        expect(conn.docWs?.readyState).toBe(WebSocket.OPEN)
+        expect(conn.moduleSockets.get('module_beta')?.readyState).toBe(WebSocket.OPEN)
+        expect(conn.moduleSockets.has('module_gamma')).toBe(false)
+        expect(revokedSocket.readyState).toBe(WebSocket.CLOSED)
+      }, { timeout: 4000 })
+      expect(relay.docClients.size).toBe(2)
+    } finally {
+      conn.destroy()
+      awareness.destroy()
+      doc.destroy()
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('rejects an unapproved resolveDocId and opens the approved entry module', async () => {
+    const relay = new TestRelay()
+    const roomId = 'us04-resolver-validation'
+    relay.roomModes.set(roomId, 'open')
+    relay.roomModules.set(roomId, new Set(['module_alpha']))
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      json: async () => [{ module_id: 'module_alpha', is_entry: true, pending: false }],
+    })))
+    const doc = new Y.Doc()
+    const awareness = createAwareness(doc)
+    const conn = connectAwarenessWs({
+      roomId, doc, awareness,
+      sessionId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+      syncWsUrl: 'ws://localhost:8081/ws/rooms',
+      WebSocketClass: function (url: string) {
+        return relay.createClient(url)
+      } as unknown as typeof WebSocket,
+      resolveDocId: async () => 'module_not_approved',
+    })
+    try {
+      conn.join('Alice')
+      await vi.waitFor(() => expect(conn.docWs?.readyState).toBe(WebSocket.OPEN))
+      expect([...relay.docClients.values()].map((entry) => entry.docId)).toEqual(['module_alpha'])
+    } finally {
+      conn.destroy()
+      awareness.destroy()
+      doc.destroy()
+      vi.unstubAllGlobals()
+    }
+  })
+})
+
 describe('US-04 Open-mode missing module regression', () => {
   it('does not open main document when no registered module is available', async () => {
     const relay = new TestRelay()
