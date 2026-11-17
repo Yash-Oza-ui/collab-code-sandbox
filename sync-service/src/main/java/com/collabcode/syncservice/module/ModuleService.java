@@ -11,6 +11,8 @@ import org.springframework.stereotype.Component;
 import java.security.SecureRandom;
 import java.util.Base64;
 import java.util.Map;
+import java.util.List;
+import java.util.Comparator;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -49,6 +51,18 @@ public class ModuleService {
         if (module == null) throw new IllegalStateException("MODULE_NOT_FOUND");
         module.approve();
         return module;
+    }
+
+    /** Returns a stable snapshot of approved modules for a joined room member. */
+    public synchronized List<ModuleRecord> listApproved(String roomId, Member requester) {
+        requireOpenRoom(roomId);
+        if (requester == null) throw new IllegalArgumentException("SESSION_NOT_FOUND");
+        Map<String, ModuleRecord> modules = byRoom.get(roomId);
+        if (modules == null) return List.of();
+        return modules.values().stream()
+                .filter(module -> !module.pending())
+                .sorted(Comparator.comparing(ModuleRecord::moduleId))
+                .toList();
     }
 
     /** A socket may address only an approved module. */
