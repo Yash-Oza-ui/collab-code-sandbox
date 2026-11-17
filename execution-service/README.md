@@ -42,7 +42,7 @@ Any other value is refused with HTTP `422 UNSUPPORTED_LANGUAGE` before anything 
 
 | Language | Runs end to end today? | Notes |
 |----------|------------------------|-------|
-| `python` | **Yes** | Image `collab-sandbox-python:0.1.0` (T-14), run by `DockerRunner` (US-09). |
+| `python` | **Yes** | Image `collab-sandbox-python:0.2.0` (T-14/US-10), run by `DockerRunner` (US-09). |
 | `cpp`, `c`, `java`, `javascript` | Not yet | Accepted by the endpoint, but `DockerRunner` has no image for them. The run returns HTTP 200 with `exit_code: 2`, `failure_kind: "non_zero_exit"` and a stderr message saying the runtime currently supports Python only. The images arrive with US-14. |
 
 A program that fails (non-zero exit, syntax error, exception) is **a result, not a server error**:
@@ -139,6 +139,34 @@ The execution service uses the Docker daemon of the machine on which it runs. Do
 
 ---
 
+## US-10 execution metrics
+
+The real Docker runner reports measurements from the trusted supervisor inside
+the container; it does not use `FakeCodeRunner` values.
+
+- `execution_time_ms` uses Python's `time.monotonic_ns()` from immediately
+  before the user process is spawned until that process exits. It excludes
+  queue waiting, Docker/container startup, workspace creation and cleanup.
+- `peak_memory_mb` is read from the container's cgroup high-water mark:
+  `/sys/fs/cgroup/memory.peak` on cgroup v2, with
+  `/sys/fs/cgroup/memory/memory.max_usage_in_bytes` as the cgroup v1 fallback,
+  and `getrusage(RUSAGE_CHILDREN).ru_maxrss` as the final fallback.
+  This measures the run container's peak resident memory, including only the
+  small supervisor overhead in addition to the submitted process.
+- The supervisor runs with only SETUID/SETGID capabilities, drops submitted
+  code to UID/GID 1001, and writes measurements to a root-only metrics directory
+  bind-mounted from the workspace. Submitted code cannot access or tamper with
+  the measurements. Source files remain mounted read-only.
+  The run timer and memory measurement are collected for successful,
+  non-zero-exit, syntax-error and timeout runs.
+- Python has no separate compile stage, so `compile_time_ms` remains `null`;
+  `execution_time_ms` is still populated for syntax errors because the Python
+  interpreter must start and parse the submitted file.
+
+The response/UI contract is unchanged. `RunOutputPanel` already renders the
+exit outcome and the time/memory metrics in a metadata row separate from
+stdout/stderr; no `RunPanel.tsx` changes are needed for this story.
+
 ## How to run locally
 
 ### 1. Build the runtime image
@@ -146,7 +174,7 @@ The execution service uses the Docker daemon of the machine on which it runs. Do
 From the repository root, build the Python runtime image using the Dockerfile maintained in this repository:
 
 ```bash
-docker build -t collab-sandbox-python:0.1.0 execution-service/runtime-images/python
+docker build -t collab-sandbox-python:0.2.0 execution-service/runtime-images/python
 ```
 
 The execution service expects this image tag when running Python code. Build the image again whenever its Dockerfile changes.
@@ -246,7 +274,7 @@ curl -i -X POST http://localhost:8082/v1/runs \
 Build the Python image once (from the repository root) and run the end-to-end tests:
 
 ```bash
-docker build -t collab-sandbox-python:0.1.0 execution-service/runtime-images/python
+docker build -t collab-sandbox-python:0.2.0 execution-service/runtime-images/python
 cd execution-service
 ./mvnw -Dtest=RunControllerUS08DockerTest test       # Windows PowerShell: .\mvnw.cmd "-Dtest=RunControllerUS08DockerTest" test
 ```
@@ -396,7 +424,7 @@ Hardening options such as rootless Docker or a Docker socket proxy are not part 
 Build the image once (from the repository root), then run the isolation tests:
 
 ```bash
-docker build -t collab-sandbox-python:0.1.0 execution-service/runtime-images/python
+docker build -t collab-sandbox-python:0.2.0 execution-service/runtime-images/python
 cd execution-service
 ./mvnw -Dtest=DockerRunnerTest,DockerRunnerIsolationTest test      # mvnw.cmd on Windows
 ```

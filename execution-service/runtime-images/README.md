@@ -75,7 +75,7 @@ Run from the **repository root**:
 
 ```bash
 docker build \
-  -t collab-sandbox-python:0.1.0 \
+  -t collab-sandbox-python:0.2.0 \
   execution-service/runtime-images/python
 ```
 

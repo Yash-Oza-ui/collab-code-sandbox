@@ -16,7 +16,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class DockerRunnerTest {
 
-    private static final String IMAGE = "collab-sandbox-python:0.1.0";
+    private static final String IMAGE = "collab-sandbox-python:0.2.0";
 
     private DockerRunner runner;
 
@@ -91,6 +91,70 @@ class DockerRunnerTest {
         assertFalse(result.isTimedOut());
         assertFalse(result.isOomKilled());
         assertNull(result.getFailureKind());
+    }
+
+    @Test
+    void measuresRunStageWithoutIncludingContainerStartup() {
+        RunSpec spec = new RunSpec(
+                "python",
+                List.of(new RunFile("main.py",
+                        "import time\ntime.sleep(1.1)\n")),
+                "main.py",
+                "");
+
+        ExecutionResult result = runner.execute(spec);
+
+        assertEquals(0, result.getExitCode());
+        assertTrue(result.getExecutionTimeMs() >= 900.0,
+                "The measured run should include the requested sleep");
+        assertTrue(result.getExecutionTimeMs() < 4000.0,
+                "Docker/container startup must not be included in execution_time_ms");
+        assertTrue(result.getPeakMemoryMb() > 0.0,
+                "A real Docker run must report a positive peak memory measurement");
+    }
+
+    @Test
+    void capturesPeakMemoryForAProgramThatAllocatesAbout50Mb() {
+        RunSpec spec = new RunSpec(
+                "python",
+                List.of(new RunFile("main.py",
+                        "import time\n"
+                                + "data = bytearray(50 * 1024 * 1024)\n"
+                                + "time.sleep(0.8)\n"
+                                + "print(len(data))\n")),
+                "main.py",
+                "");
+
+        ExecutionResult result = runner.execute(spec);
+
+        assertEquals(0, result.getExitCode());
+        assertTrue(result.getPeakMemoryMb() >= 40.0,
+                "The peak should include the retained 50 MB allocation");
+        assertTrue(result.getPeakMemoryMb() < 128.0,
+                "The measured peak must remain within the configured container limit");
+    }
+
+    @Test
+    void reportsMetricsForNonZeroExitAndSyntaxError() {
+        ExecutionResult runtimeFailure = runner.execute(new RunSpec(
+                "python",
+                List.of(new RunFile("main.py", "raise RuntimeError('metrics test')")),
+                "main.py",
+                ""));
+
+        assertNotEquals(0, runtimeFailure.getExitCode());
+        assertTrue(runtimeFailure.getExecutionTimeMs() > 0.0);
+        assertTrue(runtimeFailure.getPeakMemoryMb() > 0.0);
+
+        ExecutionResult syntaxFailure = runner.execute(new RunSpec(
+                "python",
+                List.of(new RunFile("main.py", "def broken(:\n    pass\n")),
+                "main.py",
+                ""));
+
+        assertEquals("compile_error", syntaxFailure.getFailureKind());
+        assertTrue(syntaxFailure.getExecutionTimeMs() > 0.0);
+        assertTrue(syntaxFailure.getPeakMemoryMb() > 0.0);
     }
 
     @Test

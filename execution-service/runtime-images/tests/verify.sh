@@ -7,7 +7,7 @@
 #   Runs each acceptance-criterion check against the Python runtime image.
 #   Every check prints PASS or FAIL with the expected vs. actual result.
 #   Run this script AFTER building the image with:
-#     docker build -t collab-sandbox-python:0.1.0 \
+#     docker build -t collab-sandbox-python:0.2.0 \
 #                  execution-service/runtime-images/python
 #
 # Usage (from the repository root):
@@ -15,11 +15,11 @@
 #
 # Prerequisites:
 #   - Docker daemon is running
-#   - Image collab-sandbox-python:0.1.0 has been built (see README)
+#   - Image collab-sandbox-python:0.2.0 has been built (see README)
 #   - Script must be run from the repository root so relative paths work
 #
 # Environment variable (optional):
-#   IMAGE   Override the image tag. Default: collab-sandbox-python:0.1.0
+#   IMAGE   Override the image tag. Default: collab-sandbox-python:0.2.0
 #
 # Exit code:
 #   0 if all checks pass
@@ -31,7 +31,7 @@ set -euo pipefail
 # Ensure Git Bash on Windows does not rewrite POSIX container paths (e.g. /sandbox/code)
 export MSYS_NO_PATHCONV=1
 
-IMAGE="${IMAGE:-collab-sandbox-python:0.1.0}"
+IMAGE="${IMAGE:-collab-sandbox-python:0.2.0}"
 SAMPLE_DIR="execution-service/runtime-images/python/samples"
 PASS=0
 FAIL=0

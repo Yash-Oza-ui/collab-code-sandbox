@@ -31,7 +31,7 @@ cd "$REPO_ROOT"
 export MANAGEMENT_HEALTH_SHOW_DETAILS="${MANAGEMENT_HEALTH_SHOW_DETAILS:-always}"
 # Build the Python runtime image used by DockerRunner.
 docker build \
-  -t collab-sandbox-python:0.1.0 \
+  -t collab-sandbox-python:0.2.0 \
   -f execution-service/runtime-images/python/Dockerfile \
   execution-service/runtime-images/python
 export COMPOSE_PROFILES="$(IFS=,; echo "${profiles[*]}")"

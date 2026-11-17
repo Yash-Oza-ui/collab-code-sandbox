@@ -16,6 +16,7 @@ import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Properties;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -32,8 +33,11 @@ import java.util.concurrent.atomic.AtomicLong;
 @Profile("!stub-runner")
 public class DockerRunner implements CodeRunner {
 
-    private static final String PYTHON_IMAGE = "collab-sandbox-python:0.1.0";
+    private static final String PYTHON_IMAGE = "collab-sandbox-python:0.2.0";
     private static final String PYTHON_EXECUTABLE = "python";
+    private static final long CONTAINER_STARTUP_GRACE_SECONDS = 30;
+
+    private record RunMetrics(double executionTimeMs, double peakMemoryMb, boolean timedOut) {}
 
     private final ExecutionLimitsProperties limits;
 
@@ -70,7 +74,7 @@ public class DockerRunner implements CodeRunner {
                         validationError,
                         2,
                         "non_zero_exit",
-                        elapsedMillis(start),
+                        0.0,
                         null
                 );
             }
@@ -90,12 +94,22 @@ public class DockerRunner implements CodeRunner {
             }
             writeRunFiles(spec, workspace);
 
+            Path metricsDir = workspace.resolve("metrics");
+            Files.createDirectories(metricsDir);
+            metricsDir.toFile().setReadable(true, false);
+            metricsDir.toFile().setWritable(true, false);
+            metricsDir.toFile().setExecutable(true, false);
+
             ProcessBuilder builder = new ProcessBuilder(
                     "docker", "run",
                     "--interactive",
                     "--network", "none",
                     "--name", containerName,
-                    "--user", "1001:1001",
+                    "--cap-drop=ALL",
+                    "--cap-add=SETUID",
+                    "--cap-add=SETGID",
+                    "--security-opt=no-new-privileges",
+                    "--user", "0:0",
                     "--memory", limits.getMemoryMb() + "m",
                     "--memory-swap", limits.getMemoryMb() + "m",
                     "--pids-limit", String.valueOf(limits.getPidsLimit()),
@@ -104,8 +118,13 @@ public class DockerRunner implements CodeRunner {
                     "--mount",
                     "type=bind,source=" + workspace.toAbsolutePath()
                             + ",target=/sandbox/code,readonly",
+                    "--mount",
+                    "type=bind,source=" + metricsDir.toAbsolutePath()
+                            + ",target=/sandbox/metrics",
                     PYTHON_IMAGE,
                     PYTHON_EXECUTABLE,
+                    "/usr/local/bin/collab-sandbox-runner",
+                    String.valueOf(limits.getWallTimeSeconds()),
                     "/sandbox/code/" + spec.getEntry()
             );
 
@@ -139,35 +158,41 @@ public class DockerRunner implements CodeRunner {
             }
 
             boolean finished = process.waitFor(
-                    limits.getWallTimeSeconds(),
+                    limits.getWallTimeSeconds() + CONTAINER_STARTUP_GRACE_SECONDS,
                     TimeUnit.SECONDS
             );
 
+            boolean infrastructureTimeout = !finished;
+
             if (!finished) {
                 stopContainer(containerName);
-                oomKilled = inspectOomKilled(containerName);
-
-                if (oomKilled) {
-                    timedOut = false;
-                    exitCode = 137;
-                } else {
-                    timedOut = true;
-                    exitCode = 124;
-                }
-
-                if (process.isAlive()) {
+                if (!process.waitFor(5, TimeUnit.SECONDS)) {
                     process.destroyForcibly();
                     process.waitFor();
                 }
-            } else {
-                exitCode = process.exitValue();
-                oomKilled = inspectOomKilled(containerName);
-
-                if (oomKilled) {
-                    timedOut = false;
-                    exitCode = 137;
-                }
             }
+
+            exitCode = process.exitValue();
+            oomKilled = inspectOomKilled(containerName);
+            copyRunMetrics(containerName, workspace);
+            RunMetrics metrics = readRunMetrics(workspace);
+            timedOut = metrics.timedOut();
+
+            if (oomKilled) {
+                exitCode = 137;
+                if (metrics.peakMemoryMb() == 0.0) {
+                    metrics = new RunMetrics(
+                            metrics.executionTimeMs() > 0.0 ? metrics.executionTimeMs() : elapsedMillis(start),
+                            limits.getMemoryMb(),
+                            metrics.timedOut()
+                    );
+                }
+            } else if (timedOut) {
+                exitCode = 124;
+            } else if (infrastructureTimeout) {
+                exitCode = 125;
+            }
+
 
             CapturedOutput stdout = stdoutFuture.join();
             CapturedOutput stderr = stderrFuture.join();
@@ -176,11 +201,15 @@ public class DockerRunner implements CodeRunner {
                     || stdout.truncated()
                     || stderr.truncated();
 
+            String resultStderr = infrastructureTimeout
+                    ? stderr.text() + "Docker runner did not finish within the container startup grace period.\n"
+                    : stderr.text();
+
             String failureKind = classifyFailure(
                     exitCode,
                     timedOut,
                     oomKilled,
-                    stderr.text()
+                    resultStderr
             );
 
             String failingModule = "compile_error".equals(failureKind)
@@ -189,10 +218,10 @@ public class DockerRunner implements CodeRunner {
 
             return new ExecutionResult(
                     stdout.text(),
-                    stderr.text(),
+                    resultStderr,
                     exitCode,
-                    elapsedMillis(start),
-                    0.0,
+                    metrics.executionTimeMs(),
+                    metrics.peakMemoryMb(),
                     timedOut,
                     oomKilled,
                     failureKind,
@@ -214,7 +243,7 @@ public class DockerRunner implements CodeRunner {
                     "Execution was interrupted.",
                     130,
                     "non_zero_exit",
-                    elapsedMillis(start),
+                    0.0,
                     null
             );
 
@@ -227,7 +256,7 @@ public class DockerRunner implements CodeRunner {
                     "Docker execution failed: " + detail,
                     125,
                     "non_zero_exit",
-                    elapsedMillis(start),
+                    0.0,
                     null
             );
 
@@ -506,6 +535,71 @@ public class DockerRunner implements CodeRunner {
         return "non_zero_exit";
     }
 
+    private void copyRunMetrics(String containerName, Path workspace) {
+        if (workspace == null) {
+            return;
+        }
+
+        Path directMetrics = workspace.resolve("metrics").resolve("run-metrics.properties");
+        if (Files.exists(directMetrics)) {
+            return;
+        }
+
+        Process copy = null;
+        try {
+            copy = new ProcessBuilder(
+                    "docker",
+                    "cp",
+                    containerName + ":/sandbox/metrics/run-metrics.properties",
+                    workspace.resolve("run-metrics.properties").toString()
+            )
+                    .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+                    .redirectError(ProcessBuilder.Redirect.DISCARD)
+                    .start();
+
+            if (!copy.waitFor(5, TimeUnit.SECONDS)) {
+                copy.destroyForcibly();
+            }
+        } catch (InterruptedException e) {
+            if (copy != null && copy.isAlive()) {
+                copy.destroyForcibly();
+            }
+            Thread.currentThread().interrupt();
+        } catch (IOException ignored) {
+            // The container may have been removed by Docker after a daemon failure.
+        }
+    }
+
+    private RunMetrics readRunMetrics(Path workspace) {
+        if (workspace == null) {
+            return new RunMetrics(0.0, 0.0, false);
+        }
+
+        Path metricsFile = workspace.resolve("metrics").resolve("run-metrics.properties");
+        if (!Files.exists(metricsFile)) {
+            metricsFile = workspace.resolve("run-metrics.properties");
+        }
+
+        Properties properties = new Properties();
+        try (InputStream input = Files.newInputStream(metricsFile)) {
+            properties.load(input);
+            double executionTimeMs = Double.parseDouble(
+                    properties.getProperty("execution_time_ms", "0"));
+            long peakMemoryBytes = Long.parseLong(
+                    properties.getProperty("peak_memory_bytes", "0"));
+            boolean timedOut = Boolean.parseBoolean(
+                    properties.getProperty("timed_out", "false"));
+
+            return new RunMetrics(
+                    Math.max(0.0, executionTimeMs),
+                    Math.max(0.0, peakMemoryBytes / (1024.0 * 1024.0)),
+                    timedOut
+            );
+        } catch (IOException | NumberFormatException ignored) {
+            return new RunMetrics(0.0, 0.0, false);
+        }
+    }
+
     private String resultMessage(
             int exitCode,
             boolean timedOut,
@@ -521,11 +615,11 @@ public class DockerRunner implements CodeRunner {
         }
 
         if ("compile_error".equals(failureKind)) {
-            return "Python reported a syntax or indentation error. Peak memory measurement is unavailable.";
+            return "Python reported a syntax or indentation error.";
         }
 
         if (exitCode != 0) {
-            return "Program exited with a non-zero status. Peak memory measurement is unavailable.";
+            return "Program exited with a non-zero status.";
         }
 
         return null;
@@ -564,7 +658,9 @@ public class DockerRunner implements CodeRunner {
         try {
             stop = new ProcessBuilder(
                     "docker",
-                    "kill",
+                    "stop",
+                    "--time",
+                    "2",
                     containerName
             ).start();
 

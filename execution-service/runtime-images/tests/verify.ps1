@@ -9,7 +9,7 @@
 
 [CmdletBinding()]
 param(
-    [string]$Image = "collab-sandbox-python:0.1.0"
+    [string]$Image = "collab-sandbox-python:0.2.0"
 )
 
 $ErrorActionPreference = "Continue"
