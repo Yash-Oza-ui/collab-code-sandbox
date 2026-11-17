@@ -429,9 +429,15 @@ They are **never hard-coded** in Java source (DR3). To tune limits per host or e
 | `pids-limit`               | 64            | NFR4.3       | Max processes/threads inside container. Fork bombs are contained within the sandbox. |
 | `max-output-bytes`         | 1 048 576     | NFR4.4       | Combined stdout + stderr cap (1 MiB). When exceeded: `output_truncated: true`. |
 | `compile-timeout-seconds`  | 10            | NFR4.5       | Separate compile-stage timeout for compiled languages.               |
-| `max-request-body-bytes`   | 1 048 576     | T-06 §2      | Maximum size of a single run request body (1 MiB).                   |
+| `max-request-body-bytes`   | 1 048 576     | T-06 §2 / DR5| Maximum size of a single run request body (1 MiB).                   |
 | `max-queue-length`         | 10            | FR16 / US-11 | Max concurrent and waiting runs before refusing new runs with 503.   |
 | `queue-retry-after-seconds`| 5             | FR16 / US-11 | Seconds sent in `Retry-After` header and error body on queue full.   |
+
+> **Per-Host Configuration (DR3 / US-16):**
+> Every limit listed above is configurable per deployment host via environment variables
+> (e.g. `APP_EXECUTION_LIMITS_WALL_TIME_SECONDS=3`) or custom application profile files.
+> Nothing is hard-coded in Java source. Final host-specific values are recorded only after
+> the deployment host is fixed and tested. See [docs/host-config.md](../docs/host-config.md) for the master DR3 limits table.
 
 ---
 
