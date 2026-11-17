@@ -1,4 +1,4 @@
-"""Analysis router implementing T-18 v2 contract (FR12, FR35, FR36, FR39, US-17, US-65..US-76).
+"""Analysis router implementing T-18 v2 contract (FR12, FR12.4, FR35, FR36, FR39, US-17, US-21, US-65..US-76).
 
 Endpoints:
 - POST /v1/analyses/complexity (Task 1: Time complexity, rules-first static analysis, patch verification, AI fallback)
@@ -341,7 +341,7 @@ async def explain_crash(payload: CrashExplanationRequest, request: Request) -> C
 
     summary = f"Detected {error_type} at line {line_number}."
 
-    # 3. Controlled AI pipeline (US-17, FR35, NFR5.3, NFR5.2, US-22, US-75)
+    # 3. Controlled AI pipeline (US-17, US-21, FR12.4, FR35, NFR5.3, NFR5.2, US-22, US-75)
     if payload.consent is not True:
         record_fallback(payload.room_id)
         ai_step = CrashAIStep(
