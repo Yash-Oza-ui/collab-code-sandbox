@@ -7,6 +7,7 @@ import type * as Y from 'yjs'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import RoomPage from './RoomPage'
 import { USER_COLORS } from './userColor'
+import { ownerTokenKey } from './createRoom'
 
 vi.mock('@monaco-editor/react', () => ({
   default: () => <div data-testid="mock-monaco-editor" />,
@@ -318,6 +319,34 @@ describe('RoomPage display-name and colour presence join lifecycle', () => {
 
     expect(container.textContent).toContain('Choose your display name')
     expect(container.querySelector('[data-testid="mock-monaco-editor"]')).toBeNull()
+  })
+
+  it('resumes a saved join when reading the owner token throws', async () => {
+    const sessionId = '10000000-0000-4000-8000-000000000001'
+    sessionStorage.setItem(`collab_room_name:room-demo:${sessionId}`, 'Alice')
+    const ownerTokenLookup = vi.spyOn(localStorage, 'getItem').mockImplementation(() => {
+      throw new DOMException('Storage access denied', 'SecurityError')
+    })
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    root = createRoot(container)
+
+    try {
+      await act(async () => {
+        root?.render(
+          <RoomPage wsOptions={{ WebSocketClass: createRelaySocketClass(relay), sessionId }} />,
+        )
+      })
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 45))
+      })
+
+      expect(ownerTokenLookup).toHaveBeenCalledWith(ownerTokenKey('room-demo'))
+      expect(container.querySelector('[data-testid="mock-monaco-editor"]')).not.toBeNull()
+      expect(container.querySelector('[data-testid="room-user-badge"]')?.textContent).toContain('You: Alice')
+    } finally {
+      ownerTokenLookup.mockRestore()
+    }
   })
 
   it('shows an invalid-link error when the room ID is missing', async () => {

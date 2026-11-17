@@ -68,6 +68,15 @@ export interface RoomPageProps {
 
 export type RoomJoinStatus = 'prompt' | 'joining' | 'joined' | 'refused' | 'error'
 
+function readOwnerToken(roomId: string): string | undefined {
+  try {
+    return localStorage.getItem(ownerTokenKey(roomId)) || undefined
+  } catch {
+    // Storage access may be disabled. The join can proceed without a token.
+    return undefined
+  }
+}
+
 // Reads the room id from the URL (T-06 section 3.2: /room/{room_id}).
 // Manages the Y.Doc lifecycle inside effect setup/cleanup (T-01).
 // Manages the Yjs Awareness lifecycle and user presence colour assignment (US-05 / FR14).
@@ -346,18 +355,20 @@ export default function RoomPage(props: RoomPageProps = {}) {
       // A refresh creates a new document, but must rejoin with the same identity
       // before opening document sockets. Never restore a name for another room.
       if (resumeNameKey && !pendingNameRef.current) {
+        let savedName: string | null = null
         try {
-          const savedName = sessionStorage.getItem(resumeNameKey)
-          if (savedName) {
-            pendingNameRef.current = savedName
-            setPendingName(savedName)
-            setJoinStatus('joining')
-            joinStatusRef.current = 'joining'
-            const token = localStorage.getItem(ownerTokenKey(roomId))
-            conn.join(savedName, token ?? undefined)
-          }
+          savedName = sessionStorage.getItem(resumeNameKey)
         } catch {
           // Storage may be disabled; the manual join flow remains available.
+        }
+
+        if (savedName) {
+          const ownerToken = readOwnerToken(roomId)
+          pendingNameRef.current = savedName
+          setPendingName(savedName)
+          setJoinStatus('joining')
+          joinStatusRef.current = 'joining'
+          conn.join(savedName, ownerToken)
         }
       }
       wsCleanup = () => {
@@ -406,17 +417,7 @@ export default function RoomPage(props: RoomPageProps = {}) {
     setJoinStatus('joining')
     joinStatusRef.current = 'joining'
 
-    let ownerToken: string | undefined
-    if (roomId && typeof localStorage !== 'undefined') {
-      try {
-        const stored = localStorage.getItem(ownerTokenKey(roomId))
-        if (stored) ownerToken = stored
-      } catch {
-        // ignore localStorage access issues
-      }
-    }
-
-    connRef.current?.join(name, ownerToken)
+    connRef.current?.join(name, roomId ? readOwnerToken(roomId) : undefined)
   }
 
   async function handleMakeObserver(member: RosterMember) {
