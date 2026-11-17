@@ -39,23 +39,24 @@ app:
     internal-token: ${INTERNAL_API_TOKEN:}
 
   # ---------------------------------------------------------------
-  # Resource limits for sandboxed code execution (DR3, NFR4)
-  # Values are PLACEHOLDERS – real limits are set in Sprint 2 (NFR4).
-  # Structure is final and must not be hard-coded in Java source.
+  # Resource limits for sandboxed code execution (DR3, NFR4, US-13)
+  # Values are configured defaults; never hard-coded in Java (DR3).
   # ---------------------------------------------------------------
   execution:
     limits:
       # NFR4.1 – maximum wall-clock time per run (seconds)
-      wall-time-seconds: 5          # PLACEHOLDER
-      # NFR4.2 – maximum memory per container (megabytes)
-      memory-mb: 128                # PLACEHOLDER
+      wall-time-seconds: 5
+      # NFR4.2 – maximum memory per container (megabytes, swap disabled)
+      memory-mb: 128
       # NFR4.3 – maximum number of processes / threads inside the container
-      pids-limit: 64                # PLACEHOLDER
+      pids-limit: 64
       # NFR4.4 – maximum total output (stdout + stderr combined, bytes)
-      max-output-bytes: 1048576     # PLACEHOLDER (1 MiB)
+      max-output-bytes: 1048576  # 1 MiB
+      # NFR4.5 – compile-stage timeout for compiled languages (seconds)
+      compile-timeout-seconds: 10
       # Maximum size of a single run request body (bytes)
-      max-request-body-bytes: 1048576  # PLACEHOLDER (1 MiB, T-06 section 2)
+      max-request-body-bytes: 1048576  # 1 MiB (T-06 section 2)
       # FR16 / US-11 – runs waiting or running at once; one more is refused with QUEUE_FULL
-      max-queue-length: 10          # PLACEHOLDER (tune per host in US-16 / DR3)
+      max-queue-length: 10
       # FR16 – seconds sent in Retry-After and error.retry_after_seconds
-      queue-retry-after-seconds: 5  # PLACEHOLDER
+      queue-retry-after-seconds: 5
