@@ -1354,6 +1354,7 @@ The relay decides from the **first two bytes** of a binary frame and never parse
 | `4405` | Unknown `doc_id` or `module_id` | V2.5 |
 | `4406` | Document socket opened before `join` | V2.5 |
 | `4410` | Room closed (FR31.2, FR32) | V2.5 |
+| `4411` | Room link regenerated — reconnect with the new link (US-28) | V2.18 |
 | `1009` | Binary frame larger than 1 MiB | v0 §3.6 |
 
 ### All HTTP error codes in one place
@@ -1496,6 +1497,91 @@ Rules:
 
 ---
 
+## V2.18 Remove, re-admit and regenerate link (US-28) — Proposed
+
+Added so that US-28 has the three Host controls to build on. The join refusal (`USER_BLOCKED`) and the close code `4403` for a removed user are already defined in V2.3; this section adds the Host actions that drive them. The block list is **per room, keyed by the private `session_id`** (never shown in `roster` or any broadcast, V2.3) and is deleted with the room (US-56). Per CR04, automatic reconnection (FR11) never gets around the block.
+
+All three are Host-only actions and follow the caller-identity rule of V2.6: the caller's `X-Session-Id` plus a valid `X-Owner-Token`. Without a valid owner token the answer is `403 NOT_OWNER`. The Host **removes and re-admits by `member_id`**; the private `session_id` is never put in a URL, body, log or broadcast.
+
+### Remove a member
+
+```
+POST http://localhost:8081/v1/rooms/{room_id}/members/{member_id}/remove
+X-Session-Id: <caller-session-id>
+X-Owner-Token: <owner-token>
+```
+
+The server, in one step:
+1. closes that member's control and document sockets with close code `4403` (V2.3, V2.5);
+2. adds the member's `session_id` to the room's block list, keeping it addressable by the `member_id` the member had (so re-admit can name that exact person);
+3. drops them from the roster and sends a new `roster` to the room (V2.4).
+
+A later connection from the same `session_id` — a reconnect (FR11), a refresh, a new tab, or a different display name — is refused at `join` with `join-refused` reason `USER_BLOCKED` (V2.3). The block is on the session, not the name, so renaming does not bypass it.
+
+Response `200` (`docs/examples/v2-member-remove-response.json`):
+
+```json
+{ "member_id": "m_4b19d2", "status": "removed" }
+```
+
+Rules:
+
+1. The Host cannot remove themselves and cannot remove another Host — either is `422 INVALID_REQUEST`.
+2. An unknown `member_id` is `404 MEMBER_NOT_FOUND`.
+3. The block holds until the Host re-admits that member (below) or regenerates the link.
+
+### Re-admit a member
+
+```
+POST http://localhost:8081/v1/rooms/{room_id}/members/{member_id}/readmit
+X-Session-Id: <caller-session-id>
+X-Owner-Token: <owner-token>
+```
+
+`member_id` is the id the member had when they were removed; the block list keeps it addressable. The server removes **only that one session** from the block list. The person can then open the same link again and `join`, coming back as a new `participant` with a fresh `member_id` (every new connection gets a new `member_id`). Re-admit opens no socket by itself — the person reconnects.
+
+Response `200` (`docs/examples/v2-member-readmit-response.json`):
+
+```json
+{ "member_id": "m_4b19d2", "status": "readmitted" }
+```
+
+Rules:
+
+1. `member_id` must be one currently in the block list; otherwise `404 MEMBER_NOT_FOUND`.
+2. Other blocked sessions stay blocked.
+
+### Regenerate the room link
+
+```
+POST http://localhost:8081/v1/rooms/{room_id}/regenerate-link
+X-Session-Id: <caller-session-id>
+X-Owner-Token: <owner-token>
+```
+
+Burns the current link. The server:
+
+1. generates a **new `room_id`** under the NFR16 rules (V2.1: at least 128 bits from a secure random generator, base64url, 22 characters) and moves the room's state — members, modules, owner — to it;
+2. closes every socket on the old id with close code **`4411`** (link regenerated), so each client knows to reconnect with the new link;
+3. the old id stops resolving: a later connect to it is closed `4404` (V2.2) and creates nothing;
+4. **clears the block list** — a new link is a fresh start.
+
+Response `200` (`docs/examples/v2-regenerate-link-response.json`):
+
+```json
+{ "room_id": "aB3dEfG7hIjK9LmN0pQrStU", "status": "regenerated" }
+```
+
+Rules:
+
+1. The Host keeps the same `owner_token`; only the room id — the link secret — changes. The owner token is never in the link (T-10, §8).
+2. Members on the old id are closed with `4411` and rejoin with the new link, which the Host shares out of band. Only the old link is burned; the room, its modules and ownership carry over.
+3. Because the old link no longer opens the room, a leaked link is neutralised — this is the owner's answer to a link that got out (FR9.6).
+
+Errors for all three (V2.12): `404 ROOM_NOT_FOUND`, `404 SESSION_NOT_FOUND` (the caller has not joined), `404 MEMBER_NOT_FOUND` (the remove / re-admit target), `403 NOT_OWNER`, `422 INVALID_REQUEST`.
+
+---
+
 ## Changes
 
 | Version | Date | Change |
@@ -1509,6 +1595,7 @@ Rules:
 | v2 (1–7, review 2) | 1 Nov 2026 | Second review pass (#79): public **`member_id`** added for `roster`, module `owner_member_id`/`writers` and all REST targets, with `session_id` kept **private to the browser** (closes the impersonation hole); module permissions corrected to Requirements v2 — rename/delete/transfer **owner only** (FR21.4), grant/revoke write **owner or Host** (FR22.1), set entry file **Host only** (FR20.3), `approve` sets the owner (FR21.2), create is always a pending request (FR21.1); REST **caller identity** via `X-Session-Id` (+ `X-Owner-Token` for Host) and **CORS** for `CLIENT_ORIGIN`; `PATCH` single-field rule; socket closed after `join-refused` (except `APPROVAL_PENDING`); full control-socket message list; `4406` not-joined close code; `can_edit` omitted in Open mode. |
 | v2 (decisions 8–15) | 1 Nov 2026 | Decisions 8–15 added (T-17, #61, `docs/T-17-contracts-v2-runs-errors`): run `source` object and snapshot read (V2.8), run result fields (V2.9), visibility, `audience` and share (V2.10), permission lookup (V2.11), permission errors, `edit-rejected` and every error and close code in one table (V2.12), `analysis-result` replacing `anomaly-warning` and `ai-explanation` (V2.13), internal endpoint codes (V2.14), carried T-06 items (V2.15). Differences from Backlog v2 §6.1 are listed before V2.8. Corrections in decisions 1–7: example tokens match the example files; caller identity limited to module operations; `pending` added to the `module-updated` example; stable `member_id` stated; owner optional on approve; `analysis-result` added to the control-socket list; owner check answers an unknown room with 404. No v0/v1 text edited. |
 | v2 (member role) | 1 Nov 2026 | V2.17 added: `PATCH /v1/rooms/{room_id}/members/{member_id}` makes a guest an Observer and back (US-27), new code `MEMBER_NOT_FOUND`. CORS methods added to V2.6. Observer role removed from the undecided list in V2.15. |
+| v2 (remove / re-admit) | 17 Nov 2026 | V2.18 added (US-28): `POST /v1/rooms/{room_id}/members/{member_id}/remove` and `/readmit`, and `POST /v1/rooms/{room_id}/regenerate-link`. Session-keyed block list; re-admit by the removed member's `member_id`; regenerate moves the room to a new NFR16 id, clears the block list and closes old sockets with new code `4411`. |
 
 ### Runner infrastructure error (v1 proposal addition)
 
