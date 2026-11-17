@@ -1,7 +1,7 @@
 import * as decoding from 'lib0/decoding'
 import * as encoding from 'lib0/encoding'
 import * as syncProtocol from 'y-protocols/sync'
-import type * as Y from 'yjs'
+import * as Y from 'yjs'
 import {
   applyAwarenessUpdate,
   encodeAwarenessUpdate,
@@ -420,10 +420,15 @@ export function connectAwarenessWs(
   let controlWs: WebSocket | null = null
   let docWs: WebSocket | null = null
   const moduleSockets = new Map<string, WebSocket>()
+  // Production RoomPage does not supply moduleDocs. Own inactive module docs here
+  // so every approved Open-mode module can participate in Yjs resynchronization.
+  const managedModuleDocs = new Map<string, Y.Doc>()
+  const getModuleDoc = (id: string) => moduleDocs?.get(id) ?? managedModuleDocs.get(id)
+  const allModuleDocs = () => new Map([...managedModuleDocs, ...(moduleDocs ?? new Map<string, Y.Doc>())])
   const moduleUpdateHandlers = new Map<string, (update: Uint8Array, origin: unknown) => void>()
   const closeModuleSockets = () => {
     for (const [id, socket] of moduleSockets) {
-      const moduleDoc = moduleDocs?.get(id)
+      const moduleDoc = getModuleDoc(id)
       const handler = moduleUpdateHandlers.get(id)
       if (moduleDoc && handler) moduleDoc.off('update', handler)
       socket.onopen = null
@@ -438,8 +443,8 @@ export function connectAwarenessWs(
 
   /** Open every explicitly registered local Y.Doc, not just the editor's active module. */
   const openModuleSockets = (activeId: string) => {
-    if (!moduleDocs || isDestroyed) return
-    for (const [id, moduleDoc] of moduleDocs) {
+    if (isDestroyed) return
+    for (const [id, moduleDoc] of allModuleDocs()) {
       if (!id || id === 'main' || id === activeId || moduleSockets.has(id)) continue
       const socket = new WebSocketClass!(buildDocumentWebSocketUrl(syncWsUrl, roomId, id, sessionId))
       socket.binaryType = 'arraybuffer'
@@ -643,49 +648,53 @@ export function connectAwarenessWs(
     const roomMode = joinedMsg?.mode ? String(joinedMsg.mode).toLowerCase() : undefined
 
     if (roomMode === 'pair') {
-      // Pair mode strictly requires 'main' (T-17 V2.5 / DocumentHandler)
       resolvedDocId = 'main'
     } else if (roomMode === 'open') {
-      // Open mode requires a valid registered module_id
+      // Refresh the approved module list after every successful control join.
+      // Never open document sockets before the server confirms membership.
+      try {
+        const httpBase = syncWsUrl.replace(/^ws/, 'http').replace(/\/ws\/rooms.*$/, '')
+        const res = await fetch(`${httpBase}/v1/rooms/${encodeURIComponent(roomId)}/modules`, {
+          headers: { 'X-Session-Id': sessionId },
+        })
+        if (!res.ok) throw new Error('Could not retrieve approved modules')
+        const modules = (await res.json()) as Array<{
+          module_id: string
+          is_entry?: boolean
+          pending?: boolean
+        }>
+        if (!Array.isArray(modules)) throw new Error('Invalid module response')
+        const approved = modules.filter((m) => m.module_id && !m.pending)
+        const approvedIds = new Set(approved.map((m) => m.module_id))
+        // Revoke inactive modules that are no longer approved.
+        for (const [id, existing] of managedModuleDocs) {
+          if (!approvedIds.has(id)) {
+            managedModuleDocs.delete(id)
+            existing.destroy()
+          }
+        }
+        for (const module of approved) {
+          if (!moduleDocs?.has(module.module_id) && !managedModuleDocs.has(module.module_id)) {
+            managedModuleDocs.set(module.module_id, new Y.Doc())
+          }
+        }
+        if (!approvedIds.has(resolvedDocId)) {
+          resolvedDocId = approved.find((m) => m.is_entry)?.module_id ??
+            approved[0]?.module_id ?? 'main'
+        }
+      } catch {
+        // Do not guess additional module IDs when the approved list is unavailable.
+        // A known explicitly selected module may still reconnect.
+      }
       if (resolveDocId && joinedMsg) {
         try {
           const customId = await resolveDocId(joinedMsg)
-          if (customId) {
-            resolvedDocId = customId
-          }
+          if (customId) resolvedDocId = customId
         } catch {
-          // fallback
-        }
-      } else if (!resolvedDocId || resolvedDocId === 'main') {
-        try {
-          const httpBase = syncWsUrl.replace(/^ws/, 'http').replace(/\/ws\/rooms.*$/, '')
-          const res = await fetch(`${httpBase}/v1/rooms/${encodeURIComponent(roomId)}/modules`, {
-            headers: sessionId ? { 'X-Session-Id': sessionId } : {},
-          })
-          if (res.ok) {
-            const modules = (await res.json()) as Array<{
-              module_id: string
-              is_entry?: boolean
-              pending?: boolean
-            }>
-            if (Array.isArray(modules) && modules.length > 0) {
-              const active =
-                modules.find((m) => m.is_entry && !m.pending) ??
-                modules.find((m) => !m.pending) ??
-                modules[0]
-              if (active?.module_id) {
-                resolvedDocId = active.module_id
-              }
-            }
-          }
-        } catch {
-          // ignore fetch error
+          // Keep the server-approved entry module.
         }
       }
-    } else if (
-      !resolvedDocId ||
-      (roomMode === 'open' && resolvedDocId === 'main')
-    ) {
+    } else if (!resolvedDocId) {
       resolvedDocId = 'main'
     }
 
@@ -964,6 +973,8 @@ export function connectAwarenessWs(
     }
 
     closeDocumentSocket()
+    for (const moduleDoc of managedModuleDocs.values()) moduleDoc.destroy()
+    managedModuleDocs.clear()
 
     if (controlWs) {
       const activeControlWs = controlWs
