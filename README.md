@@ -65,6 +65,8 @@ flowchart TD
 
 The service folders are scaffold locations; their presence does not mean the services are implemented.   Platform features (room and owner state, removed-user block list, GitHub login and import, history retention) live in `sync-service/`; AI consent and cost cap stay in `ai-ml-service/`. See [docs/decisions/platform-home.md](docs/decisions/platform-home.md).
 
+For Docker execution setup and local development instructions, see [execution-service/README.md](execution-service/README.md).
+
 ---
 
 ## 📄 Project documents
