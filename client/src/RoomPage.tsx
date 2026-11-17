@@ -108,6 +108,8 @@ export default function RoomPage(props: RoomPageProps = {}) {
   const awarenessInstanceRef = useRef<Awareness | null>(null)
   const connRef = useRef<AwarenessWsConnection | null>(null)
   const pendingNameRef = useRef<string | null>(null)
+  // A room-specific name is safe to retain; the session ID remains stable separately.
+  const resumeNameKey = roomId ? `collab_room_name:${roomId}` : null
   const joinStatusRef = useRef<RoomJoinStatus>('prompt')
   const onDisplayNameAcceptedRef = useRef(onDisplayNameAccepted)
   const bindingRef = useRef<MonacoBinding | null>(null)
@@ -228,6 +230,9 @@ export default function RoomPage(props: RoomPageProps = {}) {
           setServerError(null)
           setJoinStatus('joined')
           joinStatusRef.current = 'joined'
+          if (resumeNameKey) {
+            try { sessionStorage.setItem(resumeNameKey, name) } catch { /* storage disabled */ }
+          }
           onDisplayNameAcceptedRef.current?.(name, color)
         },
         onRoster: (roster) => {
@@ -255,6 +260,9 @@ export default function RoomPage(props: RoomPageProps = {}) {
           setReconnecting(false)
           setJoinStatus('refused')
           joinStatusRef.current = 'refused'
+          if (resumeNameKey) {
+            try { sessionStorage.removeItem(resumeNameKey) } catch { /* storage disabled */ }
+          }
         },
         onJoinTimeout: () => {
           if (joinStatusRef.current === 'joining') {
@@ -333,6 +341,23 @@ export default function RoomPage(props: RoomPageProps = {}) {
         },
       })
       connRef.current = conn
+      // A refresh creates a new document, but must rejoin with the same identity
+      // before opening document sockets. Never restore a name for another room.
+      if (resumeNameKey && !pendingNameRef.current) {
+        try {
+          const savedName = sessionStorage.getItem(resumeNameKey)
+          if (savedName) {
+            pendingNameRef.current = savedName
+            setPendingName(savedName)
+            setJoinStatus('joining')
+            joinStatusRef.current = 'joining'
+            const token = localStorage.getItem(ownerTokenKey(roomId))
+            conn.join(savedName, token ?? undefined)
+          }
+        } catch {
+          // Storage may be disabled; the manual join flow remains available.
+        }
+      }
       wsCleanup = () => {
         conn.destroy()
         if (connRef.current === conn) {
@@ -360,7 +385,7 @@ export default function RoomPage(props: RoomPageProps = {}) {
         delete (window as unknown as { awareness?: Awareness }).awareness
       }
     }
-  }, [roomId, isInvalidRoomId, docRef, externalAwarenessRef, propDocId, moduleDocs, resolveDocId, wsOptions, showRunResult])
+  }, [roomId, isInvalidRoomId, docRef, externalAwarenessRef, propDocId, moduleDocs, resolveDocId, wsOptions, showRunResult, resumeNameKey])
 
   // Keep presence updated in awareness whenever displayName and userColor are set or change
   useEffect(() => {
