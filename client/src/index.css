@@ -378,3 +378,17 @@ body {
   font-size: 0.85em;
   font-weight: 600;
 }
+
+.run-output-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1rem;
+  margin-bottom: 0.5rem;
+  font-size: 0.85rem;
+  opacity: 0.85;
+}
+
+.run-output-notice {
+  margin-bottom: 0.5rem;
+  font-size: 0.85rem;
+}

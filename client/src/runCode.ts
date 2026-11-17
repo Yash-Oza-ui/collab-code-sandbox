@@ -288,6 +288,21 @@ export function validateRunResponse(
   return { valid: true, data }
 }
 
+/**
+ * Validates a `run-result` text frame received on the control socket (T-17 section 3.6).
+ * The frame is the run result of section 4.2 plus `type: "run-result"`. A frame for another
+ * room, or one that fails the same checks as the HTTP response, is rejected.
+ */
+export function parseRunResultFrame(
+  raw: unknown,
+  expectedRoomId?: string,
+): { valid: true; data: RunResponseData } | { valid: false; error: string } {
+  if (!raw || typeof raw !== 'object' || (raw as Record<string, unknown>).type !== 'run-result') {
+    return { valid: false, error: 'Not a run-result frame.' }
+  }
+  return validateRunResponse(raw, expectedRoomId ? { roomId: expectedRoomId } : undefined)
+}
+
 /** Default execution timeout: 15 seconds (accommodates 5s execution limit + container scheduling) */
 export const DEFAULT_RUN_TIMEOUT_MS = 15000
 

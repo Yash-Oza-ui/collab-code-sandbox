@@ -30,6 +30,8 @@ export default defineConfig({
         url: 'http://localhost:3000',
       },
     },
+    // Gives every Node version a working localStorage (see the file for why).
+    setupFiles: ['./src/vitest.setup.ts'],
     server: {
       deps: {
         inline: ['y-monaco'],

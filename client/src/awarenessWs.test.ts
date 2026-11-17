@@ -1868,4 +1868,56 @@ describe('T-20 WebSocket connection and multi-client awareness synchronization',
       docGuest.destroy()
     }
   })
+  it('delivers a run-result control frame to every connected participant (US-08 / T-17 section 3.6)', async () => {
+    const relay = new TestRelay()
+    const docA = new Y.Doc()
+    const docB = new Y.Doc()
+    const received: Record<string, string[]> = { A: [], B: [] }
+    const connections: Array<{ destroy: () => void }> = []
+
+    try {
+      for (const [label, doc, name, sessionId] of [
+        ['A', docA, 'Alice', '11111111-1111-4111-8111-111111111111'],
+        ['B', docB, 'Bob', '22222222-2222-4222-8222-222222222222'],
+      ] as const) {
+        connections.push(
+          connectAwarenessWs({
+            roomId: 'test-run-result-room',
+            displayName: name,
+            doc,
+            awareness: createAwareness(doc),
+            syncWsUrl: 'ws://localhost:8081/ws/rooms',
+            sessionId,
+            WebSocketClass: function (url: string) {
+              return relay.createClient(url)
+            } as unknown as typeof WebSocket,
+            onRunResult: (msg) => {
+              received[label].push(msg.request_id)
+            },
+          }),
+        )
+      }
+
+      await new Promise((r) => setTimeout(r, 40))
+
+      const frame = JSON.stringify({
+        type: 'run-result',
+        request_id: '0b9d2f3e-7a41-4c58-9e1b-5d3c8a6f2e10',
+        room_id: 'test-run-result-room',
+        stdout: 'hello\n',
+      })
+      for (const [client, meta] of relay.controlClients.entries()) {
+        if (meta.roomId === 'test-run-result-room') client.receiveText(frame)
+      }
+
+      await new Promise((r) => setTimeout(r, 10))
+
+      expect(received.A).toEqual(['0b9d2f3e-7a41-4c58-9e1b-5d3c8a6f2e10'])
+      expect(received.B).toEqual(['0b9d2f3e-7a41-4c58-9e1b-5d3c8a6f2e10'])
+    } finally {
+      for (const c of connections) c.destroy()
+      docA.destroy()
+      docB.destroy()
+    }
+  })
 })

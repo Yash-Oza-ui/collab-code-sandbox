@@ -7,6 +7,7 @@ import {
   getLanguageExtension,
   getLanguageOption,
   isLanguageSupported,
+  parseRunResultFrame,
   validateRunResponse,
 } from './runCode'
 
@@ -437,5 +438,43 @@ describe('executeRun API client (Fix 1, 2, 3)', () => {
       expect(result.code).toBe('SERVICE_UNAVAILABLE')
       expect(result.error).toContain('Execution service is unavailable')
     }
+  })
+})
+
+describe('parseRunResultFrame (US-08, T-17 section 3.6)', () => {
+  const frame = {
+    type: 'run-result',
+    request_id: '0b9d2f3e-7a41-4c58-9e1b-5d3c8a6f2e10',
+    room_id: 'room-demo-01',
+    language: 'python',
+    stdout: 'hello\n',
+    stderr: '',
+    exit_code: 0,
+    execution_time_ms: 38,
+    peak_memory_mb: 7.9,
+    timed_out: false,
+    oom_killed: false,
+    failure_kind: null,
+    output_truncated: false,
+    message: null,
+    runner: { member_id: 'm_7a3c9f', display_name: 'Ada' },
+    ran_at: '2026-11-01T10:20:05.087Z',
+    visibility: 'room',
+  }
+
+  it('accepts a valid run-result frame for the current room', () => {
+    const parsed = parseRunResultFrame(frame, 'room-demo-01')
+    expect(parsed.valid).toBe(true)
+    if (parsed.valid) {
+      expect(parsed.data.stdout).toBe('hello\n')
+      expect(parsed.data.runner?.display_name).toBe('Ada')
+    }
+  })
+
+  it('rejects a frame of another type, for another room, or with a missing field', () => {
+    expect(parseRunResultFrame({ ...frame, type: 'roster' }, 'room-demo-01').valid).toBe(false)
+    expect(parseRunResultFrame(frame, 'some-other-room').valid).toBe(false)
+    expect(parseRunResultFrame({ ...frame, stdout: undefined }, 'room-demo-01').valid).toBe(false)
+    expect(parseRunResultFrame(null, 'room-demo-01').valid).toBe(false)
   })
 })
