@@ -426,19 +426,22 @@ export function connectAwarenessWs(
   const getModuleDoc = (id: string) => moduleDocs?.get(id) ?? managedModuleDocs.get(id)
   const allModuleDocs = () => new Map([...managedModuleDocs, ...(moduleDocs ?? new Map<string, Y.Doc>())])
   const moduleUpdateHandlers = new Map<string, (update: Uint8Array, origin: unknown) => void>()
+  const closeModuleSocket = (id: string) => {
+    const socket = moduleSockets.get(id)
+    if (!socket) return
+    const moduleDoc = getModuleDoc(id)
+    const handler = moduleUpdateHandlers.get(id)
+    if (moduleDoc && handler) moduleDoc.off('update', handler)
+    moduleUpdateHandlers.delete(id)
+    moduleSockets.delete(id)
+    socket.onopen = null
+    socket.onmessage = null
+    socket.onclose = null
+    socket.onerror = null
+    if (socket.readyState === WS_OPEN || socket.readyState === WS_CONNECTING) socket.close()
+  }
   const closeModuleSockets = () => {
-    for (const [id, socket] of moduleSockets) {
-      const moduleDoc = getModuleDoc(id)
-      const handler = moduleUpdateHandlers.get(id)
-      if (moduleDoc && handler) moduleDoc.off('update', handler)
-      socket.onopen = null
-      socket.onmessage = null
-      socket.onclose = null
-      socket.onerror = null
-      if (socket.readyState === WS_OPEN || socket.readyState === WS_CONNECTING) socket.close()
-    }
-    moduleSockets.clear()
-    moduleUpdateHandlers.clear()
+    for (const id of [...moduleSockets.keys()]) closeModuleSocket(id)
   }
 
   /** Open every explicitly registered local Y.Doc, not just the editor's active module. */
@@ -650,6 +653,7 @@ export function connectAwarenessWs(
     if (roomMode === 'pair') {
       resolvedDocId = 'main'
     } else if (roomMode === 'open') {
+      let approvedIds: Set<string> | null = null
       // Refresh the approved module list after every successful control join.
       // Never open document sockets before the server confirms membership.
       try {
@@ -665,8 +669,11 @@ export function connectAwarenessWs(
         }>
         if (!Array.isArray(modules)) throw new Error('Invalid module response')
         const approved = modules.filter((m) => m.module_id && !m.pending)
-        const approvedIds = new Set(approved.map((m) => m.module_id))
-        // Revoke inactive modules that are no longer approved.
+        approvedIds = new Set(approved.map((m) => m.module_id))
+        // Close revoked sockets and detach listeners before destroying their docs.
+        for (const id of [...moduleSockets.keys()]) {
+          if (!approvedIds.has(id)) closeModuleSocket(id)
+        }
         for (const [id, existing] of managedModuleDocs) {
           if (!approvedIds.has(id)) {
             managedModuleDocs.delete(id)
@@ -689,11 +696,13 @@ export function connectAwarenessWs(
       if (resolveDocId && joinedMsg) {
         try {
           const customId = await resolveDocId(joinedMsg)
-          if (customId) resolvedDocId = customId
+          if (customId && approvedIds?.has(customId)) resolvedDocId = customId
         } catch {
           // Keep the server-approved entry module.
         }
       }
+      // Never connect an Open-mode document that the server did not approve.
+      if (approvedIds && !approvedIds.has(resolvedDocId)) resolvedDocId = ''
     } else if (!resolvedDocId) {
       resolvedDocId = 'main'
     }
