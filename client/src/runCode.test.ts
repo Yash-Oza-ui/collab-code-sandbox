@@ -468,6 +468,40 @@ describe('parseRunResultFrame (US-08, T-17 section 3.6)', () => {
     if (parsed.valid) {
       expect(parsed.data.stdout).toBe('hello\n')
       expect(parsed.data.runner?.display_name).toBe('Ada')
+      expect(parsed.data.runner?.member_id).toBe('m_7a3c9f')
+      expect(parsed.data.ran_at).toBe('2026-11-01T10:20:05.087Z')
+    }
+  })
+
+  it('preserves saved_versions in V2.9 run-result frames (US-50 / FR26)', () => {
+    const openFrame = {
+      ...frame,
+      saved_versions: [
+        {
+          module_id: 'mod_1',
+          name: 'main.py',
+          version: 4,
+          saved_by: { member_id: 'm_ada', display_name: 'Ada' },
+          saved_at: '2026-11-01T10:12:04.118Z',
+        },
+        {
+          module_id: 'mod_2',
+          name: 'helper.py',
+          version: 2,
+          saved_by: { member_id: 'm_lin', display_name: 'Lin' },
+          saved_at: '2026-11-01T10:14:51.733Z',
+        },
+      ],
+    }
+
+    const parsed = parseRunResultFrame(openFrame, 'room-demo-01')
+    expect(parsed.valid).toBe(true)
+    if (parsed.valid) {
+      expect(parsed.data.saved_versions).toHaveLength(2)
+      expect(parsed.data.saved_versions?.[0].name).toBe('main.py')
+      expect(parsed.data.saved_versions?.[0].version).toBe(4)
+      expect(parsed.data.saved_versions?.[1].name).toBe('helper.py')
+      expect(parsed.data.saved_versions?.[1].version).toBe(2)
     }
   })
 
