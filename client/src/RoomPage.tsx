@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { RefObject } from 'react'
 import type { editor as MonacoEditor } from 'monaco-editor'
 import type { Awareness } from 'y-protocols/awareness'
@@ -7,6 +7,7 @@ import Editor from '@monaco-editor/react'
 import { MonacoBinding } from 'y-monaco'
 import DisplayNamePrompt from './DisplayNamePrompt'
 import RunPanel from './RunPanel'
+import RunOutputPanel from './RunOutputPanel'
 import {
   createAwareness,
   getExistingUserColors,
@@ -23,7 +24,8 @@ import {
 import { ownerTokenKey } from './createRoom'
 import { getRoomIdFromPath } from './roomId'
 import { useRoomDoc } from './roomDoc'
-import type { SupportedLanguage } from './runCode'
+import { parseRunResultFrame } from './runCode'
+import type { RunResponseData, SupportedLanguage } from './runCode'
 import { pickUserColor } from './userColor'
 import { config } from './config'
 
@@ -86,6 +88,7 @@ export default function RoomPage(props: RoomPageProps = {}) {
   const [docError, setDocError] = useState<string | null>(null)
   const [pendingName, setPendingName] = useState<string | null>(null)
   const [currentLanguage, setCurrentLanguage] = useState<SupportedLanguage>('python')
+  const [runOutput, setRunOutput] = useState<RunResponseData | null>(null)
   // Role from the server's `joined` or `roster` message (T-10 Host badge / US-27 Observer mode)
   const [role, setRole] = useState<string | null>(null)
   const [myMemberId, setMyMemberId] = useState<string | null>(null)
@@ -105,7 +108,17 @@ export default function RoomPage(props: RoomPageProps = {}) {
   const bindingRef = useRef<MonacoBinding | null>(null)
   const editorRef = useRef<MonacoEditor.IStandaloneCodeEditor | null>(null)
   const sessionIdRef = useRef<string | null>(null)
+  // request_ids already shown: a result can arrive twice (own HTTP response and the room frame), first one wins
+  const shownRunIdsRef = useRef<string[]>([])
   const myMemberIdRef = useRef<string | null>(null)
+
+  const showRunResult = useCallback((data: RunResponseData) => {
+    const shown = shownRunIdsRef.current
+    if (shown.includes(data.request_id)) return
+    shown.push(data.request_id)
+    if (shown.length > 50) shown.shift()
+    setRunOutput(data)
+  }, [])
 
   useEffect(() => {
     onDisplayNameAcceptedRef.current = onDisplayNameAccepted
@@ -274,6 +287,10 @@ export default function RoomPage(props: RoomPageProps = {}) {
             setDocError(`Presence connection closed (${event.code}). Remote presence synchronization stopped.`)
           }
         },
+        onRunResult: (msg) => {
+          const parsed = parseRunResultFrame(msg, roomId)
+          if (parsed.valid) showRunResult(parsed.data)
+        },
         onEditRejected: (msg) => {
           let reasonText = 'You do not have permission to edit this document.'
           if (msg.reason === 'observer') {
@@ -314,7 +331,7 @@ export default function RoomPage(props: RoomPageProps = {}) {
         delete (window as unknown as { awareness?: Awareness }).awareness
       }
     }
-  }, [roomId, isInvalidRoomId, docRef, externalAwarenessRef, propDocId, resolveDocId, wsOptions])
+  }, [roomId, isInvalidRoomId, docRef, externalAwarenessRef, propDocId, resolveDocId, wsOptions, showRunResult])
 
   // Keep presence updated in awareness whenever displayName and userColor are set or change
   useEffect(() => {
@@ -526,6 +543,9 @@ export default function RoomPage(props: RoomPageProps = {}) {
       </section>
       <RunPanel
         roomId={roomId || ''}
+        onRunComplete={(result) => {
+          if (result.ok) showRunResult(result.data)
+        }}
         getCode={() => docRef.current?.getText('monaco').toString() ?? ''}
         initialLanguage={currentLanguage}
         onLanguageChange={(lang) => setCurrentLanguage(lang)}
@@ -533,7 +553,9 @@ export default function RoomPage(props: RoomPageProps = {}) {
         fetchFn={wsOptions?.fetchFn}
         disabled={isObserver}
         disabledReason={isObserver ? 'Observers cannot run code' : undefined}
-      />
+      >
+        {runOutput ? <RunOutputPanel result={runOutput} /> : null}
+      </RunPanel>
       <div className="room-editor">
         <Editor
           height="100%"

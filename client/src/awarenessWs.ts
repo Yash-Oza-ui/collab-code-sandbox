@@ -322,6 +322,13 @@ export interface EditRejectedMessage {
   [key: string]: unknown
 }
 
+export interface RunResultMessage {
+  type: 'run-result'
+  request_id: string
+  room_id: string
+  [key: string]: unknown
+}
+
 export interface ConnectAwarenessWsOptions {
   roomId: string
   displayName?: string
@@ -341,6 +348,8 @@ export interface ConnectAwarenessWsOptions {
   onJoinRefused?: (msg: JoinRefusedMessage) => void
   onRoster?: (msg: RosterMessage) => void
   onEditRejected?: (msg: EditRejectedMessage) => void
+  /** A run finished in this room (T-17 section 3.6); delivered to every participant. */
+  onRunResult?: (msg: RunResultMessage) => void
   onError?: (event: Event) => void
   onClose?: (event: CloseEvent) => void
   onDocError?: (event: Event) => void
@@ -381,6 +390,7 @@ export function connectAwarenessWs(
     onJoinRefused,
     onRoster,
     onEditRejected,
+    onRunResult,
     onError,
     onClose,
     onDocError,
@@ -674,6 +684,8 @@ export function connectAwarenessWs(
             onRoster?.(msg as RosterMessage)
           } else if (msg.type === 'edit-rejected') {
             onEditRejected?.(msg as EditRejectedMessage)
+          } else if (msg.type === 'run-result') {
+            onRunResult?.(msg as RunResultMessage)
           }
         } catch {
           // ignore non-json control frames
