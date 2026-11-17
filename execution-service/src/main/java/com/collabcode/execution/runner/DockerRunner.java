@@ -97,6 +97,7 @@ public class DockerRunner implements CodeRunner {
                     "--name", containerName,
                     "--user", "1001:1001",
                     "--memory", limits.getMemoryMb() + "m",
+                    "--memory-swap", limits.getMemoryMb() + "m",
                     "--pids-limit", String.valueOf(limits.getPidsLimit()),
                     "--read-only",
                     "--tmpfs", "/tmp:rw,noexec,nosuid,size=16m",
@@ -512,11 +513,11 @@ public class DockerRunner implements CodeRunner {
             String failureKind
     ) {
         if (oomKilled) {
-            return "Container was OOM-killed. Peak memory measurement is unavailable.";
+            return "Memory limit exceeded";
         }
 
         if (timedOut) {
-            return "Execution exceeded the configured wall-time limit.";
+            return "Time limit exceeded";
         }
 
         if ("compile_error".equals(failureKind)) {
@@ -527,7 +528,7 @@ public class DockerRunner implements CodeRunner {
             return "Program exited with a non-zero status. Peak memory measurement is unavailable.";
         }
 
-        return "Execution completed. Peak memory measurement is unavailable.";
+        return null;
     }
 
     private ExecutionResult failureResult(
@@ -688,6 +689,7 @@ public class DockerRunner implements CodeRunner {
                 || limits.getMemoryMb() <= 0
                 || limits.getPidsLimit() <= 0
                 || limits.getMaxOutputBytes() <= 0
+                || limits.getCompileTimeoutSeconds() <= 0
                 || limits.getMaxRequestBodyBytes() <= 0) {
 
             throw new IllegalStateException(

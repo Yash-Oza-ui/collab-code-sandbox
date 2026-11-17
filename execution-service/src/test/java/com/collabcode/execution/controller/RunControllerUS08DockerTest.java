@@ -217,19 +217,23 @@ class RunControllerUS08DockerTest {
                 .content(objectMapper.writeValueAsString(body));
     }
 
-    private static boolean dockerSucceeds(String... args) throws Exception {
-        List<String> command = new ArrayList<>();
-        command.add("docker");
-        command.addAll(List.of(args));
+    private static boolean dockerSucceeds(String... args) {
+        try {
+            List<String> command = new ArrayList<>();
+            command.add("docker");
+            command.addAll(List.of(args));
 
-        Process process = new ProcessBuilder(command)
-                .redirectOutput(ProcessBuilder.Redirect.DISCARD)
-                .redirectError(ProcessBuilder.Redirect.DISCARD)
-                .start();
-        if (!process.waitFor(10, TimeUnit.SECONDS)) {
-            process.destroyForcibly();
+            Process process = new ProcessBuilder(command)
+                    .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+                    .redirectError(ProcessBuilder.Redirect.DISCARD)
+                    .start();
+            if (!process.waitFor(10, TimeUnit.SECONDS)) {
+                process.destroyForcibly();
+                return false;
+            }
+            return process.exitValue() == 0;
+        } catch (Exception e) {
             return false;
         }
-        return process.exitValue() == 0;
     }
 }
