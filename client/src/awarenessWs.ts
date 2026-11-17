@@ -495,6 +495,7 @@ export function connectAwarenessWs(
   }
   let isDestroyed = false
   let activeGeneration = 0
+  let joinedGeneration = -1
   let pendingJoin: { name: string; token?: string } | null = null
   let activeHandshake: { name: string; token?: string } | null = null
   let joinTimer: ReturnType<typeof setTimeout> | null = null
@@ -857,6 +858,10 @@ export function connectAwarenessWs(
         try {
           const msg = JSON.parse(event.data) as { type?: string }
           if (msg.type === 'joined') {
+            // Only one document handshake per control-socket generation, even
+            // if the relay repeats 'joined' before the async module fetch ends.
+            if (joinedGeneration === gen) return
+            joinedGeneration = gen
             hasJoined = true
             clearReconnectTimer()
             clearJoinTimer()
