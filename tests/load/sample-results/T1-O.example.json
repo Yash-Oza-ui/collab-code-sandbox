@@ -1,0 +1,28 @@
+{
+  "_comment": "Example BENCHMARK output: node harness.mjs --variant T1-O --users 10 --edits 50 --modules 5. Five owners each type in their own module; the other five read all five. Machine values are placeholders (US-31 records the real host).",
+  "kind": "benchmark",
+  "variant": "T1-O",
+  "users": 10,
+  "typists": 5,
+  "edits_per_typist": 50,
+  "typing_interval_ms": 200,
+  "seed_lines": 1000,
+  "edit_check": "enabled (NFR13)",
+  "latency_ms": { "samples": 1250, "p50_ms": 3.6, "p95_ms": 8.0, "max_ms": 11.2 },
+  "nfr1_target_p95_ms": 200,
+  "nfr1_met": true,
+  "room_full_check": {
+    "status": "PENDING_US-63",
+    "refused": false,
+    "note": "People limit not enforced in main yet (US-63). Extra join was accepted; once US-63 lands this records a ROOM_FULL refusal."
+  },
+  "limits_in_force": {
+    "people_limit": "US-63 (not enforced in main)",
+    "module_limit": "US-63",
+    "module_size_limit": "1 MiB document frame cap (DocumentHandler); per-module content limit is US-63"
+  },
+  "workload_note": "Test set-up T1-O: 5 modules of ~200 lines; 5 owners type in their own module, 5 users read all modules. Every owner is measured at the readers.",
+  "machine": { "hostname": "dev-machine", "platform": "example OS", "arch": "x64", "cpus": 8, "node": "v24.x" },
+  "ran_at": "2026-11-17T00:00:00.000Z",
+  "disclaimer": "Development-machine run (CR03). Final-host numbers are US-31."
+}

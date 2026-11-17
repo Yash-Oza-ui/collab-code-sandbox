@@ -113,6 +113,18 @@ public class DocumentHandler extends AbstractWebSocketHandler {
     /** Yjs message type: awareness (1). */
     public static final byte AWARENESS_BYTE = 1;
 
+    /**
+     * Test-only switch for the T-22 load harness (CR13). When the JVM is started
+     * with {@code -Dloadtest.editCheckDisabled=true} or env
+     * {@code LOADTEST_DISABLE_EDIT_CHECK=true}, the per-edit write-permission
+     * check below is skipped, so the harness can measure NFR1 latency WITHOUT the
+     * check and compare it with the default run (check ON, NFR13). It defaults to
+     * OFF and must NEVER be set in production.
+     */
+    private static final boolean EDIT_CHECK_DISABLED =
+            Boolean.getBoolean("loadtest.editCheckDisabled")
+                    || "true".equalsIgnoreCase(System.getenv("LOADTEST_DISABLE_EDIT_CHECK"));
+
     /** Maximum binary frame size: 1 MiB (contract section 3.5 rule 3). */
     private static final int MAX_BINARY_BYTES = 1024 * 1024;
 
@@ -310,7 +322,7 @@ public class DocumentHandler extends AbstractWebSocketHandler {
 
         // --- Edit permission check (CR13) ---
         // Inspect only the first two bytes; never parse the document content.
-        if (isDocumentChange(bytes)) {
+        if (!EDIT_CHECK_DISABLED && isDocumentChange(bytes)) {
             String clientSessionId = (String) session.getAttributes().get(ATTR_SESSION_ID);
             Member member = roomService.findMemberBySession(roomId, clientSessionId);
 

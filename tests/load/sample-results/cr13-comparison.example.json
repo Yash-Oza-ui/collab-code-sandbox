@@ -1,0 +1,12 @@
+{
+  "_comment": "Example CR13 comparison for T1-A: node cr13-compare.mjs results/T1-A-checks-on.json results/T1-A-checks-off.json. The check adds sub-millisecond latency (it is a cached header lookup, V2.12/CR13), and NFR1 holds with the check ON. Machine values are placeholders.",
+  "cr13": "cost of the per-edit write-permission check (NFR13 vs NFR1)",
+  "variant": "T1-A",
+  "checks_on": { "samples": 4500, "p50_ms": 8.1, "p95_ms": 17.2, "max_ms": 31.0 },
+  "checks_off": { "samples": 4500, "p50_ms": 7.9, "p95_ms": 16.6, "max_ms": 29.4 },
+  "check_cost_ms": { "p50": 0.2, "p95": 0.6 },
+  "nfr1_met_with_checks_on": true,
+  "nfr13_note": "NFR13 is verified only when NFR1 (p95 < 200 ms) holds with the check ON.",
+  "machine": { "hostname": "dev-machine", "platform": "example OS", "arch": "x64", "cpus": 8, "node": "v24.x" },
+  "ran_at": "2026-11-17T00:00:00.000Z"
+}

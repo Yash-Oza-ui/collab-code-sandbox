@@ -1,35 +1,28 @@
 {
-  "_comment": "Example output of: node harness.mjs --variant T1-P --users 5 --edits 50 --out results/T1-P.json. Machine values are placeholders; a real run records the actual host (US-31).",
+  "_comment": "Example BENCHMARK output: node harness.mjs --variant T1-P --users 10 --edits 50. Machine values are placeholders; a real run records the actual host (US-31).",
+  "kind": "benchmark",
   "variant": "T1-P",
-  "users": 5,
-  "edits": 50,
-  "measured_samples": 200,
-  "latency_ms": {
-    "samples": 200,
-    "p50_ms": 3.1,
-    "p95_ms": 12.4,
-    "max_ms": 34.0
-  },
+  "users": 10,
+  "typists": 1,
+  "edits_per_typist": 50,
+  "typing_interval_ms": 200,
+  "seed_lines": 1000,
+  "edit_check": "enabled (NFR13)",
+  "latency_ms": { "samples": 450, "p50_ms": 3.1, "p95_ms": 5.2, "max_ms": 8.4 },
   "nfr1_target_p95_ms": 200,
   "nfr1_met": true,
-  "limits_in_force": {
-    "people_limit": "not enforced yet (US-63); NFR2 design target is 10 users",
-    "module_limit": "not enforced yet (US-63)",
-    "module_size_limit": "document frame cap 1 MiB (DocumentHandler), per-module content limit is US-63"
-  },
   "room_full_check": {
-    "attempted": true,
+    "status": "PENDING_US-63",
     "refused": false,
-    "note": "no people limit enforced yet (US-63); extra join was accepted"
+    "note": "People limit not enforced in main yet (US-63). Extra join was accepted; once US-63 lands this records a ROOM_FULL refusal."
   },
-  "write_permission_check": "active (NFR13/CR13): every document-change frame is permission-checked by the relay. A without-check baseline needs a server-side toggle (not in main); see README.",
-  "machine": {
-    "hostname": "dev-machine",
-    "platform": "example OS",
-    "arch": "x64",
-    "cpus": 8,
-    "node": "v24.x"
+  "limits_in_force": {
+    "people_limit": "US-63 (not enforced in main)",
+    "module_limit": "US-63",
+    "module_size_limit": "1 MiB document frame cap (DocumentHandler); per-module content limit is US-63"
   },
+  "workload_note": "Test set-up T1: ~5 chars/sec per typist, ~1000-line document. Every typist is measured at the receiving users.",
+  "machine": { "hostname": "dev-machine", "platform": "example OS", "arch": "x64", "cpus": 8, "node": "v24.x" },
   "ran_at": "2026-11-17T00:00:00.000Z",
-  "note": "Development-machine run. The final-host run (US-31) re-runs this with --url pointing at the deployed sync-service."
+  "disclaimer": "Development-machine run (CR03). Final-host numbers are US-31."
 }
