@@ -1,0 +1,35 @@
+{
+  "_comment": "Example output of: node harness.mjs --variant T1-P --users 5 --edits 50 --out results/T1-P.json. Machine values are placeholders; a real run records the actual host (US-31).",
+  "variant": "T1-P",
+  "users": 5,
+  "edits": 50,
+  "measured_samples": 200,
+  "latency_ms": {
+    "samples": 200,
+    "p50_ms": 3.1,
+    "p95_ms": 12.4,
+    "max_ms": 34.0
+  },
+  "nfr1_target_p95_ms": 200,
+  "nfr1_met": true,
+  "limits_in_force": {
+    "people_limit": "not enforced yet (US-63); NFR2 design target is 10 users",
+    "module_limit": "not enforced yet (US-63)",
+    "module_size_limit": "document frame cap 1 MiB (DocumentHandler), per-module content limit is US-63"
+  },
+  "room_full_check": {
+    "attempted": true,
+    "refused": false,
+    "note": "no people limit enforced yet (US-63); extra join was accepted"
+  },
+  "write_permission_check": "active (NFR13/CR13): every document-change frame is permission-checked by the relay. A without-check baseline needs a server-side toggle (not in main); see README.",
+  "machine": {
+    "hostname": "dev-machine",
+    "platform": "example OS",
+    "arch": "x64",
+    "cpus": 8,
+    "node": "v24.x"
+  },
+  "ran_at": "2026-11-17T00:00:00.000Z",
+  "note": "Development-machine run. The final-host run (US-31) re-runs this with --url pointing at the deployed sync-service."
+}
