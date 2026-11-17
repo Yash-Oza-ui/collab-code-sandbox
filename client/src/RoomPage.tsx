@@ -201,9 +201,11 @@ export default function RoomPage(props: RoomPageProps = {}) {
           myMemberIdRef.current = joined.member_id ?? null
           setMyMemberId(joined.member_id ?? null)
           setRole(joined.role)
+          // V2.3 joined carries mode and preset, but no Open workspace language.
+          // Do not infer it from creation state or the shared URL.
           setRoomMode({
             mode: joined.mode,
-            detail: joined.mode === 'pair' ? joined.preset : typeof joined.language === 'string' ? joined.language : undefined,
+            detail: joined.mode === 'pair' ? joined.preset : undefined,
           })
           const name = pendingNameRef.current
           if (!name) return

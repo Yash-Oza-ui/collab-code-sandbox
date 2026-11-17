@@ -3,7 +3,7 @@ import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import CreateRoomScreen from './CreateRoomScreen'
-import type { CreatedRoom, CreateRoomChoice } from './createRoom'
+import { createRoom, type CreatedRoom, type CreateRoomChoice } from './createRoom'
 
 ;(globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -23,6 +23,7 @@ describe('CreateRoomScreen', () => {
     container?.remove()
     container = null
     Reflect.deleteProperty(window.navigator, 'clipboard')
+    vi.unstubAllGlobals()
   })
 
   async function renderScreen(createRoomFn: (choice: CreateRoomChoice) => Promise<CreatedRoom>) {
@@ -98,6 +99,21 @@ describe('CreateRoomScreen', () => {
     )
     expect(button('Create room').disabled).toBe(false)
     expect(container?.querySelector('input')).toBeNull()
+  })
+
+  it('displays the server validation message from POST /v1/rooms', async () => {
+    const message = "Field 'language' is not supported."
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(
+      JSON.stringify({ error: { code: 'UNSUPPORTED_LANGUAGE', message } }),
+      { status: 422, headers: { 'Content-Type': 'application/json' } },
+    )))
+    await renderScreen(createRoom)
+    await act(async () => {
+      button('Create room').click()
+    })
+    expect(container?.querySelector('[role="alert"]')?.textContent).toBe(message)
+    expect(container?.querySelector('#create-room-link')).toBeNull()
+    expect(button('Create room').disabled).toBe(false)
   })
 
   it('warns when the owner token could not be stored', async () => {
