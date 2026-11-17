@@ -109,7 +109,7 @@ export default function RoomPage(props: RoomPageProps = {}) {
   const connRef = useRef<AwarenessWsConnection | null>(null)
   const pendingNameRef = useRef<string | null>(null)
   // A room-specific name is safe to retain; the session ID remains stable separately.
-  const resumeNameKey = roomId ? `collab_room_name:${roomId}` : null
+  const resumeNameKey = roomId ? `collab_room_name:${roomId}:${wsOptions?.sessionId ?? getCollabSessionId()}` : null
   const joinStatusRef = useRef<RoomJoinStatus>('prompt')
   const onDisplayNameAcceptedRef = useRef(onDisplayNameAccepted)
   const bindingRef = useRef<MonacoBinding | null>(null)
