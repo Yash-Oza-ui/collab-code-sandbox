@@ -9,8 +9,8 @@ import org.springframework.stereotype.Component;
  * Values are read from application.yml under app.execution.limits.
  * They are NEVER hard-coded in Java source (DR3).
  *
- * Real limit values are set in Sprint 2 (NFR4).
- * This class only exposes the structure so US-08 and US-09 can wire it in.
+ * Sprint 3 (US-13): all NFR4 limits are now real, enforced values.
+ * US-14 will add per-language compile-stage support when non-Python runtimes land.
  */
 @Component
 @ConfigurationProperties(prefix = "app.execution.limits")
@@ -24,6 +24,9 @@ public class ExecutionLimitsProperties {
 
     /** NFR4.3 – maximum number of processes / threads inside the container. */
     private int pidsLimit;
+
+    /** NFR4.5 – compile-stage timeout in seconds. */
+    private int compileTimeoutSeconds;
 
     /** NFR4.4 – maximum total output (stdout + stderr combined), in bytes. */
     private long maxOutputBytes;
@@ -47,6 +50,9 @@ public class ExecutionLimitsProperties {
 
     public int getPidsLimit()                  { return pidsLimit; }
     public void setPidsLimit(int v)            { this.pidsLimit = v; }
+
+    public int getCompileTimeoutSeconds()      { return compileTimeoutSeconds; }
+    public void setCompileTimeoutSeconds(int v) { this.compileTimeoutSeconds = v; }
 
     public long getMaxOutputBytes()            { return maxOutputBytes; }
     public void setMaxOutputBytes(long v)      { this.maxOutputBytes = v; }

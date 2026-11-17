@@ -261,6 +261,7 @@ class DockerRunnerIsolationTest {
         limits.setMemoryMb(128);
         limits.setPidsLimit(64);
         limits.setMaxOutputBytes(1024 * 1024);
+        limits.setCompileTimeoutSeconds(10);
         limits.setMaxRequestBodyBytes(1024 * 1024);
 
         return new DockerRunner(limits) {
@@ -309,19 +310,23 @@ class DockerRunnerIsolationTest {
         return entries;
     }
 
-    private static boolean dockerSucceeds(long timeoutSeconds, String... args) throws Exception {
-        List<String> command = new ArrayList<>();
-        command.add("docker");
-        command.addAll(List.of(args));
+    private static boolean dockerSucceeds(long timeoutSeconds, String... args) {
+        try {
+            List<String> command = new ArrayList<>();
+            command.add("docker");
+            command.addAll(List.of(args));
 
-        Process process = new ProcessBuilder(command)
-                .redirectOutput(ProcessBuilder.Redirect.DISCARD)
-                .redirectError(ProcessBuilder.Redirect.DISCARD)
-                .start();
-        if (!process.waitFor(timeoutSeconds, TimeUnit.SECONDS)) {
-            process.destroyForcibly();
+            Process process = new ProcessBuilder(command)
+                    .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+                    .redirectError(ProcessBuilder.Redirect.DISCARD)
+                    .start();
+            if (!process.waitFor(timeoutSeconds, TimeUnit.SECONDS)) {
+                process.destroyForcibly();
+                return false;
+            }
+            return process.exitValue() == 0;
+        } catch (Exception e) {
             return false;
         }
-        return process.exitValue() == 0;
     }
 }

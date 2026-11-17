@@ -8,6 +8,15 @@ Spring Boot WebSocket relay for real-time collaborative editing using Yjs CRDTs 
 
 `sync-service` provides the server-side room model, role and permission enforcement, and low-latency WebSocket message relay for real-time collaborative editing sessions using Yjs CRDTs (T-02, T-20, FR1, FR3, FR9.4, FR17, FR41.4, FR42, CR13).
 
+### Configurable Limits (DR3 / US-16)
+`sync-service` owns the following DR3 limits (see [docs/host-config.md](../docs/host-config.md) for the master list):
+- **Max members per room (NFR15):** `app.room.limits.max-members-per-room` (default `10`, env `APP_ROOM_LIMITS_MAX_MEMBERS_PER_ROOM`)
+- **Host leaves timeout (FR31.2):** `app.room.limits.host-leaves-timeout-ms` (default `30000`, env `APP_ROOM_LIMITS_HOST_LEAVES_TIMEOUT_MS`)
+- **Aggregate run budget (NFR14):** `app.room.limits.aggregate-run-budget-ms` (default `0` = no cap, env `APP_ROOM_LIMITS_AGGREGATE_RUN_BUDGET_MS`)
+- **Max runs per session (NFR14):** `app.room.limits.max-runs-per-session` (default `0` = no cap, env `APP_ROOM_LIMITS_MAX_RUNS_PER_SESSION`)
+
+All values can be overridden per host via environment variables without code modification. Final per-host values are recorded only after the deployment host is fixed and tested.
+
 - Clients connect to `ws://localhost:8081/ws/rooms/{room_id}?session_id={session_id}` (control socket) and `ws://localhost:8081/ws/rooms/{room_id}/docs/{doc_id}?session_id={session_id}` (document socket).
 - Strict room isolation: clients in one room never receive messages published in another room.
 - Document frames (Yjs sync & update messages) are forwarded untouched without server-side document parsing; awareness frames (first byte `0x01`) are echoed back to the sender so a lone client maintains heartbeat.

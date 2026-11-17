@@ -55,6 +55,12 @@ class ExecutionLimitsPropertiesTest {
     }
 
     @Test
+    @DisplayName("compile-timeout-seconds has a value > 0 (NFR4.5, US-13)")
+    void compileTimeoutSeconds_hasValue() {
+        assertThat(limits.getCompileTimeoutSeconds()).isGreaterThan(0);
+    }
+
+    @Test
     @DisplayName("max-request-body-bytes has a placeholder value > 0 (T-06 section 2)")
     void maxRequestBodyBytes_hasPlaceholderValue() {
         assertThat(limits.getMaxRequestBodyBytes()).isGreaterThan(0);
