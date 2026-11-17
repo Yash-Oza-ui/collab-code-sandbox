@@ -20,7 +20,7 @@ const wsModule = await import(pathToFileURL(wsPath).href);
 const WebSocketServer = wsModule.WebSocketServer || wsModule.default?.WebSocketServer || wsModule.default;
 const WebSocket = wsModule.WebSocket || wsModule.default;
 
-const roomClients = new Map(); // roomId -> Set of { ws, type, member_id, display_name, role }
+const roomClients = new Map(); // roomId -> Set of { ws, type, member_id, display_name, role, sessionId }
 
 function broadcastToRoom(roomId, message) {
   const clients = roomClients.get(roomId);
@@ -59,10 +59,11 @@ const wss = new WebSocketServer({ server: syncHttpServer });
 
 wss.on('connection', (ws, req) => {
   const url = new URL(req.url, 'http://localhost:8081');
-  const pathname = url.pathname; // /ws/rooms/{roomId} or /ws/rooms/{roomId}/docs/{docId}
+  const pathname = url.pathname;
   const parts = pathname.split('/').filter(Boolean);
   const roomId = parts[2] || 'us50-demo';
   const isDoc = parts.length > 3 && parts[3] === 'docs';
+  const sessionId = url.searchParams.get('session_id') || `sess_${Date.now()}_${Math.random()}`;
 
   if (!roomClients.has(roomId)) {
     roomClients.set(roomId, new Set());
@@ -73,12 +74,12 @@ wss.on('connection', (ws, req) => {
     member_id: null,
     display_name: null,
     role: 'participant',
+    sessionId,
   };
   roomClients.get(roomId).add(clientInfo);
 
   ws.on('message', (raw) => {
     if (isDoc) {
-      // Echo binary Yjs awareness/doc frames to other doc sockets in the room
       for (const other of roomClients.get(roomId)) {
         if (other !== clientInfo && other.type === 'doc' && other.ws.readyState === WebSocket.OPEN) {
           other.ws.send(raw);
@@ -133,6 +134,7 @@ await new Promise(resolve => syncHttpServer.listen(8081, resolve));
 console.log('Mock sync-service listening on port 8081');
 
 // 2. Execution Service HTTP Server (Port 8082)
+let runCounter = 1;
 const executionHttpServer = http.createServer((req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -150,16 +152,38 @@ const executionHttpServer = http.createServer((req, res) => {
     req.on('end', () => {
       let parsed = {};
       try { parsed = JSON.parse(body); } catch {}
+      const targetRoomId = parsed.room_id || 'us50-demo';
+
+      // Dynamically resolve runner from session_id
+      let runnerDisplayName = 'Unknown';
+      let runnerMemberId = 'm_unknown';
+      const clients = roomClients.get(targetRoomId);
+      if (clients && parsed.session_id) {
+        for (const c of clients) {
+          if (c.sessionId === parsed.session_id && c.display_name) {
+            runnerDisplayName = c.display_name;
+            runnerMemberId = c.member_id;
+            break;
+          }
+        }
+      }
+      if (runnerDisplayName === 'Unknown') {
+        const clientList = Array.from(clients || []).filter(c => c.type === 'control');
+        runnerDisplayName = clientList[0]?.display_name || 'Alice';
+        runnerMemberId = clientList[0]?.member_id || 'm_alice';
+      }
+
+      const runId = `req-us50-${runCounter++}`;
       const runResult = {
         type: 'run-result',
-        request_id: parsed.request_id || 'req-us50-001',
-        room_id: parsed.room_id || 'us50-demo',
+        request_id: parsed.request_id || runId,
+        room_id: targetRoomId,
         language: parsed.language || 'python',
-        stdout: 'Hello from Collaborative Code Sandbox (US-50)!\n',
+        stdout: `Execution output #${runCounter - 1} run by ${runnerDisplayName}\n`,
         stderr: '',
         exit_code: 0,
-        execution_time_ms: 38,
-        peak_memory_mb: 7.9,
+        execution_time_ms: 42,
+        peak_memory_mb: 8.0,
         timed_out: false,
         oom_killed: false,
         failure_kind: null,
@@ -167,14 +191,16 @@ const executionHttpServer = http.createServer((req, res) => {
         message: null,
         compile_time_ms: null,
         runner: {
-          member_id: 'm_alice',
-          display_name: 'Alice',
+          member_id: runnerMemberId,
+          display_name: runnerDisplayName,
         },
         ran_at: new Date().toISOString(),
         visibility: 'room',
         saved_versions: [],
         failure: null,
       };
+
+      console.log(`Execution service resolved runner: "${runnerDisplayName}" for session ${parsed.session_id}`);
 
       // Broadcast to room
       broadcastToRoom(runResult.room_id, runResult);
@@ -226,13 +252,24 @@ const staticServer = http.createServer((req, res) => {
 await new Promise(resolve => staticServer.listen(5173, resolve));
 console.log('Client static server listening on port 5173');
 
-// 4. Chrome CDP Automation
-const cdpPort = 9222;
-const tempUserData = path.join(os.tmpdir(), `chrome-us50-${Date.now()}`);
-const chromeProc = spawn('C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe', [
+// 4. Chrome CDP Automation - Launch Two Distinct Chrome Browser Instances
+const cdpPort1 = 9222;
+const cdpPort2 = 9223;
+const tempUserData1 = path.join(os.tmpdir(), `chrome-alice-${Date.now()}`);
+const tempUserData2 = path.join(os.tmpdir(), `chrome-bob-${Date.now()}`);
+
+const chrome1 = spawn('C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe', [
   '--headless=new',
-  `--remote-debugging-port=${cdpPort}`,
-  `--user-data-dir=${tempUserData}`,
+  `--remote-debugging-port=${cdpPort1}`,
+  `--user-data-dir=${tempUserData1}`,
+  '--window-size=1280,900',
+  'about:blank',
+]);
+
+const chrome2 = spawn('C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe', [
+  '--headless=new',
+  `--remote-debugging-port=${cdpPort2}`,
+  `--user-data-dir=${tempUserData2}`,
   '--window-size=1280,900',
   'about:blank',
 ]);
@@ -282,97 +319,186 @@ class CDPClient {
   }
 }
 
-// Create Tab 1 for Alice
-const tab1Info = await (await fetch(`http://127.0.0.1:${cdpPort}/json/new?http://localhost:5173/room/us50-demo`, { method: 'PUT' })).json();
-const client1 = new CDPClient(tab1Info.webSocketDebuggerUrl);
-await client1.ready();
-await client1.send('Page.enable');
-await client1.send('Runtime.enable');
-console.log('Tab 1 (Alice) opened');
-
-// Create Tab 2 for Bob
-const tab2Info = await (await fetch(`http://127.0.0.1:${cdpPort}/json/new?http://localhost:5173/room/us50-demo`, { method: 'PUT' })).json();
-const client2 = new CDPClient(tab2Info.webSocketDebuggerUrl);
-await client2.ready();
-await client2.send('Page.enable');
-await client2.send('Runtime.enable');
-console.log('Tab 2 (Bob) opened');
-
-// Wait for pages to load
-await new Promise(resolve => setTimeout(resolve, 3000));
-
-// Join as Alice in Tab 1
-await client1.eval(`
-  (function() {
-    const input = document.querySelector('#display-name');
-    if (input) {
-      input.value = 'Alice';
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-      const form = document.querySelector('form');
-      if (form) form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
-    }
-  })()
-`);
-console.log('Alice joined in Tab 1');
-
-// Join as Bob in Tab 2
-await client2.eval(`
-  (function() {
-    const input = document.querySelector('#display-name');
-    if (input) {
-      input.value = 'Bob';
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-      const form = document.querySelector('form');
-      if (form) form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
-    }
-  })()
-`);
-console.log('Bob joined in Tab 2');
-
-await new Promise(resolve => setTimeout(resolve, 3000));
-
-// Alice triggers Run in Tab 1
-console.log('Alice pressing Run...');
-await client1.eval(`
-  (function() {
-    const runBtn = document.querySelector('[data-testid="run-button"]');
-    if (runBtn) runBtn.click();
-  })()
-`);
-
-// Wait for execution result to display in both tabs
-let runnerTextTab1 = '';
-let runnerTextTab2 = '';
-for (let i = 0; i < 30; i++) {
-  await new Promise(resolve => setTimeout(resolve, 500));
-  runnerTextTab1 = await client1.eval(`document.querySelector('[data-testid="run-output-runner"]')?.textContent || ''`);
-  runnerTextTab2 = await client2.eval(`document.querySelector('[data-testid="run-output-runner"]')?.textContent || ''`);
-  if (runnerTextTab1.includes('Run by Alice') && runnerTextTab2.includes('Run by Alice')) {
-    break;
-  }
+function cleanup() {
+  chrome1.kill();
+  chrome2.kill();
+  syncHttpServer.close();
+  executionHttpServer.close();
+  staticServer.close();
+  try { fs.rmSync(tempUserData1, { recursive: true, force: true }); } catch {}
+  try { fs.rmSync(tempUserData2, { recursive: true, force: true }); } catch {}
 }
 
-console.log('Tab 1 Output Runner:', runnerTextTab1);
-console.log('Tab 2 Output Runner:', runnerTextTab2);
+let client1;
+let client2;
 
-// Capture screenshots
-const shot1 = await client1.send('Page.captureScreenshot', { format: 'png' });
-fs.writeFileSync(path.join(screenshotsDir, 'us50-browser-alice-runner.png'), Buffer.from(shot1.data, 'base64'));
-console.log('Saved docs/screenshots/us50-browser-alice-runner.png');
+try {
+  // Browser 1 (Alice): create tab
+  const tab1Info = await (await fetch(`http://127.0.0.1:${cdpPort1}/json/new?http://localhost:5173/room/us50-demo`, { method: 'PUT' })).json();
+  client1 = new CDPClient(tab1Info.webSocketDebuggerUrl);
+  await client1.ready();
+  await client1.send('Page.enable');
+  await client1.send('Runtime.enable');
+  console.log('Browser 1 (Alice) connected');
 
-const shot2 = await client2.send('Page.captureScreenshot', { format: 'png' });
-fs.writeFileSync(path.join(screenshotsDir, 'us50-browser-bob-participant.png'), Buffer.from(shot2.data, 'base64'));
-console.log('Saved docs/screenshots/us50-browser-bob-participant.png');
+  // Browser 2 (Bob): create tab in separate instance
+  const tab2Info = await (await fetch(`http://127.0.0.1:${cdpPort2}/json/new?http://localhost:5173/room/us50-demo`, { method: 'PUT' })).json();
+  client2 = new CDPClient(tab2Info.webSocketDebuggerUrl);
+  await client2.ready();
+  await client2.send('Page.enable');
+  await client2.send('Runtime.enable');
+  console.log('Browser 2 (Bob) connected');
 
-// Cleanup
-client1.close();
-client2.close();
-chromeProc.kill();
-syncHttpServer.close();
-executionHttpServer.close();
-staticServer.close();
+  // Wait for initial render
+  await new Promise(resolve => setTimeout(resolve, 3000));
 
-try { fs.rmSync(tempUserData, { recursive: true, force: true }); } catch {}
+  // Join as Alice in Browser 1
+  await client1.eval(`
+    (function() {
+      const input = document.querySelector('#display-name');
+      if (input) {
+        input.value = 'Alice';
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        const form = document.querySelector('form');
+        if (form) form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      }
+    })()
+  `);
+  console.log('Alice joined in Browser 1');
 
-console.log('VERIFICATION COMPLETE! Both browsers successfully labelled run output with "Run by Alice"');
-process.exit(0);
+  // Join as Bob in Browser 2
+  await client2.eval(`
+    (function() {
+      const input = document.querySelector('#display-name');
+      if (input) {
+        input.value = 'Bob';
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        const form = document.querySelector('form');
+        if (form) form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      }
+    })()
+  `);
+  console.log('Bob joined in Browser 2');
+
+  await new Promise(resolve => setTimeout(resolve, 3000));
+
+  // ==========================================
+  // PHASE 1: Alice triggers Run
+  // ==========================================
+  console.log('--- PHASE 1: Alice triggers Run in Browser 1 ---');
+  await client1.eval(`
+    (function() {
+      const runBtn = document.querySelector('[data-testid="run-button"]');
+      if (runBtn) runBtn.click();
+    })()
+  `);
+
+  let aliceRunSuccess = false;
+  let t1Runner = '', t1Time = '', t1Title = '';
+  let t2Runner = '', t2Time = '', t2Title = '';
+
+  for (let i = 0; i < 30; i++) {
+    await new Promise(resolve => setTimeout(resolve, 500));
+    t1Runner = await client1.eval(`document.querySelector('[data-testid="run-output-runner"]')?.textContent || ''`);
+    t1Time = await client1.eval(`document.querySelector('[data-testid="run-output-time"]')?.textContent || ''`);
+    t1Title = await client1.eval(`document.querySelector('[data-testid="run-output-time"]')?.getAttribute('title') || ''`);
+
+    t2Runner = await client2.eval(`document.querySelector('[data-testid="run-output-runner"]')?.textContent || ''`);
+    t2Time = await client2.eval(`document.querySelector('[data-testid="run-output-time"]')?.textContent || ''`);
+    t2Title = await client2.eval(`document.querySelector('[data-testid="run-output-time"]')?.getAttribute('title') || ''`);
+
+    if (
+      t1Runner === 'Run by Alice' &&
+      t1Time.startsWith(' at ') &&
+      t1Title.endsWith('Z') &&
+      t2Runner === 'Run by Alice' &&
+      t2Time.startsWith(' at ') &&
+      t2Title.endsWith('Z')
+    ) {
+      aliceRunSuccess = true;
+      break;
+    }
+  }
+
+  // EXPLICIT ASSERTION 1: Both browsers MUST display "Run by Alice" and valid timestamp
+  if (!aliceRunSuccess) {
+    console.error('ASSERTION FAILED: Browser 1 or Browser 2 did not display correct attribution for Alice!');
+    console.error({ t1Runner, t1Time, t1Title, t2Runner, t2Time, t2Title });
+    cleanup();
+    process.exit(1);
+  }
+  console.log('ASSERTION 1 PASSED: Browser 1 and Browser 2 both display "Run by Alice" with ISO UTC timestamp in tooltip.');
+
+  // Capture Phase 1 screenshots
+  const shot1 = await client1.send('Page.captureScreenshot', { format: 'png' });
+  fs.writeFileSync(path.join(screenshotsDir, 'us50-browser-alice-runner.png'), Buffer.from(shot1.data, 'base64'));
+  console.log('Saved docs/screenshots/us50-browser-alice-runner.png');
+
+  const shot2 = await client2.send('Page.captureScreenshot', { format: 'png' });
+  fs.writeFileSync(path.join(screenshotsDir, 'us50-browser-bob-participant.png'), Buffer.from(shot2.data, 'base64'));
+  console.log('Saved docs/screenshots/us50-browser-bob-participant.png');
+
+  // ==========================================
+  // PHASE 2: Bob triggers Run (Dynamic attribution test)
+  // ==========================================
+  console.log('--- PHASE 2: Bob triggers Run in Browser 2 ---');
+  await client2.eval(`
+    (function() {
+      const runBtn = document.querySelector('[data-testid="run-button"]');
+      if (runBtn) runBtn.click();
+    })()
+  `);
+
+  let bobRunSuccess = false;
+  for (let i = 0; i < 30; i++) {
+    await new Promise(resolve => setTimeout(resolve, 500));
+    t1Runner = await client1.eval(`document.querySelector('[data-testid="run-output-runner"]')?.textContent || ''`);
+    t1Time = await client1.eval(`document.querySelector('[data-testid="run-output-time"]')?.textContent || ''`);
+    t1Title = await client1.eval(`document.querySelector('[data-testid="run-output-time"]')?.getAttribute('title') || ''`);
+
+    t2Runner = await client2.eval(`document.querySelector('[data-testid="run-output-runner"]')?.textContent || ''`);
+    t2Time = await client2.eval(`document.querySelector('[data-testid="run-output-time"]')?.textContent || ''`);
+    t2Title = await client2.eval(`document.querySelector('[data-testid="run-output-time"]')?.getAttribute('title') || ''`);
+
+    if (
+      t1Runner === 'Run by Bob' &&
+      t1Time.startsWith(' at ') &&
+      t1Title.endsWith('Z') &&
+      t2Runner === 'Run by Bob' &&
+      t2Time.startsWith(' at ') &&
+      t2Title.endsWith('Z')
+    ) {
+      bobRunSuccess = true;
+      break;
+    }
+  }
+
+  // EXPLICIT ASSERTION 2: Both browsers MUST dynamically update to "Run by Bob"
+  if (!bobRunSuccess) {
+    console.error('ASSERTION FAILED: Browser 1 or Browser 2 did not update to "Run by Bob"!');
+    console.error({ t1Runner, t1Time, t1Title, t2Runner, t2Time, t2Title });
+    cleanup();
+    process.exit(1);
+  }
+  console.log('ASSERTION 2 PASSED: Browser 1 and Browser 2 both dynamically updated to "Run by Bob" with ISO UTC timestamp in tooltip.');
+
+  // Capture Phase 2 screenshots
+  const shotBobRunner = await client2.send('Page.captureScreenshot', { format: 'png' });
+  fs.writeFileSync(path.join(screenshotsDir, 'us50-browser-bob-runner.png'), Buffer.from(shotBobRunner.data, 'base64'));
+  console.log('Saved docs/screenshots/us50-browser-bob-runner.png');
+
+  const shotAliceParticipant = await client1.send('Page.captureScreenshot', { format: 'png' });
+  fs.writeFileSync(path.join(screenshotsDir, 'us50-browser-alice-participant.png'), Buffer.from(shotAliceParticipant.data, 'base64'));
+  console.log('Saved docs/screenshots/us50-browser-alice-participant.png');
+
+  client1.close();
+  client2.close();
+  cleanup();
+
+  console.log('ALL TWO-BROWSER DUAL ATTRIBUTION ASSERTIONS PASSED WITH ZERO ERRORS.');
+  process.exit(0);
+} catch (err) {
+  console.error('Unexpected error in two-browser verification:', err);
+  cleanup();
+  process.exit(1);
+}
