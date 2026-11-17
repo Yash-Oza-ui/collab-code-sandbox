@@ -289,6 +289,7 @@ describe('RoomPage display-name and colour presence join lifecycle', () => {
   let relay: T20Relay
 
   beforeEach(() => {
+    sessionStorage.clear() // Each test starts without a previously joined browser tab.
     relay = new T20Relay()
     originalPathname = window.location.pathname
     window.history.replaceState({}, '', '/room/room-demo')
