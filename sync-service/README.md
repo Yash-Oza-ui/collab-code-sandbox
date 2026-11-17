@@ -49,7 +49,9 @@ Both sockets require `session_id` to be a valid UUID v4 query parameter.
 | `POST` | `/v1/rooms` | Create a room — returns `room_id`, `owner_token`, `mode`, `preset`, `language` |
 | `GET` | `/v1/rooms/{id}/owner` | Validate the owner token (T-10) |
 | `GET` | `/internal/rooms/{room_id}/sessions/{session_id}` | Session lookup for execution-service (requires `X-Internal-Token`) |
-| `POST` | `/internal/rooms/{room_id}/messages` | Broadcast or deliver targeted JSON messages to control sockets (requires `X-Internal-Token`) |
+| `POST` | `/internal/rooms/{room_id}/messages` | Broadcast or deliver targeted JSON messages to control sockets and record `run-result` entries (requires `X-Internal-Token`) |
+| `GET` | `/internal/rooms/{room_id}/runs` | Read stored run records for a room, optionally filtered by `input_hash`, newest first (requires `X-Internal-Token`, FR29 / US-52 / US-68) |
+| `DELETE` | `/internal/rooms/{room_id}/runs` | Delete all stored run records for a room (requires `X-Internal-Token`, FR32 / US-52 / US-56) |
 | `GET` | `/v1/rooms/{id}/owner` | Validate the owner token sent in `X-Owner-Token` (T-10, FR9.5) |
 | `POST` | `/internal/rooms/{id}/messages` | Broadcast a JSON message to all control-socket sessions in a room (requires `X-Internal-Token`) |
 
@@ -274,6 +276,34 @@ Transmits control messages and run execution results from backend services to ac
   - `400 Bad Request` (`INVALID_MESSAGE`): Non-JSON body, missing `type`, payload > 4 MiB, or malformed `audience`.
   - `401 Unauthorized` (`UNAUTHORIZED`): Missing or invalid `X-Internal-Token`.
   - `404 Not Found` (`ROOM_NOT_FOUND`): Target room does not exist.
+
+### 6.3 Run Record Store (FR29, FR32, US-52, US-56, US-68, T-18 Decision 9)
+`sync-service` owns the canonical in-memory run history (`RunRecordStore`, alongside `RoomStore`) and writes a `RunRecord` automatically whenever a `type: "run-result"` message is delivered through `POST /internal/rooms/{room_id}/messages`. Runs that fail to start never reach delivery and are never recorded. Internal-only delivery fields (`audience`, `input_hash`, `files`, `stdin`) are stripped before forwarding the V2.9 `run-result` frame to WebSocket clients.
+
+- **Fields stored per `RunRecord`**:
+  | Field | Type | Source / Notes |
+  |-------|------|----------------|
+  | `room_id` | `string` | Room key used for room-scoped queries and room deletion (FR32 / US-56) |
+  | `runner_display_name` | `string` | Read from V2.9 `runner.display_name` only |
+  | `ran_at` | `string` | ISO 8601 UTC start timestamp from V2.9 `ran_at` |
+  | `language` | `string` | Execution language (`cpp`, `python`, `c`, `java`, `javascript`) |
+  | `files` | `string[]` | Executed file names only (derived from `files` or `saved_versions[].name`) |
+  | `saved_versions` | `object[]` | Open-mode snapshot version summaries (`module_id`, `name`, `version`, `saved_by` `{member_id, display_name}`, `saved_at`); `[]` in Pair mode |
+  | `input_hash` | `string` | 64-character lowercase hex SHA-256 digest of execution input |
+  | `execution_time_ms` | `number` | Measured run-stage wall time in milliseconds (V2.9) |
+  | `peak_memory_mb` | `number` | Measured peak memory in megabytes (V2.9) |
+
+- **Explicitly excluded (Privacy / AC2 / NFR8.2)**:
+  - No `owner_token`, no `session_id` (including any `runner.session_id` or `audience.session_ids`), no raw `stdin`, and no source code text are ever persisted or logged.
+
+- **Exact Input Hashing Specification (`InputHasher`)**:
+  - `input_hash` is the 64-character lowercase hexadecimal SHA-256 digest of the exact UTF-8 bytes of `stdin` (absent or `null` `stdin` is treated as `""`, whose SHA-256 is `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`).
+  - Where separate input data files are supplied to `InputHasher.hash(stdin, inputFiles)`, files are sorted lexicographically by filename and each file's `\0<name_utf8>\0<content_bytes>` is appended after the `stdin` bytes before finalizing SHA-256.
+  - Program source code files are intentionally excluded from `input_hash` so different code versions executed against the same input share the same `input_hash` for slowdown baseline detection (US-68, `docs/ai-ml-contract.md` §16.2).
+
+- **Query & Lifecycle Endpoints (requires `X-Internal-Token`)**:
+  - `GET /internal/rooms/{room_id}/runs[?input_hash=<sha256>]` — returns `{"room_id": "...", "runs": [...]}` ordered **newest first** (filtered by `input_hash` when supplied, for US-68 slowdown baselines). Returns `401 UNAUTHORIZED` on invalid token and `404 ROOM_NOT_FOUND` on unknown/closed rooms.
+  - `DELETE /internal/rooms/{room_id}/runs` — deletes all run records for `room_id` (`RunRecordStore.deleteByRoom`) and returns `{"room_id": "...", "deleted": <count>}`. Closing or deleting a room via `RoomService.closeRoom` / `RoomService.deleteRoom` also purges its run records automatically (FR32 / US-56).
 
 ---
 
