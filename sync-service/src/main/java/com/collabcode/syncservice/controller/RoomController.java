@@ -12,6 +12,7 @@ import com.collabcode.syncservice.room.RoomStore;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
@@ -20,6 +21,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.List;
 import java.util.Set;
 
 /**
@@ -93,6 +95,21 @@ public class RoomController {
         CreateRoomResponse response =
                 new CreateRoomResponse(roomId, ownerToken, mode.value(), preset, language);
         return ResponseEntity.status(HttpStatus.CREATED).body(response);
+    }
+
+    /** List approved Open-mode modules only after the control-socket join. */
+    @GetMapping("/rooms/{roomId}/modules")
+    public ResponseEntity<?> listModules(@PathVariable String roomId,
+                                          @RequestHeader(value = "X-Session-Id", required = false) String sessionId) {
+        Member member = sessionId == null ? null : roomService.findMemberBySession(roomId, sessionId);
+        try {
+            List<Map<String, Object>> modules = moduleService.listApproved(roomId, member).stream()
+                    .map(this::moduleBody)
+                    .toList();
+            return ResponseEntity.ok(modules);
+        } catch (IllegalArgumentException e) {
+            return moduleError(HttpStatus.NOT_FOUND, e.getMessage());
+        }
     }
 
     @PostMapping("/rooms/{roomId}/modules")
