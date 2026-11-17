@@ -47,6 +47,8 @@ export interface RoomPageProps {
    * In Open mode, must be a valid registered module_id (US-05 / T-17 V2.5).
    */
   docId?: string
+  /** Other registered Open-mode Yjs documents to keep synchronized while inactive. */
+  moduleDocs?: ReadonlyMap<string, Y.Doc>
   /**
    * Optional resolver function to determine document ID from joined message in Open mode.
    */
@@ -75,6 +77,7 @@ export default function RoomPage(props: RoomPageProps = {}) {
     awarenessRef: externalAwarenessRef,
     onDisplayNameAccepted,
     docId: propDocId,
+    moduleDocs,
     resolveDocId,
     wsOptions,
   } = props
@@ -86,6 +89,7 @@ export default function RoomPage(props: RoomPageProps = {}) {
   const [joinStatus, setJoinStatus] = useState<RoomJoinStatus>('prompt')
   const [serverError, setServerError] = useState<string | null>(null)
   const [docError, setDocError] = useState<string | null>(null)
+  const [reconnecting, setReconnecting] = useState(false)
   const [pendingName, setPendingName] = useState<string | null>(null)
   const [currentLanguage, setCurrentLanguage] = useState<SupportedLanguage>('python')
   const [runOutput, setRunOutput] = useState<RunResponseData | null>(null)
@@ -191,12 +195,18 @@ export default function RoomPage(props: RoomPageProps = {}) {
         roomId,
         doc,
         docId: propDocId,
+        moduleDocs,
         resolveDocId,
         awareness,
         syncWsUrl: wsOptions?.syncWsUrl,
         sessionId,
         WebSocketClass: wsOptions?.WebSocketClass,
         joinTimeoutMs: wsOptions?.joinTimeoutMs,
+        onReconnecting: () => setReconnecting(true),
+        onReconnected: () => {
+          setReconnecting(false)
+          setDocError(null)
+        },
         onJoined: (joined) => {
           myMemberIdRef.current = joined.member_id ?? null
           setMyMemberId(joined.member_id ?? null)
@@ -242,6 +252,7 @@ export default function RoomPage(props: RoomPageProps = {}) {
             }
           }
           setServerError(message)
+          setReconnecting(false)
           setJoinStatus('refused')
           joinStatusRef.current = 'refused'
         },
@@ -260,6 +271,19 @@ export default function RoomPage(props: RoomPageProps = {}) {
           }
         },
         onClose: (event) => {
+          if ([4403, 4404, 4410].includes(event.code)) {
+            setReconnecting(false)
+            setServerError(
+              event.code === 4403
+                ? 'Access to this room was denied.'
+                : event.code === 4404
+                  ? 'Room not found (4404). Please verify the room link.'
+                  : 'This room has been closed.',
+            )
+            setJoinStatus('error')
+            joinStatusRef.current = 'error'
+            return
+          }
           if (joinStatusRef.current === 'refused') {
             // Keep the refusal message intact
             return
@@ -336,7 +360,7 @@ export default function RoomPage(props: RoomPageProps = {}) {
         delete (window as unknown as { awareness?: Awareness }).awareness
       }
     }
-  }, [roomId, isInvalidRoomId, docRef, externalAwarenessRef, propDocId, resolveDocId, wsOptions, showRunResult])
+  }, [roomId, isInvalidRoomId, docRef, externalAwarenessRef, propDocId, moduleDocs, resolveDocId, wsOptions, showRunResult])
 
   // Keep presence updated in awareness whenever displayName and userColor are set or change
   useEffect(() => {
@@ -462,6 +486,7 @@ export default function RoomPage(props: RoomPageProps = {}) {
 
   return (
     <div className="room-page">
+      {reconnecting && <div role="status" aria-live="polite">Reconnecting to room...</div>}
       <header className="room-header">
         <span>Room: {roomId}</span>
         {roomMode && (

@@ -340,6 +340,8 @@ export interface ConnectAwarenessWsOptions {
    * Optional active Y.Doc instance to synchronize over the Document Socket (US-02 / FR2).
    */
   doc?: Y.Doc
+  /** Registered Open-mode module documents retained across transport reconnects. */
+  moduleDocs?: ReadonlyMap<string, Y.Doc>
   syncWsUrl?: string
   sessionId?: string
   WebSocketClass?: typeof WebSocket
@@ -355,11 +357,15 @@ export interface ConnectAwarenessWsOptions {
   onDocError?: (event: Event) => void
   onDocClose?: (event: CloseEvent) => void
   onJoinTimeout?: () => void
+  onReconnecting?: (attempt: number) => void
+  onReconnected?: () => void
 }
 
 export interface AwarenessWsConnection {
   controlWs: WebSocket | null
   docWs: WebSocket | null
+  /** Additional Open-mode module transports, indexed by opaque module ID. */
+  moduleSockets: ReadonlyMap<string, WebSocket>
   join: (displayName: string, ownerToken?: string) => void
   destroy: () => void
 }
@@ -382,6 +388,7 @@ export function connectAwarenessWs(
     resolveDocId,
     awareness,
     doc,
+    moduleDocs,
     syncWsUrl = getClientConfig().syncWsUrl,
     sessionId = getCollabSessionId(),
     WebSocketClass = typeof WebSocket !== 'undefined' ? WebSocket : undefined,
@@ -396,12 +403,15 @@ export function connectAwarenessWs(
     onDocError,
     onDocClose,
     onJoinTimeout,
+    onReconnecting,
+    onReconnected,
   } = options
 
   if (!WebSocketClass) {
     return {
       controlWs: null,
       docWs: null,
+      moduleSockets: new Map(),
       join: () => {},
       destroy: () => {},
     }
@@ -409,11 +419,93 @@ export function connectAwarenessWs(
 
   let controlWs: WebSocket | null = null
   let docWs: WebSocket | null = null
+  const moduleSockets = new Map<string, WebSocket>()
+  const moduleUpdateHandlers = new Map<string, (update: Uint8Array, origin: unknown) => void>()
+  const closeModuleSockets = () => {
+    for (const [id, socket] of moduleSockets) {
+      const moduleDoc = moduleDocs?.get(id)
+      const handler = moduleUpdateHandlers.get(id)
+      if (moduleDoc && handler) moduleDoc.off('update', handler)
+      socket.onopen = null
+      socket.onmessage = null
+      socket.onclose = null
+      socket.onerror = null
+      if (socket.readyState === WS_OPEN || socket.readyState === WS_CONNECTING) socket.close()
+    }
+    moduleSockets.clear()
+    moduleUpdateHandlers.clear()
+  }
+
+  /** Open every explicitly registered local Y.Doc, not just the editor's active module. */
+  const openModuleSockets = (activeId: string) => {
+    if (!moduleDocs || isDestroyed) return
+    for (const [id, moduleDoc] of moduleDocs) {
+      if (!id || id === 'main' || id === activeId || moduleSockets.has(id)) continue
+      const socket = new WebSocketClass!(buildDocumentWebSocketUrl(syncWsUrl, roomId, id, sessionId))
+      socket.binaryType = 'arraybuffer'
+      moduleSockets.set(id, socket)
+      let reverseSyncSent = false
+      const handler = (update: Uint8Array, origin: unknown) => {
+        if (origin !== socket && socket.readyState === WS_OPEN) {
+          sendBinary(socket, encodeDocUpdateMessage(update))
+        }
+      }
+      moduleUpdateHandlers.set(id, handler)
+      moduleDoc.on('update', handler)
+      socket.onopen = () => {
+        if (isDestroyed || moduleSockets.get(id) !== socket) return
+        sendBinary(socket, encodeSyncStep1Message(moduleDoc))
+        sendBinary(socket, encodeSyncStep2Message(moduleDoc))
+      }
+      socket.onmessage = (event: MessageEvent) => {
+        if (moduleSockets.get(id) !== socket) return
+        if (!(event.data instanceof ArrayBuffer || event.data instanceof Uint8Array)) return
+        const bytes = event.data instanceof ArrayBuffer ? new Uint8Array(event.data) : event.data
+        if (!bytes.length || decoding.readVarUint(decoding.createDecoder(bytes)) !== MESSAGE_SYNC) return
+        const replies = handleIncomingSyncFrame(moduleDoc, bytes, socket, {
+          replyWithReverseSyncStep1: !reverseSyncSent,
+        })
+        if (replies.length > 1) reverseSyncSent = true
+        for (const reply of replies) if (socket.readyState === WS_OPEN) sendBinary(socket, reply)
+      }
+      socket.onerror = (event: Event) => onDocError?.(event)
+      socket.onclose = (event: CloseEvent) => {
+        if (moduleSockets.get(id) !== socket || isDestroyed) return
+        moduleDoc.off('update', handler)
+        moduleUpdateHandlers.delete(id)
+        moduleSockets.delete(id)
+        onDocClose?.(event)
+        if (terminalCodes.has(event.code)) {
+          terminal = true
+          reconnecting = false
+          clearReconnectTimer()
+        } else {
+          scheduleReconnect()
+        }
+      }
+    }
+  }
   let isDestroyed = false
   let activeGeneration = 0
   let pendingJoin: { name: string; token?: string } | null = null
   let activeHandshake: { name: string; token?: string } | null = null
   let joinTimer: ReturnType<typeof setTimeout> | null = null
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  let reconnectAttempts = 0
+  let hasJoined = false
+  let reconnecting = false
+  let waitingForDoc = false
+  let terminal = false
+  let lastJoin: { name: string; token?: string } | null =
+    displayName ? { name: displayName, token: ownerToken } : null
+  const terminalCodes = new Set([4403, CLOSE_UNKNOWN_ROOM, CLOSE_ROOM_CLOSED])
+
+  const clearReconnectTimer = () => {
+    if (reconnectTimer !== null) {
+      clearTimeout(reconnectTimer)
+      reconnectTimer = null
+    }
+  }
 
   const clearJoinTimer = () => {
     if (joinTimer) {
@@ -450,8 +542,34 @@ export function connectAwarenessWs(
       }
     }
 
-    // 4. Notify timeout callback
-    onJoinTimeout?.()
+    // 4. A reconnect handshake timeout must retry rather than stall forever.
+    if (hasJoined && !terminal) scheduleReconnect()
+    else onJoinTimeout?.()
+  }
+
+  function scheduleReconnect() {
+    if (isDestroyed || terminal || !hasJoined || !lastJoin || reconnectTimer !== null) return
+    reconnecting = true
+    waitingForDoc = false
+    reconnectAttempts += 1
+    onReconnecting?.(reconnectAttempts)
+    const delay = Math.min(1000 * 2 ** Math.min(reconnectAttempts - 1, 5), 30000)
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null
+      if (isDestroyed || terminal) return
+      closeDocumentSocket()
+      if (controlWs) {
+        const old = controlWs
+        controlWs = null
+        old.onopen = null
+        old.onmessage = null
+        old.onerror = null
+        old.onclose = null
+        if (old.readyState === WS_OPEN || old.readyState === WS_CONNECTING) old.close()
+      }
+      controlWs = initControlSocket()
+      startJoinTimer(activeGeneration)
+    }, delay)
   }
 
   const startJoinTimer = (gen: number) => {
@@ -468,6 +586,7 @@ export function connectAwarenessWs(
     if (isDestroyed || gen !== activeGeneration) return
     if (ws.readyState === WS_OPEN) {
       activeHandshake = { name, token }
+      lastJoin = { name, token }
       const payload: Record<string, string> = {
         type: 'join',
         display_name: name,
@@ -492,6 +611,29 @@ export function connectAwarenessWs(
       ) => void)
     | null = null
   let onDocUpdate: ((update: Uint8Array, origin: unknown) => void) | null = null
+
+  const closeDocumentSocket = () => {
+    closeModuleSockets()
+    if (onDocAwarenessUpdate) {
+      awareness.off('update', onDocAwarenessUpdate)
+      onDocAwarenessUpdate = null
+    }
+    if (doc && onDocUpdate) {
+      doc.off('update', onDocUpdate)
+      onDocUpdate = null
+    }
+    const old = docWs
+    docWs = null
+    if (old) {
+      old.onopen = null
+      old.onmessage = null
+      old.onerror = null
+      old.onclose = null
+      if (old.readyState === WS_OPEN || old.readyState === WS_CONNECTING) {
+        old.close()
+      }
+    }
+  }
 
   // 2. Open Document Socket upon receiving 'joined'
   const openDocumentSocket = async (joinedMsg?: JoinedMessage) => {
@@ -540,11 +682,18 @@ export function connectAwarenessWs(
           // ignore fetch error
         }
       }
-    } else if (!resolvedDocId) {
+    } else if (
+      !resolvedDocId ||
+      (roomMode === 'open' && resolvedDocId === 'main')
+    ) {
       resolvedDocId = 'main'
     }
 
-    if (!resolvedDocId) {
+    if (
+      !resolvedDocId ||
+      (roomMode === 'open' && resolvedDocId === 'main')
+    ) {
+      waitingForDoc = false
       onDocClose?.(
         new SafeCloseEvent('close', {
           code: CLOSE_UNKNOWN_DOC,
@@ -559,13 +708,24 @@ export function connectAwarenessWs(
     const docUrl = buildDocumentWebSocketUrl(syncWsUrl, roomId, resolvedDocId, sessionId)
     docWs = new WebSocketClass(docUrl)
     docWs.binaryType = 'arraybuffer'
+    if (roomMode === 'open') openModuleSockets(resolvedDocId)
 
     docWs.onerror = (event: Event) => {
       onDocError?.(event)
     }
 
+    const openedSocket = docWs
     docWs.onclose = (event: CloseEvent) => {
+      if (docWs !== openedSocket || isDestroyed) return
+      closeDocumentSocket()
       onDocClose?.(event)
+      if (terminalCodes.has(event.code)) {
+        terminal = true
+        reconnecting = false
+        clearReconnectTimer()
+      } else {
+        scheduleReconnect()
+      }
     }
 
     onDocAwarenessUpdate = (
@@ -598,6 +758,8 @@ export function connectAwarenessWs(
     let hasSentReverseSync = false
 
     docWs.onopen = () => {
+      if (isDestroyed || docWs !== openedSocket) return
+      waitingForDoc = false
       // 1. Send sync step 1 and step 2 to exchange initial state bidirectionally (US-02 / FR2)
       if (doc) {
         sendBinary(docWs!, encodeSyncStep1Message(doc))
@@ -610,6 +772,13 @@ export function connectAwarenessWs(
       // 3. Advertise local state if already present
       if (awareness.getLocalState() !== null) {
         sendBinary(docWs!, encodeAwarenessMessage(awareness, [awareness.clientID]))
+      }
+      // The transport has reopened and the initial sync frames were sent.
+      // This does not guarantee that the remote state has already converged.
+      if (reconnecting) {
+        reconnecting = false
+        reconnectAttempts = 0
+        onReconnected?.()
       }
     }
 
@@ -659,8 +828,8 @@ export function connectAwarenessWs(
         const { name, token } = pendingJoin
         pendingJoin = null
         sendJoin(ws, name, gen, token)
-      } else if (displayName) {
-        sendJoin(ws, displayName, gen, ownerToken)
+      } else if (lastJoin) {
+        sendJoin(ws, lastJoin.name, gen, lastJoin.token)
       }
     }
 
@@ -670,12 +839,21 @@ export function connectAwarenessWs(
         try {
           const msg = JSON.parse(event.data) as { type?: string }
           if (msg.type === 'joined') {
+            hasJoined = true
+            clearReconnectTimer()
             clearJoinTimer()
             pendingJoin = null
             activeHandshake = null
             onJoined?.(msg as JoinedMessage)
-            void openDocumentSocket(msg as JoinedMessage)
+            waitingForDoc = true
+            void openDocumentSocket(msg as JoinedMessage).catch(() => {
+              if (!isDestroyed && waitingForDoc) scheduleReconnect()
+            })
           } else if (msg.type === 'join-refused') {
+            // A definitive refusal must not cause an automatic join loop.
+            terminal = true
+            reconnecting = false
+            clearReconnectTimer()
             clearJoinTimer()
             pendingJoin = null
             activeHandshake = null
@@ -709,7 +887,15 @@ export function connectAwarenessWs(
       if (controlWs === ws) {
         controlWs = null
       }
+      closeDocumentSocket()
       onClose?.(event)
+      if (terminalCodes.has(event.code)) {
+        terminal = true
+        reconnecting = false
+        clearReconnectTimer()
+      } else {
+        scheduleReconnect()
+      }
     }
 
     return ws
@@ -755,19 +941,12 @@ export function connectAwarenessWs(
 
   const destroy = () => {
     isDestroyed = true
+    reconnecting = false
+    clearReconnectTimer()
     activeGeneration += 1
     pendingJoin = null
     activeHandshake = null
     clearJoinTimer()
-    if (onDocAwarenessUpdate) {
-      awareness.off('update', onDocAwarenessUpdate)
-      onDocAwarenessUpdate = null
-    }
-    if (doc && onDocUpdate) {
-      doc.off('update', onDocUpdate)
-      onDocUpdate = null
-    }
-
     if (docWs) {
       const activeDocWs = docWs
       docWs = null
@@ -783,6 +962,8 @@ export function connectAwarenessWs(
         activeDocWs.close()
       }
     }
+
+    closeDocumentSocket()
 
     if (controlWs) {
       const activeControlWs = controlWs
@@ -808,6 +989,7 @@ export function connectAwarenessWs(
     get docWs() {
       return docWs
     },
+    moduleSockets,
     join,
     destroy,
   }
