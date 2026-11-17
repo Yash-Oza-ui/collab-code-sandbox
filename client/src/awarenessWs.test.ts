@@ -1921,3 +1921,354 @@ describe('T-20 WebSocket connection and multi-client awareness synchronization',
     }
   })
 })
+
+
+describe('US-04 offline Yjs recovery', () => {
+  it('preserves offline local edits and exchanges them after reconnect', async () => {
+    vi.useFakeTimers()
+    try {
+      const relay = new TestRelay()
+      const roomId = 'us04-offline-edits'
+      const makeSocket = function (url: string) { return relay.createClient(url) } as unknown as typeof WebSocket
+      const docA = new Y.Doc()
+      const docB = new Y.Doc()
+      const awarenessA = createAwareness(docA)
+      const awarenessB = createAwareness(docB)
+      const a = connectAwarenessWs({
+        roomId, awareness: awarenessA, doc: docA,
+        sessionId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+        syncWsUrl: 'ws://localhost:8081/ws/rooms', WebSocketClass: makeSocket
+      })
+      const b = connectAwarenessWs({
+        roomId, awareness: awarenessB, doc: docB,
+        sessionId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+        syncWsUrl: 'ws://localhost:8081/ws/rooms', WebSocketClass: makeSocket
+      })
+      try {
+        a.join('Alice')
+        b.join('Bob')
+
+        await vi.waitFor(() => {
+          expect(a.docWs?.readyState).toBe(WebSocket.OPEN)
+          expect(b.docWs?.readyState).toBe(WebSocket.OPEN)
+        })
+
+        docA.getText('content').insert(0, 'initial ')
+
+        await vi.waitFor(() => {
+          expect(docB.getText('content').toString()).toBe('initial ')
+        })
+          ; (a.controlWs as unknown as TestWebSocket).close(1006, 'Network lost')
+        docA.getText('content').insert(8, 'offline ')
+        docB.getText('content').insert(8, 'remote')
+        await vi.advanceTimersByTimeAsync(1000)
+        expect(docA.getText('content').toString()).toBe(docB.getText('content').toString())
+        expect(docA.getText('content').toString()).toContain('offline ')
+        expect(docA.getText('content').toString()).toContain('remote')
+      } finally {
+        a.destroy()
+        b.destroy()
+        awarenessA.destroy()
+        awarenessB.destroy()
+        docA.destroy()
+        docB.destroy()
+      }
+    } finally { vi.useRealTimers() }
+  })
+})
+
+describe('US-04 reconnect lifecycle', () => {
+  it('rejoins with the same session ID after control socket drops and opens document only after joined', async () => {
+    vi.useFakeTimers()
+    try {
+      const relay = new TestRelay()
+      const doc = new Y.Doc()
+      const awareness = createAwareness(doc)
+      const sessionId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+      const attempts: number[] = []
+      let recovered = 0
+      const conn = connectAwarenessWs({
+        roomId: 'us04-reconnect', awareness, doc, sessionId,
+        syncWsUrl: 'ws://localhost:8081/ws/rooms',
+        WebSocketClass: function (url: string) { return relay.createClient(url) } as unknown as typeof WebSocket,
+        onReconnecting: (n) => attempts.push(n),
+        onReconnected: () => { recovered++ },
+      })
+      conn.join('Alice')
+      await vi.runAllTicks()
+      const first = conn.controlWs as unknown as TestWebSocket
+      expect(conn.docWs).not.toBeNull()
+      first.close(1006, 'Network lost')
+      expect(attempts).toEqual([1])
+      expect(conn.docWs).toBeNull()
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(conn.controlWs).not.toBe(first)
+      expect(conn.docWs).not.toBeNull()
+      expect(recovered).toBe(1)
+      expect(relay.rooms.get('us04-reconnect')?.get(sessionId)?.displayName).toBe('Alice')
+      conn.destroy()
+    } finally { vi.useRealTimers() }
+  })
+
+  it('stops automatic retries on a terminal close code', async () => {
+    vi.useFakeTimers()
+    try {
+      const relay = new TestRelay()
+      const doc = new Y.Doc()
+      const awareness = createAwareness(doc)
+      let attempts = 0
+      const conn = connectAwarenessWs({
+        roomId: 'us04-terminal', awareness, doc,
+        sessionId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+        syncWsUrl: 'ws://localhost:8081/ws/rooms',
+        WebSocketClass: function (url: string) { return relay.createClient(url) } as unknown as typeof WebSocket,
+        onReconnecting: () => { attempts++ },
+      })
+      conn.join('Alice')
+      await vi.runAllTicks()
+      const first = conn.controlWs as unknown as TestWebSocket
+      first.close(4403, 'Forbidden')
+      await vi.advanceTimersByTimeAsync(120000)
+      expect(attempts).toBe(0)
+      expect(conn.controlWs).toBeNull()
+      conn.destroy()
+    } finally { vi.useRealTimers() }
+  })
+
+  it('retries a timed-out reconnect handshake instead of becoming stuck', async () => {
+    vi.useFakeTimers()
+    try {
+      const relay = new TestRelay()
+      const doc = new Y.Doc()
+      const awareness = createAwareness(doc)
+      const attempts: number[] = []
+      const conn = connectAwarenessWs({
+        roomId: 'us04-timeout', awareness, doc,
+        joinTimeoutMs: 100,
+        sessionId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+        syncWsUrl: 'ws://localhost:8081/ws/rooms',
+        WebSocketClass: function (url: string) { return relay.createClient(url) } as unknown as typeof WebSocket,
+        onReconnecting: (n) => attempts.push(n),
+      })
+      conn.join('Alice')
+      await vi.runAllTicks()
+      relay.ignoreJoins = true
+        ; (conn.controlWs as unknown as TestWebSocket).close(1006, 'Network lost')
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(attempts).toEqual([1])
+      await vi.advanceTimersByTimeAsync(100)
+      expect(attempts).toEqual([1, 2])
+      relay.ignoreJoins = false
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(conn.docWs).not.toBeNull()
+      conn.destroy()
+    } finally { vi.useRealTimers() }
+  })
+})
+
+describe('US-04 Open-mode registered module recovery', () => {
+  it('reopens inactive module sockets after control reconnect without losing their Yjs state', async () => {
+    vi.useFakeTimers()
+    const relay = new TestRelay()
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      json: async () => [
+        { module_id: 'module_alpha', is_entry: true, pending: false },
+        { module_id: 'module_beta', pending: false },
+      ],
+    })))
+    const roomId = 'us04-multi-module'
+    relay.roomModes.set(roomId, 'open')
+    relay.roomModules.set(roomId, new Set(['module_alpha', 'module_beta']))
+    const makeSocket = function (url: string) { return relay.createClient(url) } as unknown as typeof WebSocket
+    const active = new Y.Doc()
+    const inactive = new Y.Doc()
+    const awareness = createAwareness(active)
+    const modules = new Map([['module_beta', inactive]])
+    const conn = connectAwarenessWs({
+      roomId, docId: 'module_alpha', doc: active, moduleDocs: modules, awareness,
+      sessionId: 'ffffffff-ffff-4fff-8fff-ffffffffffff',
+      syncWsUrl: 'ws://localhost:8081/ws/rooms', WebSocketClass: makeSocket,
+    })
+    try {
+      conn.join('Alice')
+      await vi.waitFor(() => {
+        expect(conn.docWs?.readyState).toBe(WebSocket.OPEN)
+        expect(conn.moduleSockets.get('module_beta')?.readyState).toBe(WebSocket.OPEN)
+      })
+      ;(conn.controlWs as unknown as TestWebSocket).close(1006, 'Network lost')
+      inactive.getText('content').insert(0, 'offline module edit')
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(conn.moduleSockets.get('module_beta')?.readyState).toBe(WebSocket.OPEN)
+      expect(inactive.getText('content').toString()).toBe('offline module edit')
+      expect(relay.docClients.size).toBe(2)
+    } finally {
+      conn.destroy()
+      awareness.destroy()
+      active.destroy()
+      inactive.destroy()
+      vi.unstubAllGlobals()
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('US-04 duplicate joined regression', () => {
+  it('opens exactly one document socket when the relay repeats joined', async () => {
+    const relay = new TestRelay()
+    const roomId = 'us04-duplicate-joined'
+    const doc = new Y.Doc()
+    const awareness = createAwareness(doc)
+    const conn = connectAwarenessWs({
+      roomId, doc, awareness,
+      sessionId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+      syncWsUrl: 'ws://localhost:8081/ws/rooms',
+      WebSocketClass: function (url: string) {
+        return relay.createClient(url)
+      } as unknown as typeof WebSocket,
+    })
+    try {
+      conn.join('Alice')
+      await vi.waitFor(() => expect(conn.docWs?.readyState).toBe(WebSocket.OPEN))
+      const initialDocSocket = conn.docWs
+      const control = conn.controlWs as unknown as TestWebSocket
+      control.receiveText(JSON.stringify({
+        type: 'joined', member_id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+        role: 'Guest', mode: 'pair', permissions: { can_edit: true, can_run: true },
+      }))
+      await new Promise((resolve) => setTimeout(resolve, 10))
+      expect(conn.docWs).toBe(initialDocSocket)
+      expect(relay.docClients.size).toBe(1)
+    } finally {
+      conn.destroy()
+      awareness.destroy()
+      doc.destroy()
+    }
+  })
+})
+
+describe('US-04 approved module lifecycle', () => {
+  it('discovers all approved modules and closes revoked sockets on reconnect', async () => {
+    const relay = new TestRelay()
+    const roomId = 'us04-approved-lifecycle'
+    relay.roomModes.set(roomId, 'open')
+    relay.roomModules.set(roomId, new Set(['module_alpha', 'module_beta', 'module_gamma']))
+    const approved = new Set(['module_alpha', 'module_beta', 'module_gamma'])
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => [...approved].map((module_id) => ({
+        module_id, is_entry: module_id === 'module_alpha', pending: false,
+      })),
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+    const doc = new Y.Doc()
+    const awareness = createAwareness(doc)
+    const conn = connectAwarenessWs({
+      roomId, doc, awareness,
+      sessionId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      syncWsUrl: 'ws://localhost:8081/ws/rooms',
+      WebSocketClass: function (url: string) {
+        return relay.createClient(url)
+      } as unknown as typeof WebSocket,
+    })
+    try {
+      conn.join('Alice')
+      await vi.waitFor(() => {
+        expect(conn.docWs?.readyState).toBe(WebSocket.OPEN)
+        expect(conn.moduleSockets.get('module_beta')?.readyState).toBe(WebSocket.OPEN)
+        expect(conn.moduleSockets.get('module_gamma')?.readyState).toBe(WebSocket.OPEN)
+      })
+      const revokedSocket = conn.moduleSockets.get('module_gamma')!
+      approved.delete('module_gamma')
+      relay.roomModules.get(roomId)!.delete('module_gamma')
+      ;(conn.controlWs as unknown as TestWebSocket).close(1006, 'Network lost')
+      await vi.waitFor(() => {
+        expect(fetchMock).toHaveBeenCalledTimes(2)
+        expect(conn.docWs?.readyState).toBe(WebSocket.OPEN)
+        expect(conn.moduleSockets.get('module_beta')?.readyState).toBe(WebSocket.OPEN)
+        expect(conn.moduleSockets.has('module_gamma')).toBe(false)
+        expect(revokedSocket.readyState).toBe(WebSocket.CLOSED)
+      }, { timeout: 4000 })
+      expect(relay.docClients.size).toBe(2)
+    } finally {
+      conn.destroy()
+      awareness.destroy()
+      doc.destroy()
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('rejects an unapproved resolveDocId and opens the approved entry module', async () => {
+    const relay = new TestRelay()
+    const roomId = 'us04-resolver-validation'
+    relay.roomModes.set(roomId, 'open')
+    relay.roomModules.set(roomId, new Set(['module_alpha']))
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      json: async () => [{ module_id: 'module_alpha', is_entry: true, pending: false }],
+    })))
+    const doc = new Y.Doc()
+    const awareness = createAwareness(doc)
+    const conn = connectAwarenessWs({
+      roomId, doc, awareness,
+      sessionId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+      syncWsUrl: 'ws://localhost:8081/ws/rooms',
+      WebSocketClass: function (url: string) {
+        return relay.createClient(url)
+      } as unknown as typeof WebSocket,
+      resolveDocId: async () => 'module_not_approved',
+    })
+    try {
+      conn.join('Alice')
+      await vi.waitFor(() => expect(conn.docWs?.readyState).toBe(WebSocket.OPEN))
+      expect([...relay.docClients.values()].map((entry) => entry.docId)).toEqual(['module_alpha'])
+    } finally {
+      conn.destroy()
+      awareness.destroy()
+      doc.destroy()
+      vi.unstubAllGlobals()
+    }
+  })
+})
+
+describe('US-04 Open-mode missing module regression', () => {
+  it('does not open main document when no registered module is available', async () => {
+    const relay = new TestRelay()
+    const roomId = 'us04-open-no-modules'
+
+    relay.roomModes.set(roomId, 'open')
+    relay.roomModules.set(roomId, new Set())
+
+    const doc = new Y.Doc()
+    const awareness = createAwareness(doc)
+
+    const conn = connectAwarenessWs({
+      roomId,
+      doc,
+      awareness,
+      sessionId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+      syncWsUrl: 'ws://localhost:8081/ws/rooms',
+      WebSocketClass: function (url: string) {
+        return relay.createClient(url)
+      } as unknown as typeof WebSocket,
+      resolveDocId: async () => null,
+    })
+
+    try {
+      conn.join('Alice')
+
+      await vi.waitFor(() => {
+        expect(conn.controlWs?.readyState).toBe(WebSocket.OPEN)
+      })
+
+      await new Promise((resolve) => setTimeout(resolve, 20))
+
+      expect(conn.docWs).toBeNull()
+      expect(relay.docClients.size).toBe(0)
+    } finally {
+      conn.destroy()
+      awareness.destroy()
+      doc.destroy()
+    }
+  })
+})
