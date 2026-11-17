@@ -90,6 +90,7 @@ export default function RoomPage(props: RoomPageProps = {}) {
   const [currentLanguage, setCurrentLanguage] = useState<SupportedLanguage>('python')
   const [runOutput, setRunOutput] = useState<RunResponseData | null>(null)
   // Role from the server's `joined` or `roster` message (T-10 Host badge / US-27 Observer mode)
+  const [roomMode, setRoomMode] = useState<{ mode: string; detail?: string } | null>(null)
   const [role, setRole] = useState<string | null>(null)
   const [myMemberId, setMyMemberId] = useState<string | null>(null)
   const [roster, setRoster] = useState<RosterMember[]>([])
@@ -200,6 +201,10 @@ export default function RoomPage(props: RoomPageProps = {}) {
           myMemberIdRef.current = joined.member_id ?? null
           setMyMemberId(joined.member_id ?? null)
           setRole(joined.role)
+          setRoomMode({
+            mode: joined.mode,
+            detail: joined.mode === 'pair' ? joined.preset : typeof joined.language === 'string' ? joined.language : undefined,
+          })
           const name = pendingNameRef.current
           if (!name) return
 
@@ -459,6 +464,11 @@ export default function RoomPage(props: RoomPageProps = {}) {
     <div className="room-page">
       <header className="room-header">
         <span>Room: {roomId}</span>
+        {roomMode && (
+          <span className="room-mode-badge" data-testid="room-mode-badge">
+            {roomMode.mode === 'pair' ? 'Pair' : 'Open'}{roomMode.detail ? ` · ${roomMode.detail}` : ''}
+          </span>
+        )}
         {displayName && (
           <>
             <span className="room-header-separator" aria-hidden="true"> · </span>

@@ -3,7 +3,7 @@ import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import CreateRoomScreen from './CreateRoomScreen'
-import type { CreatedRoom } from './createRoom'
+import type { CreatedRoom, CreateRoomChoice } from './createRoom'
 
 ;(globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -25,7 +25,7 @@ describe('CreateRoomScreen', () => {
     Reflect.deleteProperty(window.navigator, 'clipboard')
   })
 
-  async function renderScreen(createRoomFn: () => Promise<CreatedRoom>) {
+  async function renderScreen(createRoomFn: (choice: CreateRoomChoice) => Promise<CreatedRoom>) {
     container = document.createElement('div')
     document.body.appendChild(container)
     root = createRoot(container)
@@ -56,12 +56,13 @@ describe('CreateRoomScreen', () => {
   it('shows the create button and no link at first', async () => {
     await renderScreen(vi.fn())
     expect(button('Create room').disabled).toBe(false)
-    expect(container?.querySelector('input')).toBeNull()
+    expect(container?.querySelector('#create-room-link')).toBeNull()
   })
 
   it('creates a room and shows the share link and an open link', async () => {
     const createRoomFn = await createOk()
     expect(createRoomFn).toHaveBeenCalledTimes(1)
+    expect(createRoomFn).toHaveBeenCalledWith({ mode: 'pair', preset: 'debug_together' })
     const input = container?.querySelector('input') as HTMLInputElement
     expect(input.value).toBe(LINK)
     const open = container?.querySelector('a') as HTMLAnchorElement
