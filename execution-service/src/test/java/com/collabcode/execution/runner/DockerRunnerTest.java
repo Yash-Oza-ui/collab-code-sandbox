@@ -21,36 +21,41 @@ class DockerRunnerTest {
     private DockerRunner runner;
 
     @BeforeAll
-    static void requireDockerAndImage() throws Exception {
-        Process info = new ProcessBuilder("docker", "info")
-                .redirectOutput(ProcessBuilder.Redirect.DISCARD)
-                .redirectError(ProcessBuilder.Redirect.DISCARD)
-                .start();
+    static void requireDockerAndImage() {
+        try {
+            Process info = new ProcessBuilder("docker", "info")
+                    .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+                    .redirectError(ProcessBuilder.Redirect.DISCARD)
+                    .start();
 
-        if (!info.waitFor(10, TimeUnit.SECONDS)) {
-            info.destroyForcibly();
+            if (!info.waitFor(10, TimeUnit.SECONDS)) {
+                info.destroyForcibly();
+                org.junit.jupiter.api.Assumptions.assumeTrue(
+                        false, "Docker engine is unavailable");
+            }
+
             org.junit.jupiter.api.Assumptions.assumeTrue(
-                    false, "Docker engine is unavailable");
-        }
+                    info.exitValue() == 0, "Docker engine is unavailable");
 
-        org.junit.jupiter.api.Assumptions.assumeTrue(
-                info.exitValue() == 0, "Docker engine is unavailable");
+            Process image = new ProcessBuilder(
+                    "docker", "image", "inspect", IMAGE)
+                    .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+                    .redirectError(ProcessBuilder.Redirect.DISCARD)
+                    .start();
 
-        Process image = new ProcessBuilder(
-                "docker", "image", "inspect", IMAGE)
-                .redirectOutput(ProcessBuilder.Redirect.DISCARD)
-                .redirectError(ProcessBuilder.Redirect.DISCARD)
-                .start();
+            if (!image.waitFor(10, TimeUnit.SECONDS)) {
+                image.destroyForcibly();
+                org.junit.jupiter.api.Assumptions.assumeTrue(
+                        false, "Required Python image is unavailable");
+            }
 
-        if (!image.waitFor(10, TimeUnit.SECONDS)) {
-            image.destroyForcibly();
             org.junit.jupiter.api.Assumptions.assumeTrue(
-                    false, "Required Python image is unavailable");
+                    image.exitValue() == 0,
+                    "Build the project Python runtime image before running integration tests");
+        } catch (Exception e) {
+            org.junit.jupiter.api.Assumptions.assumeTrue(
+                    false, "Docker engine is unavailable: " + e.getMessage());
         }
-
-        org.junit.jupiter.api.Assumptions.assumeTrue(
-                image.exitValue() == 0,
-                "Build the project Python runtime image before running integration tests");
     }
 
     @BeforeEach
@@ -64,6 +69,7 @@ class DockerRunnerTest {
         limits.setMemoryMb(128);
         limits.setPidsLimit(64);
         limits.setMaxOutputBytes(1024 * 1024);
+        limits.setCompileTimeoutSeconds(10);
         limits.setMaxRequestBodyBytes(1024 * 1024);
 
         return new DockerRunner(limits);
@@ -152,6 +158,7 @@ class DockerRunnerTest {
 
         assertTrue(result.isTimedOut());
         assertEquals("timeout", result.getFailureKind());
+        assertEquals("Time limit exceeded", result.getMessage());
         assertNotEquals(0, result.getExitCode());
     }
 
@@ -194,6 +201,7 @@ class DockerRunnerTest {
         limits.setMemoryMb(128);
         limits.setPidsLimit(64);
         limits.setMaxOutputBytes(1024 * 1024);
+        limits.setCompileTimeoutSeconds(10);
         limits.setMaxRequestBodyBytes(1024 * 1024);
         return limits;
     }

@@ -132,11 +132,48 @@ public class FakeCodeRunner implements CodeRunner {
             );
         }
 
-        // Case 4: simulate bounded in-flight execution for testing (FR16 / US-11)
+        // Case 3.5: timeout / infinite loop simulation (US-13)
         String code = spec.getFiles() == null ? "" : spec.getFiles().stream()
                 .map(RunFile::getContent)
                 .filter(c -> c != null)
                 .collect(java.util.stream.Collectors.joining("\n"));
+
+        if (code.contains("infinite_loop") || code.contains("while True: pass") || code.contains("while true")) {
+            return new ExecutionResult(
+                    "",
+                    "",
+                    124,
+                    5000.0,
+                    0.0,
+                    true,
+                    false,
+                    "timeout",
+                    false,
+                    "Time limit exceeded",
+                    compileTime,
+                    null
+            );
+        }
+
+        // Case 3.6: output flood simulation (US-13)
+        if (code.contains("output_flood")) {
+            return new ExecutionResult(
+                    "A".repeat(1024),
+                    "",
+                    0,
+                    15.0,
+                    4.2,
+                    false,
+                    false,
+                    null,
+                    true,
+                    null,
+                    compileTime,
+                    null
+            );
+        }
+
+        // Case 4: simulate bounded in-flight execution for testing (FR16 / US-11)
         if (code.toLowerCase().contains("sleep") || code.toLowerCase().contains("delay")) {
             long delayMs = 3000;
             java.util.regex.Matcher m = java.util.regex.Pattern.compile("(?:sleep|delay)[\\s_\\(]+(\\d+)").matcher(code.toLowerCase());
