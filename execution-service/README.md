@@ -417,20 +417,27 @@ docker ps -a --filter "name=run-" --format '{{.Names}}' | wc -l      # expected:
 
 ---
 
-## Resource limits (DR3)
+## Resource limits (DR3, US-13, NFR4.1 to NFR4.5)
 
 Limits are read from `src/main/resources/application.yml` under `app.execution.limits`.
-They are **never hard-coded** in Java source.
+They are **never hard-coded** in Java source (DR3). To tune limits per host or environment, update `application.yml` or override via environment variables.
 
-| Key                      | Value       | Notes                                    |
-|--------------------------|-------------|------------------------------------------|
-| `wall-time-seconds`      | 5           | NFR4.1 – killed after this many seconds  |
-| `memory-mb`              | 128         | NFR4.2 – container memory cap            |
-| `pids-limit`             | 64          | NFR4.3 – max processes inside container  |
-| `max-output-bytes`       | 1 048 576   | NFR4.4 – 1 MiB stdout+stderr cap         |
-| `max-request-body-bytes` | 1 048 576   | T-06 §2 – request body cap               |
-| `max-queue-length`       | 8           | FR16 – concurrent/waiting run limit      |
-| `queue-retry-after-seconds` | 5        | FR16 – retry hint on 503 QUEUE_FULL      |
+| Key                        | Initial Value | Traceability | Description / Contract Outcome                                       |
+|----------------------------|---------------|--------------|----------------------------------------------------------------------|
+| `wall-time-seconds`        | 5             | NFR4.1       | Maximum wall-clock time per run (and per test). On timeout: `timed_out: true`, `failure_kind: "timeout"`, `message: "Time limit exceeded"`. |
+| `memory-mb`                | 128           | NFR4.2       | Container memory cap with swap disabled (`--memory-swap` = `--memory`). On OOM: `oom_killed: true`, `failure_kind: "non_zero_exit"`, `message: "Memory limit exceeded"`. |
+| `pids-limit`               | 64            | NFR4.3       | Max processes/threads inside container. Fork bombs are contained within the sandbox. |
+| `max-output-bytes`         | 1 048 576     | NFR4.4       | Combined stdout + stderr cap (1 MiB). When exceeded: `output_truncated: true`. |
+| `compile-timeout-seconds`  | 10            | NFR4.5       | Separate compile-stage timeout for compiled languages.               |
+| `max-request-body-bytes`   | 1 048 576     | T-06 §2 / DR5| Maximum size of a single run request body (1 MiB).                   |
+| `max-queue-length`         | 10            | FR16 / US-11 | Max concurrent and waiting runs before refusing new runs with 503.   |
+| `queue-retry-after-seconds`| 5             | FR16 / US-11 | Seconds sent in `Retry-After` header and error body on queue full.   |
+
+> **Per-Host Configuration (DR3 / US-16):**
+> Every limit listed above is configurable per deployment host via environment variables
+> (e.g. `APP_EXECUTION_LIMITS_WALL_TIME_SECONDS=3`) or custom application profile files.
+> Nothing is hard-coded in Java source. Final host-specific values are recorded only after
+> the deployment host is fixed and tested. See [docs/host-config.md](../docs/host-config.md) for the master DR3 limits table.
 
 ---
 
