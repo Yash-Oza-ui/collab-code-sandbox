@@ -144,21 +144,53 @@ The execution service uses the Docker daemon of the machine on which it runs. Do
 The real Docker runner reports measurements from the trusted supervisor inside
 the container; it does not use `FakeCodeRunner` values.
 
-- `execution_time_ms` uses Python's `time.monotonic_ns()` from immediately
-  before the user process is spawned until that process exits. It excludes
-  queue waiting, Docker/container startup, workspace creation and cleanup.
-- `peak_memory_mb` is read from the container's cgroup high-water mark:
-  `/sys/fs/cgroup/memory.peak` on cgroup v2, with
-  `/sys/fs/cgroup/memory/memory.max_usage_in_bytes` as the cgroup v1 fallback,
-  and `getrusage(RUSAGE_CHILDREN).ru_maxrss` as the final fallback.
-  This measures the run container's peak resident memory, including only the
-  small supervisor overhead in addition to the submitted process.
-- The supervisor runs with only SETUID/SETGID capabilities, drops submitted
-  code to UID/GID 1001, and writes measurements to a root-only metrics directory
-  bind-mounted from the workspace. Submitted code cannot access or tamper with
-  the measurements. Source files remain mounted read-only.
-  The run timer and memory measurement are collected for successful,
-  non-zero-exit, syntax-error and timeout runs.
+### Execution time measurement
+- `execution_time_ms` uses Python's `time.monotonic_ns()` measured by the supervisor
+  immediately before the user process is spawned until that process exits.
+- It strictly measures the run stage and excludes queue waiting, Docker daemon
+  interaction, container spin-up, workspace creation, and cleanup.
+- Repeatability: Because container boot overhead is excluded, repeated executions
+  of deterministic code produce consistent execution times within small variance margins.
+
+### Peak memory measurement & high-water marks
+- `peak_memory_mb` is read from genuine kernel high-water marks:
+  1. cgroup v2: `/sys/fs/cgroup/memory.peak` (modern Docker on Linux/WSL2).
+  2. cgroup v1: `/sys/fs/cgroup/memory/memory.max_usage_in_bytes` (legacy hosts).
+  3. Fallback: `resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss * 1024`
+     (Linux child-process maximum resident set size across its lifetime).
+- High-water mark integrity: Instantaneous counters (`memory.current` or
+  `memory.usage_in_bytes`) are intentionally avoided because reading them after
+  process exit misses the true peak if the program deallocated memory before termination.
+  The high-water mark preserves the true maximum allocation regardless of later deallocation.
+
+### Peak-memory scope & supervisor overhead
+- **Measurement Boundary:** The cgroup high-water mark encompasses all processes
+  in the container cgroup: the supervisor process (`collab-sandbox-runner`) and the
+  submitted user process (plus any subprocesses spawned by user code).
+- **Justification for Cgroup Scope:**
+  1. *Resource Limit Alignment:* Container memory limits (`--memory=128m`) and
+     kernel OOM decisions are enforced at the cgroup boundary. Measuring at the cgroup
+     level accurately reports how close the workload was to triggering an OOM kill.
+  2. *Multi-Process Support:* If submitted code spawns worker processes or helper
+     tools, process-specific RSS (`ru_maxrss`) only reports the largest single child,
+     whereas cgroup statistics accurately aggregate concurrent process memory.
+  3. *Supervisor Overhead & Impact:* The supervisor is an idle Python process waiting
+     on `child.wait()`. Its resident memory footprint is static and minimal (~8-12 MB).
+     The reported `peak_memory_mb` therefore reflects the container's peak memory
+     including this ~8-12 MB runtime baseline.
+  4. *Fallback Scope:* In environments where cgroups are unavailable or when tested
+     with `COLLAB_SANDBOX_FORCE_RUSAGE=1`, the fallback uses `ru_maxrss`, which isolates
+     the submitted child process's peak RSS specifically (0 MB supervisor overhead).
+
+### Failed runs and OOM handling
+- Run timing and peak memory are recorded for successful runs, non-zero exits,
+  syntax errors (`compile_error`), timeouts, and OOM kills.
+- **No Fabricated OOM Metrics:** When an OOM kill occurs, the supervisor's negative
+  `oom_score_adj` ensures it survives child termination to record the actual monotonic
+  execution time and cgroup peak memory attained before the kill. If the container
+  was terminated abruptly before metrics could be flushed, `execution_time_ms` and
+  `peak_memory_mb` report `0.0` (unavailable), rather than fabricating the configured
+  memory limit or total container elapsed lifetime.
 - Python has no separate compile stage, so `compile_time_ms` remains `null`;
   `execution_time_ms` is still populated for syntax errors because the Python
   interpreter must start and parse the submitted file.

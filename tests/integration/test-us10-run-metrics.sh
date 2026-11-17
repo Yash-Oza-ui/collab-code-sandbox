@@ -81,6 +81,30 @@ assert_metrics "sleep-run" "$sleep_result" 1000 0.1 0
 memory_result="$(post_run $'import time\ndata = bytearray(50 * 1024 * 1024)\ntime.sleep(0.8)\nprint(len(data))\n')"
 assert_metrics "memory-run" "$memory_result" 500 40 0
 
+# Genuine high-water peak memory must be captured even if memory is freed before process exit (Point 1).
+freed_result="$(post_run $'import time, gc\ndata = bytearray(50 * 1024 * 1024)\ntime.sleep(0.5)\ndel data\ngc.collect()\ntime.sleep(0.2)\n')"
+assert_metrics "freed-peak-run" "$freed_result" 500 40 0
+
+# Repeatability verification: identical executions must produce consistent execution times (Point 3).
+times=()
+for i in 1 2 3; do
+  repeat_res="$(post_run $'import time\ntime.sleep(0.4)\n')"
+  t="$(python3 -c "import json, sys; print(json.loads(sys.argv[1])['execution_time_ms'])" "$repeat_res")"
+  times+=("$t")
+done
+python3 - "${times[@]}" <<'PY'
+import sys
+times = [float(x) for x in sys.argv[1:]]
+min_t = min(times)
+max_t = max(times)
+spread = max_t - min_t
+for i, t in enumerate(times, 1):
+    assert t >= 350.0, f"run {i} ({t} ms) was less than sleep time (350 ms)"
+    assert t < 2500.0, f"run {i} ({t} ms) included container startup time"
+assert spread < 300.0, f"execution time spread too large across repeated runs: {spread:.1f} ms ({times})"
+print(f"PASS  repeatability-run  runs: {[round(t, 1) for t in times]} ms, spread: {spread:.1f} ms")
+PY
+
 # Failed user programs must still carry the measurements collected before exit.
 failure_result="$(post_run $'raise RuntimeError("US-10 metrics failure test")\n')"
 python3 - "$failure_result" <<'PY'

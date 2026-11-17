@@ -37,7 +37,7 @@ public class DockerRunner implements CodeRunner {
     private static final String PYTHON_EXECUTABLE = "python";
     private static final long CONTAINER_STARTUP_GRACE_SECONDS = 30;
 
-    private record RunMetrics(double executionTimeMs, double peakMemoryMb, boolean timedOut) {}
+    record RunMetrics(double executionTimeMs, double peakMemoryMb, boolean timedOut) {}
 
     private final ExecutionLimitsProperties limits;
 
@@ -180,13 +180,6 @@ public class DockerRunner implements CodeRunner {
 
             if (oomKilled) {
                 exitCode = 137;
-                if (metrics.peakMemoryMb() == 0.0) {
-                    metrics = new RunMetrics(
-                            metrics.executionTimeMs() > 0.0 ? metrics.executionTimeMs() : elapsedMillis(start),
-                            limits.getMemoryMb(),
-                            metrics.timedOut()
-                    );
-                }
             } else if (timedOut) {
                 exitCode = 124;
             } else if (infrastructureTimeout) {
@@ -570,7 +563,7 @@ public class DockerRunner implements CodeRunner {
         }
     }
 
-    private RunMetrics readRunMetrics(Path workspace) {
+    RunMetrics readRunMetrics(Path workspace) {
         if (workspace == null) {
             return new RunMetrics(0.0, 0.0, false);
         }

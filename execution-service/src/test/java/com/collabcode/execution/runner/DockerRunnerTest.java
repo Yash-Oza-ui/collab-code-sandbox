@@ -135,6 +135,68 @@ class DockerRunnerTest {
     }
 
     @Test
+    void capturesPeakMemoryWhenMemoryIsAllocatedAndFreedBeforeExit() {
+        RunSpec spec = new RunSpec(
+                "python",
+                List.of(new RunFile("main.py",
+                        "import time, gc\n"
+                                + "data = bytearray(50 * 1024 * 1024)\n"
+                                + "time.sleep(0.5)\n"
+                                + "del data\n"
+                                + "gc.collect()\n"
+                                + "time.sleep(0.2)\n")),
+                "main.py",
+                "");
+
+        ExecutionResult result = runner.execute(spec);
+
+        assertEquals(0, result.getExitCode());
+        assertTrue(result.getPeakMemoryMb() >= 40.0,
+                "Peak memory must capture the genuine high-water mark even after memory is freed before exit; got "
+                        + result.getPeakMemoryMb() + " MB");
+    }
+
+    @Test
+    void reportsZeroMetricsWhenMetricsFileIsUnavailableWithoutFabricatingLimits() throws Exception {
+        java.nio.file.Path tempWorkspace = java.nio.file.Files.createTempDirectory("collab-test-empty-workspace");
+        try {
+            DockerRunner.RunMetrics metrics = runner.readRunMetrics(tempWorkspace);
+            assertEquals(0.0, metrics.executionTimeMs(), "Unavailable metrics must report 0.0 ms without fabrication");
+            assertEquals(0.0, metrics.peakMemoryMb(), "Unavailable metrics must report 0.0 MB without fabrication");
+            assertFalse(metrics.timedOut());
+        } finally {
+            java.nio.file.Files.deleteIfExists(tempWorkspace);
+        }
+    }
+
+    @Test
+    void producesRepeatableExecutionTimeMeasurementsForIdenticalRuns() {
+        RunSpec spec = new RunSpec(
+                "python",
+                List.of(new RunFile("main.py",
+                        "import time\ntime.sleep(0.4)\n")),
+                "main.py",
+                "");
+
+        int iterations = 3;
+        double[] times = new double[iterations];
+        for (int i = 0; i < iterations; i++) {
+            ExecutionResult result = runner.execute(spec);
+            assertEquals(0, result.getExitCode());
+            times[i] = result.getExecutionTimeMs();
+            assertTrue(times[i] >= 350.0, "Run " + i + " was shorter than requested sleep: " + times[i]);
+            assertTrue(times[i] < 3000.0, "Run " + i + " included container startup: " + times[i]);
+        }
+
+        double min = java.util.Arrays.stream(times).min().orElse(0.0);
+        double max = java.util.Arrays.stream(times).max().orElse(0.0);
+        double spread = max - min;
+        assertTrue(spread < 350.0,
+                "Execution times should be repeatable across runs without container startup jitter; spread="
+                        + spread + " ms (" + java.util.Arrays.toString(times) + ")");
+    }
+
+    @Test
     void reportsMetricsForNonZeroExitAndSyntaxError() {
         ExecutionResult runtimeFailure = runner.execute(new RunSpec(
                 "python",

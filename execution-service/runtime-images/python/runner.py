@@ -43,23 +43,29 @@ def drop_privileges():
 
 
 def peak_memory_bytes():
-    # cgroup v2 (Docker's normal configuration on current Linux/WSL2).
-    # cgroup v1 fallback is retained for older Linux hosts.
-    for path in (
-        "/sys/fs/cgroup/memory.peak",
-        "/sys/fs/cgroup/memory.current",
-        "/sys/fs/cgroup/memory/memory.max_usage_in_bytes",
-        "/sys/fs/cgroup/memory/memory.usage_in_bytes",
-    ):
-        try:
-            with open(path, "r", encoding="ascii") as stream:
-                value = int(stream.read().strip())
-            if value > 0:
-                return value
-        except (OSError, ValueError):
-            pass
+    # Genuine cgroup high-water marks only:
+    # 1. cgroup v2 peak memory (Linux 5.19+ / modern Docker / WSL2)
+    # 2. cgroup v1 max usage (legacy Linux hosts)
+    # Note: Instantaneous counters (memory.current, memory.usage_in_bytes) are intentionally
+    # NOT checked here because reading them after execution misses peak usage if memory was
+    # deallocated before process exit.
+    if os.environ.get("COLLAB_SANDBOX_FORCE_RUSAGE") != "1":
+        for path in (
+            "/sys/fs/cgroup/memory.peak",
+            "/sys/fs/cgroup/memory/memory.max_usage_in_bytes",
+            "/sys/fs/cgroup/memory.max_usage_in_bytes",
+        ):
+            try:
+                with open(path, "r", encoding="ascii") as stream:
+                    value = int(stream.read().strip())
+                if value > 0:
+                    return value
+            except (OSError, ValueError):
+                pass
 
-    # Last-resort Linux process high-water mark, reported in KiB.
+    # Genuine child-process high-water mark fallback:
+    # getrusage(RUSAGE_CHILDREN).ru_maxrss is the peak Resident Set Size (RSS) of the child process
+    # in KiB across its lifetime.
     try:
         return int(resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss * 1024)
     except (OSError, ValueError):
@@ -69,12 +75,18 @@ def peak_memory_bytes():
 def write_metrics():
     elapsed_ms = 0.0 if started_ns is None else (time.monotonic_ns() - started_ns) / 1_000_000.0
     peak_bytes = peak_memory_bytes()
+    try:
+        child_rss_bytes = int(resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss * 1024)
+    except (OSError, ValueError):
+        child_rss_bytes = 0
+
     temporary = METRICS_FILE + ".tmp"
     try:
         os.makedirs(os.path.dirname(METRICS_FILE), exist_ok=True)
         with open(temporary, "w", encoding="ascii") as stream:
             stream.write(f"execution_time_ms={elapsed_ms:.3f}\n")
             stream.write(f"peak_memory_bytes={peak_bytes}\n")
+            stream.write(f"child_rss_bytes={child_rss_bytes}\n")
             stream.write(f"timed_out={str(timed_out).lower()}\n")
             stream.flush()
             os.fsync(stream.fileno())
