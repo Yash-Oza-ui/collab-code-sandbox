@@ -2105,6 +2105,40 @@ describe('US-04 Open-mode registered module recovery', () => {
   })
 })
 
+describe('US-04 duplicate joined regression', () => {
+  it('opens exactly one document socket when the relay repeats joined', async () => {
+    const relay = new TestRelay()
+    const roomId = 'us04-duplicate-joined'
+    const doc = new Y.Doc()
+    const awareness = createAwareness(doc)
+    const conn = connectAwarenessWs({
+      roomId, doc, awareness,
+      sessionId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+      syncWsUrl: 'ws://localhost:8081/ws/rooms',
+      WebSocketClass: function (url: string) {
+        return relay.createClient(url)
+      } as unknown as typeof WebSocket,
+    })
+    try {
+      conn.join('Alice')
+      await vi.waitFor(() => expect(conn.docWs?.readyState).toBe(WebSocket.OPEN))
+      const initialDocSocket = conn.docWs
+      const control = conn.controlWs as unknown as TestWebSocket
+      control.receiveText(JSON.stringify({
+        type: 'joined', member_id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+        role: 'Guest', mode: 'pair', permissions: { can_edit: true, can_run: true },
+      }))
+      await new Promise((resolve) => setTimeout(resolve, 10))
+      expect(conn.docWs).toBe(initialDocSocket)
+      expect(relay.docClients.size).toBe(1)
+    } finally {
+      conn.destroy()
+      awareness.destroy()
+      doc.destroy()
+    }
+  })
+})
+
 describe('US-04 approved module lifecycle', () => {
   it('discovers all approved modules and closes revoked sockets on reconnect', async () => {
     const relay = new TestRelay()
