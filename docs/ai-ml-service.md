@@ -92,5 +92,11 @@ This feature keeps AI use within the project's budget.
 - **Skipped Representation:** When AI is skipped or blocked, the service returns HTTP 200 with `ai_step.status = "skipped"` and an explicit error code (`CONSENT_MISSING`, `AI_DISABLED`, `COST_CAP_REACHED`, `ROOM_RATE_LIMITED`, `RATE_LIMITED_PROVIDER`, `PROVIDER_TIMEOUT`, or `PROVIDER_ERROR`).
 - **HTTP 422 for Genuine Validation Errors:** HTTP 403 is never returned for skipped AI. Standard HTTP 422 `INVALID_REQUEST` is returned only when request schemas are genuinely violated.
 
-### Consent Withdrawal Separation (US-21)
-- **Scope Boundary:** Consent withdrawal (FR12.4, US-21: allowing a user to revoke previously granted consent at any time from room settings) is an independent user story. US-17 focuses strictly on the consent gate preventing code from leaving the sandbox without consent.
+### Consent Withdrawal and Restoration (US-21, FR12.4)
+- **Withdrawal during Active Session:** A user may withdraw consent at any time during an active session via the client-side withdrawal control. The client sends `consent: false` on subsequent analysis requests.
+- **Immediate Gate Blocking:** When consent is withdrawn (`consent: false`), the central consent gate (`call_llm_with_consent`) immediately blocks external LLM dispatch with 0 outbound calls and no code/prompt leakage (NFR8.2).
+- **Skipped Representation & Fallback:** Blocked AI steps return `ai_step: { "status": "skipped", "error_code": "CONSENT_MISSING" }` with the FR40.5 user-facing fallback message: `"AI analysis skipped: user consent required."`
+- **Preserved AI-Free Functionality:** Rule-based static analysis, empirical Big-O regression fitting, and sanitizer crash parsing continue to execute and return HTTP 200 normally.
+- **Restoration of Consent:** Consent can be re-enabled during the same session by sending `consent: true`. If `ai_enabled` is also true, external AI assistance resumes immediately.
+- **Session Isolation:** Consent is per-session, not per-room. Withdrawal in one user's session never affects other participants in the same room. The backend is stateless regarding consent and uses no room-level boolean or persistence store.
+- **Client Coordination:** The client remains the single source of truth for the session consent state (T-18 Decision 8) and provides the current boolean on every request.
