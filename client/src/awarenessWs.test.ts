@@ -2070,6 +2070,13 @@ describe('US-04 Open-mode registered module recovery', () => {
   it('reopens inactive module sockets after control reconnect without losing their Yjs state', async () => {
     vi.useFakeTimers()
     const relay = new TestRelay()
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      json: async () => [
+        { module_id: 'module_alpha', is_entry: true, pending: false },
+        { module_id: 'module_beta', pending: false },
+      ],
+    })))
     const roomId = 'us04-multi-module'
     relay.roomModes.set(roomId, 'open')
     relay.roomModules.set(roomId, new Set(['module_alpha', 'module_beta']))
@@ -2100,6 +2107,7 @@ describe('US-04 Open-mode registered module recovery', () => {
       awareness.destroy()
       active.destroy()
       inactive.destroy()
+      vi.unstubAllGlobals()
       vi.useRealTimers()
     }
   })
