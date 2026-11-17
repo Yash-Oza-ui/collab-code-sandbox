@@ -35,30 +35,23 @@ export default function RunOutputPanel({ result }: RunOutputPanelProps) {
   return (
     <div className="run-output-preview" data-testid="run-output-preview">
       <div className="run-output-meta" data-testid="run-output-meta">
-        {runnerName && (
-          <span data-testid="run-output-runner">
-            Run by {runnerName}
-            {result.ran_at ? (
-              <>
-                {' at '}
-                <span
-                  className="run-output-time"
-                  data-testid="run-output-time"
-                  title={result.ran_at}
-                >
-                  {formatRanAt(result.ran_at)}
-                </span>
-              </>
-            ) : null}
-          </span>
-        )}
-        {!runnerName && result.ran_at && (
-          <span
-            className="run-output-time"
-            data-testid="run-output-time"
-            title={result.ran_at}
-          >
-            Ran at {formatRanAt(result.ran_at)}
+        {(runnerName || result.ran_at) && (
+          <span className="run-output-attribution" data-testid="run-output-attribution">
+            {runnerName && (
+              <span data-testid="run-output-runner">
+                Run by {runnerName}
+              </span>
+            )}
+            {result.ran_at && (
+              <span
+                className="run-output-time"
+                data-testid="run-output-time"
+                title={result.ran_at}
+              >
+                {runnerName ? ' at ' : 'Ran at '}
+                {formatRanAt(result.ran_at)}
+              </span>
+            )}
           </span>
         )}
         <span data-testid="run-output-outcome">{outcome}</span>

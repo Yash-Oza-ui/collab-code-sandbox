@@ -171,9 +171,10 @@ describe('RunOutputPanel (T-11 / US-08)', () => {
 
     it('renders Pair-mode result with runner display name, local time, raw timestamp tooltip, and no saved version line', async () => {
       const c = await render(pairResult)
-      expect(text(c, 'run-output-runner')).toContain('Run by Ada')
+      expect(text(c, 'run-output-runner')).toBe('Run by Ada')
       const timeEl = c.querySelector('[data-testid="run-output-time"]')
       expect(timeEl).not.toBeNull()
+      expect(timeEl?.textContent).toMatch(/^ at /)
       expect(timeEl?.getAttribute('title')).toBe('2026-11-01T10:20:05.087Z')
       expect(c.querySelector('[data-testid="run-output-saved-versions"]')).toBeNull()
       expect(c.textContent).not.toContain('m_7a3c9f')
@@ -181,9 +182,10 @@ describe('RunOutputPanel (T-11 / US-08)', () => {
 
     it('renders Open-mode result with runner, raw timestamp tooltip, and saved version attribution', async () => {
       const c = await render(openFailureResult)
-      expect(text(c, 'run-output-runner')).toContain('Run by Lin')
+      expect(text(c, 'run-output-runner')).toBe('Run by Lin')
       const timeEl = c.querySelector('[data-testid="run-output-time"]')
       expect(timeEl).not.toBeNull()
+      expect(timeEl?.textContent).toMatch(/^ at /)
       expect(timeEl?.getAttribute('title')).toBe('2026-11-01T10:15:30.412Z')
 
       const savedVersionsEl = c.querySelector('[data-testid="run-output-saved-versions"]')

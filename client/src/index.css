@@ -388,6 +388,12 @@ body {
   opacity: 0.85;
 }
 
+.run-output-attribution {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.25rem;
+}
+
 .run-output-time {
   cursor: help;
   text-decoration: underline dotted #64748b;
