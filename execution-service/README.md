@@ -131,11 +131,29 @@ bean.
 ## Prerequisites
 
 - Java 21 (Temurin recommended)
-- Maven 3.9+ **or** use the Maven Wrapper (`./mvnw` or `mvnw.cmd`)
+- Maven 3.9+ or use the Maven Wrapper (`./mvnw` or `mvnw.cmd`)
+- Docker Engine with the Docker CLI available in `PATH`
+- A running Docker daemon
+
+The execution service uses the Docker daemon of the machine on which it runs. Docker 29.8.2 (CLI and Engine) was used to verify this setup. The project does not currently specify a minimum Docker version.
 
 ---
 
 ## How to run locally
+
+### 1. Build the runtime image
+
+From the repository root, build the Python runtime image using the Dockerfile maintained in this repository:
+
+```bash
+docker build -t collab-sandbox-python:0.1.0 execution-service/runtime-images/python
+```
+
+The execution service expects this image tag when running Python code. Build the image again whenever its Dockerfile changes.
+
+### 2. Run the execution service
+
+Make sure Docker is running and the Docker CLI is available to the service.
 
 ```bash
 cd execution-service
@@ -145,8 +163,19 @@ mvnw.cmd test               # Windows
 ./mvnw test                 # Linux / macOS
 
 # Start the service (port 8082)
-mvnw.cmd spring-boot:run
+mvnw.cmd spring-boot:run    # Windows
+./mvnw spring-boot:run      # Linux / macOS
 ```
+
+### Execution boundary
+
+Submitted code is executed only inside temporary Docker containers started by `DockerRunner` through the machine's Docker daemon. User code must never be executed directly on the host, including during local development or tests.
+
+`FakeCodeRunner` is a deterministic stub for controlled development and tests; it does not execute submitted code. It is selected only when the `stub-runner` profile is explicitly enabled.
+
+The project does not use hosted code-execution services such as Judge0 or Piston. Runtime images are built from Dockerfiles maintained under `execution-service/runtime-images/`.
+
+---
 
 ### Environment variables
 
