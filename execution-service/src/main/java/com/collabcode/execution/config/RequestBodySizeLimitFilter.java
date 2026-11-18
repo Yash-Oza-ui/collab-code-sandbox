@@ -26,8 +26,9 @@ public class RequestBodySizeLimitFilter extends OncePerRequestFilter {
 
     @Override
     protected boolean shouldNotFilter(HttpServletRequest request) {
+        String uri = request.getRequestURI();
         return !("POST".equalsIgnoreCase(request.getMethod())
-                && "/v1/runs".equals(request.getRequestURI()));
+                && ("/v1/runs".equals(uri) || "/internal/runs".equals(uri)));
     }
 
     @Override

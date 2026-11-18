@@ -150,11 +150,20 @@ public class DocumentHandler extends AbstractWebSocketHandler {
      */
     private final RoomRegistry controlRegistry;
 
+    /**
+     * Whether the per-edit write-permission check is DISABLED for this handler.
+     * {@code true} only when the {@code loadtest} Spring profile is active and
+     * {@code app.loadtest.edit-check-disabled=true} (wired in {@code WebSocketConfig}),
+     * for the T-22 CR13 baseline. {@code false} everywhere else, including
+     * production — the check cannot be bypassed without the isolated load-test profile.
+     */
+    private final boolean editCheckDisabled;
+
     public DocumentHandler(RoomStore roomStore,
                            RoomService roomService,
                            ModuleService moduleService,
                            RoomRegistry registry) {
-        this(roomStore, roomService, moduleService, registry, registry, new ObjectMapper());
+        this(roomStore, roomService, moduleService, registry, registry, new ObjectMapper(), false);
     }
 
     public DocumentHandler(RoomStore roomStore,
@@ -162,7 +171,7 @@ public class DocumentHandler extends AbstractWebSocketHandler {
                            ModuleService moduleService,
                            RoomRegistry registry,
                            ObjectMapper objectMapper) {
-        this(roomStore, roomService, moduleService, registry, registry, objectMapper);
+        this(roomStore, roomService, moduleService, registry, registry, objectMapper, false);
     }
 
     public DocumentHandler(RoomStore roomStore,
@@ -170,13 +179,15 @@ public class DocumentHandler extends AbstractWebSocketHandler {
                            ModuleService moduleService,
                            RoomRegistry registry,
                            RoomRegistry controlRegistry,
-                           ObjectMapper objectMapper) {
+                           ObjectMapper objectMapper,
+                           boolean editCheckDisabled) {
         this.roomStore = roomStore;
         this.roomService = roomService;
         this.moduleService = moduleService;
         this.registry = registry;
         this.controlRegistry = controlRegistry != null ? controlRegistry : registry;
         this.objectMapper = objectMapper != null ? objectMapper : new ObjectMapper();
+        this.editCheckDisabled = editCheckDisabled;
     }
 
     // -----------------------------------------------------------------------
@@ -310,7 +321,7 @@ public class DocumentHandler extends AbstractWebSocketHandler {
 
         // --- Edit permission check (CR13) ---
         // Inspect only the first two bytes; never parse the document content.
-        if (isDocumentChange(bytes)) {
+        if (!editCheckDisabled && isDocumentChange(bytes)) {
             String clientSessionId = (String) session.getAttributes().get(ATTR_SESSION_ID);
             Member member = roomService.findMemberBySession(roomId, clientSessionId);
 
