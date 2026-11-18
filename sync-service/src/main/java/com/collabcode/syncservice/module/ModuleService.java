@@ -76,6 +76,17 @@ public class ModuleService {
         return member != null && module != null && module.canEdit(member.getMemberId());
     }
 
+    /**
+     * Re-key a room's modules when its link is regenerated (US-28, V2.18): the
+     * room id changes but module ownership and writers are preserved.
+     */
+    public synchronized void moveRoom(String oldRoomId, String newRoomId) {
+        Map<String, ModuleRecord> modules = byRoom.remove(oldRoomId);
+        if (modules != null) {
+            byRoom.put(newRoomId, modules);
+        }
+    }
+
     private Room requireOpenRoom(String roomId) {
         Room room = rooms.get(roomId);
         if (room == null || room.getMode() != RoomMode.OPEN) throw new IllegalArgumentException("ROOM_NOT_FOUND");

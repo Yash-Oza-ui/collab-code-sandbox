@@ -1,5 +1,8 @@
 package com.collabcode.syncservice.room;
 
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -41,6 +44,14 @@ public class Room {
      */
     private volatile boolean requiresApproval = false;
 
+    /**
+     * Per-room block list (US-28, V2.18, FR9.6/CR04), keyed by the private
+     * {@code session_id}. A removed member is kept here so the Host can list and
+     * re-admit them; the {@code session_id} is the key and is never exposed, while
+     * {@code member_id}, {@code display_name} and {@code removed_at} are.
+     */
+    private final Map<String, BlockedSession> blocked = new ConcurrentHashMap<>();
+
     public Room(String roomId, RoomMode mode, String preset, String language, String ownerTokenHash) {
         this.roomId = roomId;
         this.mode = mode;
@@ -63,5 +74,36 @@ public class Room {
 
     public boolean isRequiresApproval() { return requiresApproval; }
     public void setRequiresApproval(boolean v) { this.requiresApproval = v; }
+
+    // ----- Block list (US-28, V2.18) -----
+
+    /** A removed member, kept so the Host can list and re-admit them (V2.18). */
+    public record BlockedSession(String sessionId, String memberId, String displayName, Instant removedAt) {}
+
+    /** True if this session is currently blocked (checked at join, V2.3). */
+    public boolean isBlocked(String sessionId) {
+        return sessionId != null && blocked.containsKey(sessionId);
+    }
+
+    /** Record a block for a removed member (V2.18), keyed by the private session_id. */
+    public void block(String sessionId, String memberId, String displayName, Instant removedAt) {
+        if (sessionId == null) return;
+        blocked.put(sessionId, new BlockedSession(sessionId, memberId, displayName, removedAt));
+    }
+
+    /** True if any block entry has this member_id (re-admit lookup, V2.18). */
+    public boolean isMemberBlocked(String memberId) {
+        return memberId != null && blocked.values().stream().anyMatch(b -> b.memberId().equals(memberId));
+    }
+
+    /** Remove the block entry whose member_id matches (re-admit, V2.18). True if one was removed. */
+    public boolean unblockByMemberId(String memberId) {
+        return memberId != null && blocked.values().removeIf(b -> b.memberId().equals(memberId));
+    }
+
+    /** A snapshot of the blocked members (V2.18 list). */
+    public Collection<BlockedSession> blockedSessions() {
+        return new ArrayList<>(blocked.values());
+    }
 
 }

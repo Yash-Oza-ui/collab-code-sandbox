@@ -4,6 +4,7 @@ import com.collabcode.syncservice.run.RunRecordStore;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -42,6 +43,12 @@ public class RoomService {
         Room room = store.get(roomId);
         if (room == null) {
             throw new IllegalArgumentException("unknown room: " + roomId);
+        }
+
+        // US-28 (V2.18, CR04): a removed session is blocked — a reconnect, refresh,
+        // new tab or a different display name is refused at join with USER_BLOCKED.
+        if (room.isBlocked(sessionId)) {
+            return JoinOutcome.refused("USER_BLOCKED");
         }
 
         // Reconnect: the same session rejoining (refresh or a second tab) is
@@ -110,6 +117,69 @@ public class RoomService {
         member.setCanEdit(computeCanEdit(room, newRole));
         member.setCanRun(newRole != Role.OBSERVER);
         return member;
+    }
+
+    /**
+     * Remove a member (US-28, V2.18). Records the block FIRST — keyed by the
+     * member's private session_id, with its member_id, display_name and the
+     * removal time — so a racing reconnect (FR11) is already refused, THEN drops
+     * the member from the roster. Returns the removed member (whose session_id the
+     * caller uses to close its sockets), or null if the room or member is unknown.
+     */
+    public synchronized Member removeMember(String roomId, String memberId) {
+        Room room = store.get(roomId);
+        if (room == null) {
+            return null;
+        }
+        Member member = room.getMembers().get(memberId);
+        if (member == null) {
+            return null;
+        }
+        room.block(member.getSessionId(), member.getMemberId(), member.getDisplayName(), Instant.now());
+        room.getMembers().remove(memberId);
+        return member;
+    }
+
+    /**
+     * Re-admit a member (US-28, V2.18): remove the one block entry with this
+     * member_id. Returns false if no block entry matches (404 MEMBER_NOT_FOUND).
+     */
+    public synchronized boolean readmit(String roomId, String memberId) {
+        Room room = store.get(roomId);
+        if (room == null) {
+            return false;
+        }
+        return room.unblockByMemberId(memberId);
+    }
+
+    /** The blocked members of a room (US-28 list), or empty if the room is unknown. */
+    public List<Room.BlockedSession> listBlocked(String roomId) {
+        Room room = store.get(roomId);
+        if (room == null) {
+            return List.of();
+        }
+        return new ArrayList<>(room.blockedSessions());
+    }
+
+    /**
+     * Regenerate the room link (US-28, V2.18): move the room's state to a new,
+     * unguessable id (NFR16, US-62) — members keep their member_ids (V2.3) — leave
+     * the block list behind (a new link is a fresh start) and make the old id stop
+     * resolving. Modules are re-keyed by the caller (ModuleService). Returns the
+     * new Room, or null if the room is unknown.
+     */
+    public synchronized Room regenerateLink(String roomId) {
+        Room old = store.get(roomId);
+        if (old == null) {
+            return null;
+        }
+        Room fresh = new Room(RoomIds.generate(), old.getMode(), old.getPreset(),
+                old.getLanguage(), old.getOwnerTokenHash());
+        fresh.setRequiresApproval(old.isRequiresApproval());
+        fresh.getMembers().putAll(old.getMembers());
+        store.put(fresh);
+        store.remove(roomId);
+        return fresh;
     }
 
     // ----- helpers -----
