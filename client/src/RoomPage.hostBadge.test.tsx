@@ -28,6 +28,8 @@ const OWNER_TOKEN = 'secret-owner-token-for-test'
 /** Minimal fake WebSocket: answers a `join` frame with a `joined` frame carrying `FakeSocket.role`. */
 class FakeSocket {
   static role = 'host'
+  static mode = 'pair'
+  static preset: string | null = 'debug_together'
   static urls: string[] = []
   static joinFrames: Array<Record<string, unknown>> = []
   static rosterMembers: Array<Record<string, unknown>> | null = null
@@ -62,7 +64,8 @@ class FakeSocket {
             type: 'joined',
             member_id: 'member-1',
             role: FakeSocket.role,
-            mode: 'pair',
+            mode: FakeSocket.mode,
+            preset: FakeSocket.preset,
             permissions: { can_edit: true, can_run: true },
           }),
         }),
@@ -112,6 +115,8 @@ describe('RoomPage Host indicator and owner token (T-10, FR9.5)', () => {
 
   beforeEach(() => {
     FakeSocket.role = 'host'
+    FakeSocket.mode = 'pair'
+    FakeSocket.preset = 'debug_together'
     FakeSocket.urls = []
     FakeSocket.joinFrames = []
     FakeSocket.rosterMembers = null
@@ -150,6 +155,7 @@ describe('RoomPage Host indicator and owner token (T-10, FR9.5)', () => {
       )
     })
 
+    expect(container.querySelector('[data-testid="room-mode-badge"]')).toBeNull()
     const input = container.querySelector<HTMLInputElement>('#display-name')!
     const form = container.querySelector<HTMLFormElement>('form')!
     await act(async () => {
@@ -160,6 +166,25 @@ describe('RoomPage Host indicator and owner token (T-10, FR9.5)', () => {
       await new Promise((r) => setTimeout(r, 45))
     })
   }
+
+  it.each(['host', 'participant'])('shows the server Pair preset to a %s after joining', async (role) => {
+    FakeSocket.role = role
+    FakeSocket.preset = 'teach_interview'
+    await joinAs('Alice')
+    expect(container?.querySelector('[data-testid="room-mode-badge"]')?.textContent)
+      .toBe('Pair · teach_interview')
+  })
+
+  it.each(['host', 'participant'])('shows Open without inventing a language for a %s', async (role) => {
+    FakeSocket.role = role
+    FakeSocket.mode = 'open'
+    FakeSocket.preset = null
+    // A shared link is not an authority for either mode or language.
+    window.history.replaceState({}, '', `/room/${ROOM_ID}?mode=pair&language=java`)
+    await joinAs('Bob')
+    expect(container?.querySelector('[data-testid="room-mode-badge"]')?.textContent)
+      .toBe('Open')
+  })
 
   it('shows the Host badge when the server says role is "host"', async () => {
     FakeSocket.role = 'host'

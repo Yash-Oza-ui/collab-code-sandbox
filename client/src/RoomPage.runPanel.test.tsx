@@ -66,6 +66,7 @@ describe('RoomPage RunPanel integration (T-11)', () => {
   let root: ReturnType<typeof createRoot> | null = null
 
   beforeEach(() => {
+    sessionStorage.clear() // Each test starts without a previously joined browser tab.
     container = document.createElement('div')
     document.body.appendChild(container)
     root = createRoot(container)

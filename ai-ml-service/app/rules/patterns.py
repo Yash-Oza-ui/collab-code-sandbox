@@ -1,8 +1,8 @@
-"""Rule-based code pattern analysis (US-67, FR36.4, FR12.3, NFR5.2, NFR5.3, US-22, T-18 v2).
+"""Rule-based code pattern analysis (US-21, US-67, FR36.4, FR12.3, FR12.4, NFR5.2, NFR5.3, US-22, T-18 v2).
 
 Provides static AST and regex rule analysis for slow code patterns before any AI call.
-Enforces the mandatory AI control sequence (US-22):
-1. User Consent (US-17)
+Enforces the mandatory AI control sequence (US-21, US-22):
+1. User Consent & Withdrawal (US-17, US-21)
 2. Host AI Switch (FR35)
 3. Room Hourly Rate Limit (NFR5.3)
 4. Normalized SHA-256 Code Cache (NFR5.2, Decision 11) - cache hits avoid outbound calls
@@ -395,14 +395,14 @@ async def run_rule_based_analysis_with_ai_fallback(
     cache_context: Optional[dict[str, Any]] = None,
     rules_first: bool = False,
 ) -> dict[str, Any]:
-    """Execute rule-based pattern checks first, followed by controlled AI assistance (US-22, US-67, FR12.3, FR35, T-18 v2).
+    """Execute rule-based pattern checks first, followed by controlled AI assistance (US-21, US-22, US-67, FR12.3, FR12.4, FR35, T-18 v2).
 
     When rules_first is True (US-67, FR36.4):
     1. If any slow pattern rule fires, report its findings and stop (0 outbound AI calls).
-    2. If none fires, proceed to the AI step subject to consent (FR12) and the AI switch (FR35).
+    2. If none fires, proceed to the AI step subject to consent (FR12, FR12.4, US-21) and the AI switch (FR35).
 
-    Mandatory Order of Checks (US-22):
-    1. Consent (US-17, FR12.2) -> CONSENT_MISSING (skipped AI step, 0 calls)
+    Mandatory Order of Checks (US-21, US-22):
+    1. Consent & Withdrawal (US-17, US-21, FR12.2, FR12.4) -> CONSENT_MISSING (skipped AI step, 0 calls)
     2. Host AI Switch (FR35) -> AI_DISABLED (skipped AI step, 0 calls)
     3. Code Cache (NFR5.2, Decision 11) -> Cache Hit returns cached suggestion (does NOT count as call)
     4. Room Hourly Rate Limit (NFR5.3) -> ROOM_RATE_LIMITED (skipped AI step, 0 calls)
@@ -411,7 +411,7 @@ async def run_rule_based_analysis_with_ai_fallback(
     # 1. AI-free rule-based analysis (always executes first unconditionally)
     slow_patterns = detect_slow_patterns(code, language=language)
 
-    # 2. Check 1: User Consent (FR12.2)
+    # 2. Check 1: User Consent (FR12.2, FR12.4, US-17, US-21)
     if consent is not True:
         record_fallback(room_id)
         ai_step = {
