@@ -746,7 +746,7 @@ Two sockets replace the single v0 socket (section 3.1), keeping all v0 relay rul
 
 | Socket | URL | Carries |
 |---|---|---|
-| Control | `ws://localhost:8081/ws/rooms/{room_id}?session_id=...` | text messages only (`join`, `joined`, `join-refused`, `join-approved`, `join-declined`, `roster`, `run-result`, `analysis-result`, `edit-rejected`, `module-updated`) |
+| Control | `ws://localhost:8081/ws/rooms/{room_id}?session_id=...` | text messages only (`join`, `joined`, `join-refused`, `join-approved`, `join-declined`, `roster`, `run-result`, `analysis-result`, `edit-rejected`, `module-updated`, `host-granted`) |
 | Document | `ws://localhost:8081/ws/rooms/{room_id}/docs/{doc_id}?session_id=...` | Yjs binary frames only |
 
 Pair mode has one document, `main`. Open mode has one document per module, and its `doc_id` **is** the `module_id`. A session must `join` on the control socket **before** opening a document socket; a document socket opened without a prior join is closed with **`4406`** (not joined).
@@ -1629,6 +1629,49 @@ Errors for all three (V2.12): `404 ROOM_NOT_FOUND`, `404 SESSION_NOT_FOUND` (the
 
 ---
 
+## V2.19 Transfer the Host role (US-54) — Proposed
+
+Added so that US-54 has a contract to build on: the Host hands the Host role to another participant (FR31.1). The role change of V2.17 refuses `"host"` for exactly this reason; this is the dedicated transfer. A room has **exactly one Host at all times**.
+
+Host-only, so it follows the caller-identity rule of V2.6: the current Host's `X-Session-Id` plus a valid `X-Owner-Token`. Without a valid owner token the answer is `403 NOT_OWNER`. The `member_id` in the path is the participant who becomes the new Host.
+
+```
+POST http://localhost:8081/v1/rooms/{room_id}/members/{member_id}/make-host
+X-Session-Id: <caller-session-id>
+X-Owner-Token: <owner-token>
+```
+
+On success the server, atomically:
+
+1. makes `member_id` the Host and the previous Host a `participant` — exactly one Host before and after;
+2. issues a **new owner token** to the new Host and replaces the room's stored hash, so the **previous owner token stops granting Host rights at once** (T-10, `OwnerTokens`);
+3. sends the new owner token **only to the new Host**, over their control socket, in a `host-granted` message — never in this HTTP response, never in `roster`, never logged (the same confidentiality as room creation, V2.1, V2.3);
+4. sends a new `roster` to the whole room (V2.4): the new Host shows `role: "host"`, the previous Host `role: "participant"`.
+
+Response `200` to the caller — a confirmation only, with no token (`docs/examples/v2-make-host-response.json`):
+
+```json
+{ "host_member_id": "m_7c22a1", "status": "transferred" }
+```
+
+`host-granted` — control socket, to the new Host only (`docs/examples/v2-host-granted-message.json`):
+
+```json
+{ "type": "host-granted", "member_id": "m_7c22a1", "owner_token": "<new-owner-token>" }
+```
+
+Rules:
+
+1. Only the current Host (owner token) can transfer; anyone else is `403 NOT_OWNER`.
+2. `member_id` must be a current **participant**. An unknown or already-removed member is `404 MEMBER_NOT_FOUND` (US-28); transferring to oneself, or to an Observer, is `422 INVALID_REQUEST` — make an Observer a participant first (V2.17).
+3. FR9.5 still holds: the new Host keeps the role across a refresh or reconnect (they hold the new token); the previous Host, after a refresh, reconnects as a participant (the old token no longer matches).
+4. The previous Host's client learns it is no longer Host from the new `roster` (its `role` is now `participant`); the Host controls follow the role.
+5. "Host leaves without transferring" is a separate event (US-55, Sprint 4); this section covers only the deliberate transfer, and the Host-left handling is kept in one place for US-55.
+
+Errors (V2.12): `404 ROOM_NOT_FOUND`, `404 SESSION_NOT_FOUND` (the caller has not joined), `404 MEMBER_NOT_FOUND` (the target), `403 NOT_OWNER`, `422 INVALID_REQUEST`.
+
+---
+
 ## Changes
 
 | Version | Date | Change |
@@ -1644,6 +1687,7 @@ Errors for all three (V2.12): `404 ROOM_NOT_FOUND`, `404 SESSION_NOT_FOUND` (the
 | v2 (member role) | 1 Nov 2026 | V2.17 added: `PATCH /v1/rooms/{room_id}/members/{member_id}` makes a guest an Observer and back (US-27), new code `MEMBER_NOT_FOUND`. CORS methods added to V2.6. Observer role removed from the undecided list in V2.15. |
 | v2 (remove / re-admit) | 17 Nov 2026 | V2.18 added (US-28): `POST /v1/rooms/{room_id}/members/{member_id}/remove` and `/readmit`, and `POST /v1/rooms/{room_id}/regenerate-link`. Session-keyed block list; re-admit by the removed member's `member_id`; regenerate moves the room to a new NFR16 id, clears the block list and closes old sockets with new code `4411`. |
 | v2 (remove / re-admit, review) | 18 Nov 2026 | Review fixes (#144): `member_id` retired on removal, a re-admit returns a new id while an ordinary reconnect keeps it (V2.3, V2.18); modules a removed member owned deferred to US-42; new `GET /v1/rooms/{room_id}/members/blocked` lists removed members; the block is recorded atomically before the sockets close (CR04); client no-reconnect rule for `USER_BLOCKED`/`4403`/`4404`/`4411` with a `USER_BLOCKED` example; regenerate preserves `member_id`s, module ownership/writers and documents, and the old id answers `404` on every interface and is never reissued; stale "removing a user" item dropped from V2.15 and `MEMBER_NOT_FOUND` widened for the block list (V2.12); 22-char regenerate example id. |
+| v2 (host transfer) | 17 Nov 2026 | V2.19 added (US-54): `POST /v1/rooms/{room_id}/members/{member_id}/make-host` transfers the Host role (FR31.1). The server issues a new owner token to the new Host (old token invalidated), delivered over their control socket as a new `host-granted` message; exactly one Host at all times. (Numbered V2.19 to follow US-28's V2.18; merge that contract first.) |
 
 ### Runner infrastructure error (v1 proposal addition)
 
