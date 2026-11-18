@@ -36,6 +36,10 @@ public class DockerRunner implements CodeRunner {
     private static final String PYTHON_IMAGE = "collab-sandbox-python:0.2.0";
     private static final String PYTHON_EXECUTABLE = "python";
     private static final long CONTAINER_STARTUP_GRACE_SECONDS = 30;
+    private static final int SIGKILL_EXIT_CODE = 137;
+    private static final int OOM_FLAG_RECHECKS = 5;
+    private static final long OOM_FLAG_RECHECK_DELAY_MS = 100;
+    private static final double OOM_PEAK_FRACTION_OF_LIMIT = 0.9;
 
     record RunMetrics(double executionTimeMs, double peakMemoryMb, boolean timedOut) {}
 
@@ -176,6 +180,9 @@ public class DockerRunner implements CodeRunner {
             oomKilled = inspectOomKilled(containerName);
             RunMetrics metrics = readRunMetrics(workspace);
             timedOut = metrics.timedOut();
+            if (!oomKilled && !timedOut && !infrastructureTimeout && exitCode == SIGKILL_EXIT_CODE) {
+                oomKilled = confirmOomKill(containerName, metrics);
+            }
             if (oomKilled) {
                 exitCode = 137;
             } else if (timedOut) {
@@ -632,6 +639,27 @@ public class DockerRunner implements CodeRunner {
         } catch (IOException ignored) {
             // The container may already have stopped.
         }
+    }
+
+    /**
+     * Docker sets {@code State.OOMKilled} asynchronously, so a single inspect right after the
+     * container exits can read {@code false} even though the kernel OOM-killed the process. Only
+     * called for a SIGKILL exit (137) that was not a timeout: re-read the flag a few times, then
+     * fall back to the measured cgroup peak, which sits at the memory limit after an OOM kill.
+     */
+    private boolean confirmOomKill(String containerName, RunMetrics metrics) {
+        for (int attempt = 0; attempt < OOM_FLAG_RECHECKS; attempt++) {
+            try {
+                Thread.sleep(OOM_FLAG_RECHECK_DELAY_MS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+            if (inspectOomKilled(containerName)) {
+                return true;
+            }
+        }
+        return metrics.peakMemoryMb() >= limits.getMemoryMb() * OOM_PEAK_FRACTION_OF_LIMIT;
     }
 
     private boolean inspectOomKilled(String containerName) {
