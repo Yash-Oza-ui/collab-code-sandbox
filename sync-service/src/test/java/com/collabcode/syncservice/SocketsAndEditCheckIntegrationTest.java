@@ -861,8 +861,8 @@ class SocketsAndEditCheckIntegrationTest {
     }
 
     static class CapturingHandler extends AbstractWebSocketHandler {
-        final List<CloseStatus> closes = Collections.synchronizedList(new ArrayList<>());
-        final List<String> texts = Collections.synchronizedList(new ArrayList<>());
+        final List<CloseStatus> closes = new CopyOnWriteArrayList<>();
+        final List<String> texts = new CopyOnWriteArrayList<>();
 
         @Override
         protected void handleTextMessage(WebSocketSession session, TextMessage message) {
