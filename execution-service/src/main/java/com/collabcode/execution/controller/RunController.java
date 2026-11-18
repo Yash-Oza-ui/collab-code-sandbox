@@ -13,6 +13,7 @@ import com.collabcode.execution.snapshot.MemberInfo;
 import com.collabcode.execution.snapshot.SavedVersionReader;
 import com.collabcode.execution.snapshot.SnapshotModule;
 import com.collabcode.execution.snapshot.SnapshotResult;
+import com.collabcode.execution.util.InputHasher;
 import jakarta.validation.Valid;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -21,6 +22,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
@@ -382,6 +384,24 @@ public class RunController {
         } else {
             r.setFailure(null);
         }
+
+        // FR29 / US-52: internal run-record metadata (excluded from client HTTP response via @JsonIgnore)
+        r.setInputHash(InputHasher.hash(req.getStdin()));
+        List<String> executedFileNames = new ArrayList<>();
+        if (req.getSource() instanceof InlineSource inline && inline.getFiles() != null) {
+            for (RunFile f : inline.getFiles()) {
+                if (f != null && f.getName() != null && !f.getName().isBlank()) {
+                    executedFileNames.add(f.getName());
+                }
+            }
+        } else if (snapshot != null && snapshot.getModules() != null) {
+            for (SnapshotModule m : snapshot.getModules()) {
+                if (m != null && m.getName() != null && !m.getName().isBlank()) {
+                    executedFileNames.add(m.getName());
+                }
+            }
+        }
+        r.setRunFiles(executedFileNames);
 
         return r;
     }

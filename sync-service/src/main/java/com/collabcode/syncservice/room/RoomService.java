@@ -1,5 +1,7 @@
 package com.collabcode.syncservice.room;
 
+import com.collabcode.syncservice.run.RunRecordStore;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -17,9 +19,16 @@ import java.util.List;
 public class RoomService {
 
     private final RoomStore store;
+    private final RunRecordStore runRecordStore;
 
     public RoomService(RoomStore store) {
+        this(store, null);
+    }
+
+    @Autowired
+    public RoomService(RoomStore store, @Autowired(required = false) RunRecordStore runRecordStore) {
         this.store = store;
+        this.runRecordStore = runRecordStore;
     }
 
     /**
@@ -146,12 +155,27 @@ public class RoomService {
 
     /**
      * Mark a room as closed / destroyed (FR31.2, T-17 V2.5).
+     * Deletes associated run records from memory (FR32, US-52, US-56).
      * Returns false if the room is unknown.
      */
     public boolean closeRoom(String roomId) {
         Room room = store.get(roomId);
         if (room == null) return false;
         room.close();
+        if (runRecordStore != null) {
+            runRecordStore.deleteByRoom(roomId);
+        }
         return true;
+    }
+
+    /**
+     * Purges room metadata and its run records (FR32, US-56 room destruction).
+     */
+    public boolean deleteRoom(String roomId) {
+        Room room = store.remove(roomId);
+        if (runRecordStore != null) {
+            runRecordStore.deleteByRoom(roomId);
+        }
+        return room != null;
     }
 }
