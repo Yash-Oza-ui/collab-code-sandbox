@@ -203,6 +203,7 @@ export interface ExpectedRunContext {
   requestId?: string
   roomId?: string
   language?: string
+  requireAttribution?: boolean
 }
 
 /**
@@ -285,6 +286,86 @@ export function validateRunResponse(
     return {
       valid: false,
       error: 'Malformed response: missing or invalid "peak_memory_mb" field (must be a non-negative number).',
+    }
+  }
+
+  // V2.9 Runner Attribution validation (US-50 / FR26)
+  if (expected?.requireAttribution) {
+    if (!obj.runner || typeof obj.runner !== 'object' || Array.isArray(obj.runner)) {
+      return { valid: false, error: 'Malformed response: missing or invalid "runner" field.' }
+    }
+    const runnerObj = obj.runner as Record<string, unknown>
+    if (typeof runnerObj.display_name !== 'string' || runnerObj.display_name.trim() === '') {
+      return { valid: false, error: 'Malformed response: missing or invalid "runner.display_name" field.' }
+    }
+    if (
+      typeof obj.ran_at !== 'string' ||
+      !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/.test(obj.ran_at) ||
+      Number.isNaN(new Date(obj.ran_at).getTime())
+    ) {
+      return { valid: false, error: 'Malformed response: missing or invalid "ran_at" timestamp.' }
+    }
+  }
+
+  if (obj.runner !== undefined) {
+    if (typeof obj.runner !== 'object' || obj.runner === null || Array.isArray(obj.runner)) {
+      return { valid: false, error: 'Malformed response: "runner" must be an object.' }
+    }
+    const runnerObj = obj.runner as Record<string, unknown>
+    if (typeof runnerObj.display_name !== 'string' || runnerObj.display_name.trim() === '') {
+      return { valid: false, error: 'Malformed response: missing or invalid "runner.display_name" field.' }
+    }
+    if (runnerObj.member_id !== undefined && (typeof runnerObj.member_id !== 'string' || runnerObj.member_id.trim() === '')) {
+      return { valid: false, error: 'Malformed response: invalid "runner.member_id" field.' }
+    }
+  }
+
+  if (obj.ran_at !== undefined) {
+    if (
+      typeof obj.ran_at !== 'string' ||
+      !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/.test(obj.ran_at) ||
+      Number.isNaN(new Date(obj.ran_at).getTime())
+    ) {
+      return { valid: false, error: 'Malformed response: "ran_at" must be a valid ISO 8601 UTC timestamp.' }
+    }
+  }
+
+  if (obj.saved_versions !== undefined) {
+    if (!Array.isArray(obj.saved_versions)) {
+      return { valid: false, error: 'Malformed response: "saved_versions" must be an array.' }
+    }
+    for (const sv of obj.saved_versions) {
+      if (!sv || typeof sv !== 'object' || Array.isArray(sv)) {
+        return { valid: false, error: 'Malformed response: saved_version entry must be an object.' }
+      }
+      const svObj = sv as Record<string, unknown>
+      if (typeof svObj.name !== 'string' || svObj.name.trim() === '') {
+        return { valid: false, error: 'Malformed response: saved_version entry missing valid "name".' }
+      }
+      if (typeof svObj.version !== 'number' || !Number.isInteger(svObj.version) || svObj.version < 0) {
+        return { valid: false, error: 'Malformed response: saved_version entry missing valid integer "version".' }
+      }
+      if (typeof svObj.module_id !== 'string' || svObj.module_id.trim() === '') {
+        return { valid: false, error: 'Malformed response: saved_version entry missing valid "module_id".' }
+      }
+      if (svObj.saved_by !== undefined) {
+        if (!svObj.saved_by || typeof svObj.saved_by !== 'object' || Array.isArray(svObj.saved_by)) {
+          return { valid: false, error: 'Malformed response: saved_version entry has invalid "saved_by".' }
+        }
+        const authorObj = svObj.saved_by as Record<string, unknown>
+        if (typeof authorObj.display_name !== 'string' || authorObj.display_name.trim() === '') {
+          return { valid: false, error: 'Malformed response: saved_version entry missing valid "saved_by.display_name".' }
+        }
+      }
+      if (svObj.saved_at !== undefined) {
+        if (
+          typeof svObj.saved_at !== 'string' ||
+          !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/.test(svObj.saved_at) ||
+          Number.isNaN(new Date(svObj.saved_at).getTime())
+        ) {
+          return { valid: false, error: 'Malformed response: saved_version entry has invalid "saved_at" timestamp.' }
+        }
+      }
     }
   }
 

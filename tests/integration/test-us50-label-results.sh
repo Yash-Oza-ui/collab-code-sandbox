@@ -7,29 +7,61 @@ dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$dir/lib.sh"
 
 if ! service_present "execution-service"; then
-  skip "us50-label-results" "(execution-service Dockerfile missing)"
+  skip "us50-label-results" "execution-service Dockerfile missing"
   exit 0
 fi
 
 base_url="$(service_url execution-service)"
 endpoint="$base_url/v1/runs"
 
-# Check if execution-service is accessible; skip if offline
+# Check if execution-service is accessible
 if ! curl -s --max-time 2 "$base_url/actuator/health" >/dev/null 2>&1; then
-  skip "us50-label-results" "(service not running at $base_url)"
+  if [ "${CI:-false}" = "true" ] || [ -n "${GITHUB_ACTIONS:-}" ]; then
+    fail "us50-label-results" "execution-service not running at $base_url (actuator/health failed in CI)"
+    exit 1
+  fi
+  skip "us50-label-results" "execution-service not running at $base_url (start with tests/integration/up.sh)"
   exit 0
 fi
 
-# Detect Python binary: prefer python3 on Linux/CI, fallback to python on Windows
-PYTHON_BIN="python3"
-if ! command -v "$PYTHON_BIN" >/dev/null 2>&1 || ! "$PYTHON_BIN" --version >/dev/null 2>&1; then
-  PYTHON_BIN="python"
+# Locate reliable structured JSON validator (Node or Python)
+JSON_VALIDATOR=""
+if command -v node >/dev/null 2>&1 && node --version >/dev/null 2>&1; then
+  JSON_VALIDATOR="node"
+elif command -v python3 >/dev/null 2>&1 && python3 --version >/dev/null 2>&1; then
+  JSON_VALIDATOR="python3"
+elif command -v python >/dev/null 2>&1 && python --version >/dev/null 2>&1; then
+  JSON_VALIDATOR="python"
+else
+  fail "us50-label-results" "Missing required JSON validator (node or python must be installed)"
+  exit 1
 fi
 
 validate_pair_json() {
   local body="$1"
-  if command -v "$PYTHON_BIN" >/dev/null 2>&1 && "$PYTHON_BIN" --version >/dev/null 2>&1; then
-    printf '%s' "$body" | "$PYTHON_BIN" -c '
+  if [ "$JSON_VALIDATOR" = "node" ]; then
+    node -e '
+      const fs = require("fs");
+      try {
+        const data = JSON.parse(fs.readFileSync(0, "utf-8"));
+        if (!data.runner || typeof data.runner !== "object") throw new Error("runner field is missing or not an object");
+        if (typeof data.runner.display_name !== "string" || !data.runner.display_name.trim()) {
+          throw new Error("runner.display_name must be a non-empty string, got: " + JSON.stringify(data.runner.display_name));
+        }
+        if (typeof data.ran_at !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/.test(data.ran_at)) {
+          throw new Error("ran_at is not a valid ISO 8601 UTC timestamp: " + JSON.stringify(data.ran_at));
+        }
+        if (!Array.isArray(data.saved_versions) || data.saved_versions.length !== 0) {
+          throw new Error("saved_versions in Pair mode must be empty array [], got: " + JSON.stringify(data.saved_versions));
+        }
+        console.log("OK");
+      } catch (err) {
+        console.error("Pair validation failed: " + err.message);
+        process.exit(1);
+      }
+    ' <<< "$body" 2>&1
+  else
+    printf '%s' "$body" | "$JSON_VALIDATOR" -c '
 import sys, json, re
 try:
     data = json.load(sys.stdin)
@@ -52,19 +84,43 @@ try:
 except Exception as e:
     sys.exit(f"Validation failed: {e}")
 ' 2>&1
-  else
-    if echo "$body" | grep -q '"runner"' && echo "$body" | grep -q '"display_name"' && echo "$body" | grep -q '"ran_at"' && echo "$body" | grep -q '"saved_versions":\[\]'; then
-      echo "OK"
-    else
-      echo "Pair body validation failed: $body"
-    fi
   fi
 }
 
 validate_open_json() {
   local body="$1"
-  if command -v "$PYTHON_BIN" >/dev/null 2>&1 && "$PYTHON_BIN" --version >/dev/null 2>&1; then
-    printf '%s' "$body" | "$PYTHON_BIN" -c '
+  if [ "$JSON_VALIDATOR" = "node" ]; then
+    node -e '
+      const fs = require("fs");
+      try {
+        const data = JSON.parse(fs.readFileSync(0, "utf-8"));
+        if (!data.runner || typeof data.runner !== "object") throw new Error("runner field is missing or not an object");
+        if (typeof data.runner.display_name !== "string" || !data.runner.display_name.trim()) {
+          throw new Error("runner.display_name must be a non-empty string, got: " + JSON.stringify(data.runner.display_name));
+        }
+        if (typeof data.ran_at !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/.test(data.ran_at)) {
+          throw new Error("ran_at is not a valid ISO 8601 UTC timestamp: " + JSON.stringify(data.ran_at));
+        }
+        if (!Array.isArray(data.saved_versions) || data.saved_versions.length === 0) {
+          throw new Error("saved_versions in Open mode must be a non-empty array");
+        }
+        for (const sv of data.saved_versions) {
+          if (!sv || typeof sv !== "object") throw new Error("saved_version entry must be an object");
+          if (typeof sv.name !== "string" || !sv.name.trim()) throw new Error("saved_version entry missing name: " + JSON.stringify(sv));
+          if (typeof sv.version !== "number" || !Number.isInteger(sv.version)) throw new Error("saved_version entry missing integer version: " + JSON.stringify(sv));
+          if (typeof sv.module_id !== "string" || !sv.module_id.trim()) throw new Error("saved_version entry missing module_id: " + JSON.stringify(sv));
+        }
+        if (data.visibility !== "private") {
+          throw new Error("expected visibility: private, got: " + JSON.stringify(data.visibility));
+        }
+        console.log("OK");
+      } catch (err) {
+        console.error("Open validation failed: " + err.message);
+        process.exit(1);
+      }
+    ' <<< "$body" 2>&1
+  else
+    printf '%s' "$body" | "$JSON_VALIDATOR" -c '
 import sys, json, re
 try:
     data = json.load(sys.stdin)
@@ -98,12 +154,6 @@ try:
 except Exception as e:
     sys.exit(f"Validation failed: {e}")
 ' 2>&1
-  else
-    if echo "$body" | grep -q '"saved_versions":\[{' && echo "$body" | grep -q '"visibility":"private"'; then
-      echo "OK"
-    else
-      echo "Open body validation failed: $body"
-    fi
   fi
 }
 

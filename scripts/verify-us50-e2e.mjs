@@ -5,6 +5,13 @@ import os from 'node:os';
 import { spawn } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
+console.log('========================================================================');
+console.log('US-50 Two-Browser Dual-Runner End-to-End Verification');
+console.log('Environment: Isolated Dual Headless Chrome instances via DevTools Protocol');
+console.log('Backend Mode: Mock sync-service (port 8081) & mock execution-service (port 8082)');
+console.log('Client Application: Real production bundle built from client/dist');
+console.log('========================================================================');
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, '..');
 const clientDist = path.join(rootDir, 'client', 'dist');
@@ -168,9 +175,10 @@ const executionHttpServer = http.createServer((req, res) => {
         }
       }
       if (runnerDisplayName === 'Unknown') {
-        const clientList = Array.from(clients || []).filter(c => c.type === 'control');
-        runnerDisplayName = clientList[0]?.display_name || 'Alice';
-        runnerMemberId = clientList[0]?.member_id || 'm_alice';
+        console.error(`Execution failed: could not resolve runner for session ${parsed.session_id}`);
+        res.writeHead(422, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'UNRESOLVED_RUNNER', message: 'No active room participant matches session_id' }));
+        return;
       }
 
       const runId = `req-us50-${runCounter++}`;
