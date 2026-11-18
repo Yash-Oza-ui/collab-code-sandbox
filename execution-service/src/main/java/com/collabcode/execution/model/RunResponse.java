@@ -1,6 +1,7 @@
 package com.collabcode.execution.model;
 
 import com.collabcode.execution.snapshot.MemberInfo;
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonInclude;
 
 import java.util.ArrayList;
@@ -91,6 +92,22 @@ public class RunResponse {
      */
     private FailureInfo failure;
 
+    /**
+     * Internal run-record metadata (FR29, US-52): SHA-256 hash of input (never raw stdin).
+     * Excluded from the client-facing V2.9 HTTP response via {@code @JsonIgnore}; forwarded
+     * internally to {@code sync-service} by {@code RoomBroadcastService}.
+     */
+    @JsonIgnore
+    private String inputHash;
+
+    /**
+     * Internal run-record metadata (FR29, US-52): executed file names only (never source code).
+     * Excluded from the client-facing V2.9 HTTP response via {@code @JsonIgnore}; forwarded
+     * internally to {@code sync-service} by {@code RoomBroadcastService}.
+     */
+    @JsonIgnore
+    private List<String> runFiles = new ArrayList<>();
+
     // ----- getters -----
 
     public String  getRequest_id()        { return request_id; }
@@ -112,6 +129,8 @@ public class RunResponse {
     public String  getVisibility()        { return visibility; }
     public List<SavedVersionInfo> getSaved_versions() { return saved_versions; }
     public FailureInfo getFailure()       { return failure; }
+    @JsonIgnore public String getInputHash()       { return inputHash; }
+    @JsonIgnore public List<String> getRunFiles()  { return Collections.unmodifiableList(runFiles); }
 
     // ----- setters -----
 
@@ -136,4 +155,8 @@ public class RunResponse {
         this.saved_versions = (saved_versions != null) ? new ArrayList<>(saved_versions) : new ArrayList<>();
     }
     public void setFailure(FailureInfo failure)                { this.failure = failure; }
+    @JsonIgnore public void setInputHash(String inputHash)     { this.inputHash = inputHash; }
+    @JsonIgnore public void setRunFiles(List<String> runFiles) {
+        this.runFiles = (runFiles != null) ? new ArrayList<>(runFiles) : new ArrayList<>();
+    }
 }

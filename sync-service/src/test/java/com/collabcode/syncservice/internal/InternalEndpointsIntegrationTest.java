@@ -640,6 +640,9 @@ class InternalEndpointsIntegrationTest {
                     }
                     """.formatted(roomId);
 
+            // WebSocket upgrade completion can precede relay registration on CI.
+            // Wait briefly for both sessions to become visible before broadcasting.
+            Thread.sleep(200);
             HttpResponse<String> resp = postInternal(roomId, body, TOKEN);
             assertThat(resp.statusCode()).isEqualTo(200);
 

@@ -26,4 +26,8 @@ public class RoomStore {
     public boolean exists(String roomId) {
         return rooms.containsKey(roomId);
     }
+
+    public Room remove(String roomId) {
+        return roomId != null ? rooms.remove(roomId) : null;
+    }
 }

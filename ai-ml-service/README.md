@@ -79,6 +79,41 @@ The AI/ML microservice for **Collab Code Sandbox** (IT-314, Group 32). This serv
 > **Security & Privacy Note (NFR8.2, NFR10):**
 > Never commit `.env` or real API keys to version control. The service starts normally even when `LLM_API_KEY` is not set. The service never logs request bodies, source code, stderr text, or API keys.
 
+## User Consent & Consent Withdrawal (US-17, US-21, FR12.4)
+
+In accordance with `FR12` (Privacy Consent Gate) and `FR12.4` / `US-21` (Withdraw AI Consent):
+
+1. **Per-Session Consent Lifecycle:**
+   - Consent is granted per user session (not per room).
+   - Under US-17, consent is given once upon initial user agreement in a session.
+   - Under US-21, a user can withdraw consent at any time during an active session via the client-side withdrawal control.
+   - Withdrawal is communicated to the backend by the client sending `consent: false` on subsequent analysis requests.
+   - If the user decides to opt back in later during that active session, consent can be granted again by sending `consent: true`. Withdrawing consent does not permanently disable AI for a user or session.
+
+2. **Dual-Gate Enforcement:**
+   - External AI calls strictly require **BOTH** `consent: true` (individual session consent, FR12) and `ai_enabled: true` (room Host AI switch, FR35).
+   - If `consent` is `false` or missing (`null`), the central consent gate (`app.llm.client.call_llm_with_consent`) immediately blocks external LLM calls with 0 outbound calls, 0 token consumption, and no raw code or prompts logged (NFR8.2).
+   - If `consent: true` but `ai_enabled: false`, the call is blocked under `error_code: "AI_DISABLED"`. User consent and Host AI switch are independent controls.
+
+3. **Preservation of AI-Free Functionality:**
+   - Withdrawing consent skips **only** the external AI step.
+   - All AI-free capabilities—code editing, sandbox code execution, deterministic AST/regex rule detection (`slow_patterns`), empirical Big-O regression fitting, and AddressSanitizer crash diagnostics—continue to execute unconditionally and return HTTP 200 OK.
+   - When an AI step is skipped due to withdrawn or missing consent, the service returns HTTP 200 with:
+     - `ai_step.status = "skipped"`
+     - `ai_step.error_code = "CONSENT_MISSING"`
+   - The user receives the standard FR40.5 user-facing fallback message: `"AI analysis skipped: user consent required."`
+
+4. **Session Isolation (No Shared Room State):**
+   - Consent state belongs strictly to the user's session, never to the collaborative room.
+   - In a shared room, one participant withdrawing consent (`consent: false`) has zero effect on another participant's consent (`consent: true`).
+   - The backend never maintains a shared room-level boolean for consent and does not own a second persistence store or consent database.
+
+5. **Client Coordination Contract:**
+   - The frontend team is responsible for the visible withdrawal control (e.g., in room settings or an AI consent toggle).
+   - The client remains the single source of truth for the session's current consent state (as specified in T-18 Decision 8).
+   - The frontend withdrawal control must update the current session's consent state and send the updated boolean value on every subsequent analysis request (`/v1/analyses/complexity`, `/v1/analyses/crash-explanation`, `/v1/explain`).
+   - The backend does not own or maintain a secondary consent store.
+
 ## AI Request Control, Normalization & Rate Limiting (US-22)
 
 AI steps across all analysis endpoints enforce the controlled execution sequence defined in `NFR5.1`, `NFR5.2`, `NFR5.3`, and `FR40.3`:

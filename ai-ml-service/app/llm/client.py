@@ -1,7 +1,8 @@
-"""Central LLM client and universal consent gate (FR12, US-17, US-22).
+"""Central LLM client and universal consent gate (FR12, FR12.4, US-17, US-21, US-22).
 
 Enforces that NO code or prompt ever reaches an external AI service
 unless user consent is explicitly provided (consent == True).
+Handles consent withdrawal and restoration during active sessions (US-21).
 All outbound LLM calls pass through call_llm_with_consent.
 """
 
@@ -70,7 +71,7 @@ class LLMRateLimitError(LLMProviderError):
 
 
 class ConsentMissingError(Exception):
-    """Raised when an LLM call is attempted without explicit user consent (FR12.2)."""
+    """Raised when an LLM call is attempted without explicit user consent or after consent withdrawal (FR12.2, FR12.4, US-17, US-21)."""
 
     def __init__(
         self,
@@ -291,10 +292,10 @@ async def call_llm_with_consent(
     timeout_seconds: Optional[float] = None,
     room_id: Optional[str] = None,
 ) -> str:
-    """Universal consent and Host AI switch gate through which every outbound LLM call must pass (FR12.2, FR35, US-17).
+    """Universal consent and Host AI switch gate through which every outbound LLM call must pass (FR12.2, FR12.4, FR35, US-17, US-21).
 
     Guarantees:
-    1. If consent is missing (None) or False:
+    1. If consent is missing (None) or False (including withdrawal during an active session, US-21):
        - The LLM client is never invoked (0 outbound calls made).
        - No prompts or source code are logged (NFR8.2).
        - ConsentMissingError is raised immediately (HTTP 403 CONSENT_MISSING).
@@ -302,10 +303,13 @@ async def call_llm_with_consent(
        - The LLM client is never invoked (0 outbound calls made).
        - AIDisabledError is raised immediately (HTTP 403 AI_DISABLED).
     3. External AI call is permitted ONLY when BOTH consent == True AND ai_enabled == True.
+    4. Session isolation: Consent is evaluated per-request (per session, T-18 Decision 8)
+       without backend persistence or room-level sharing. Restoring consent (consent == True)
+       re-enables external AI calls immediately without persistent blocking.
     """
     if consent is not True:
         # Safe logging: strictly no prompt or code logged (NFR8.2)
-        logger.info("Blocked external AI call: consent is missing or false (FR12.2)")
+        logger.info("Blocked external AI call: consent is missing or false (FR12.2, FR12.4, US-21)")
         raise ConsentMissingError(
             message="User consent is required before code or execution context can be sent to external AI.",
             status_code=403,
