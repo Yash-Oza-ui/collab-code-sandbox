@@ -38,6 +38,12 @@ from app.rules.patterns import (
     run_rule_based_analysis_with_ai_fallback,
 )
 from app.section import extract_relevant_section
+from app.slowdown import (
+    SlowdownAnalysisRequest,
+    SlowdownAnalysisResponse,
+    detect_slowdown,
+    get_slowdown_store,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -507,6 +513,85 @@ async def get_room_usage_endpoint(room_id: str, request: Request) -> dict[str, A
     return get_room_usage(room_id)
 
 
+@router.post("/analyses/slowdown", response_model=SlowdownAnalysisResponse)
+async def analyze_slowdown(
+    payload: SlowdownAnalysisRequest, request: Request
+) -> SlowdownAnalysisResponse:
+    """Detect runtime slowdown against empirical Median and MAD baseline (FR37, US-68, T-18 v2 §16.2)."""
+    request.state.request_id = payload.request_id
+    request.state.room_id = payload.room_id
+    request.state.request_type = payload.request_type
+    request.state.language = payload.language
+
+    # Support optional dynamic thresholds via query parameters or request headers
+    factor_threshold = None
+    if "factor_threshold" in request.query_params:
+        try:
+            factor_threshold = float(request.query_params["factor_threshold"])
+        except ValueError:
+            pass
+    elif request.headers.get("x-slowdown-factor"):
+        try:
+            factor_threshold = float(request.headers["x-slowdown-factor"])
+        except ValueError:
+            pass
+
+    z_threshold = None
+    if "z_threshold" in request.query_params:
+        try:
+            z_threshold = float(request.query_params["z_threshold"])
+        except ValueError:
+            pass
+    elif request.headers.get("x-modified-z-threshold"):
+        try:
+            z_threshold = float(request.headers["x-modified-z-threshold"])
+        except ValueError:
+            pass
+
+    min_samples = None
+    if "min_samples" in request.query_params:
+        try:
+            min_samples = int(request.query_params["min_samples"])
+        except ValueError:
+            pass
+    elif request.headers.get("x-min-samples"):
+        try:
+            min_samples = int(request.headers["x-min-samples"])
+        except ValueError:
+            pass
+
+    # Statistical slowdown detection (statistics-only, zero external LLM calls, never delays runs)
+    result = detect_slowdown(
+        room_id=payload.room_id,
+        input_hash=payload.input_hash,
+        execution_time_ms=payload.current_run.execution_time_ms,
+        peak_memory_mb=payload.current_run.peak_memory_mb,
+        consent=payload.consent,
+        ai_enabled=payload.ai_enabled,
+        factor_threshold=factor_threshold,
+        z_threshold=z_threshold,
+        min_samples=min_samples,
+    )
+
+    ai_step = result["ai_step"]
+    if ai_step.error_code:
+        record_fallback(payload.room_id)
+    request.state.error_code = ai_step.error_code
+
+    return SlowdownAnalysisResponse(
+        request_id=payload.request_id,
+        analysis_id=payload.analysis_id,
+        task="slowdown",
+        input_hash=payload.input_hash,
+        is_slowdown=result["is_slowdown"],
+        slowdown_factor=result["slowdown_factor"],
+        baseline=result["baseline"],
+        changed_lines=result.get("changed_lines", []),
+        message=result["message"],
+        ai_step=ai_step,
+    )
+
+
 @router.delete("/rooms/{room_id}/state")
 async def clear_room_state(room_id: str, request: Request) -> dict[str, Any]:
     """Clean up room-scoped measurement history, cache, counters, and rate limits when closed/deleted (US-22, US-56, FR32, T-18 section 16.5)."""
@@ -516,6 +601,7 @@ async def clear_room_state(room_id: str, request: Request) -> dict[str, Any]:
     clear_room(room_id)
     get_analysis_cache().clear_room(room_id)
     get_room_rate_limiter().clear_room(room_id)
+    get_slowdown_store().clear_room(room_id)
     return {
         "room_id": room_id,
         "status": "cleared",

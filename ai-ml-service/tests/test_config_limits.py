@@ -55,6 +55,15 @@ class TestConfigDefaults:
     def test_section_max_lines_positive(self):
         assert self.settings.SECTION_MAX_LINES > 0
 
+    def test_slowdown_factor_threshold_has_default(self):
+        assert self.settings.SLOWDOWN_FACTOR_THRESHOLD >= 1.0, "FR37.2 slowdown factor threshold must be >= 1.0"
+
+    def test_slowdown_modified_z_threshold_positive(self):
+        assert self.settings.SLOWDOWN_MODIFIED_Z_THRESHOLD > 0.0
+
+    def test_slowdown_min_samples_positive(self):
+        assert self.settings.SLOWDOWN_MIN_SAMPLES >= 1
+
 
 class TestConfigOverrides:
     """Every DR3 value can be overridden via environment variable (US-16, DR3)."""
@@ -82,3 +91,15 @@ class TestConfigOverrides:
     def test_token_cost_overridable(self):
         s = _fresh_settings(TOKEN_COST_PER_TOKEN="0.000001")
         assert s.TOKEN_COST_PER_TOKEN == pytest.approx(0.000001)
+
+    def test_slowdown_factor_threshold_overridable(self):
+        s = _fresh_settings(SLOWDOWN_FACTOR_THRESHOLD="4.0")
+        assert s.SLOWDOWN_FACTOR_THRESHOLD == pytest.approx(4.0)
+
+    def test_slowdown_modified_z_threshold_overridable(self):
+        s = _fresh_settings(SLOWDOWN_MODIFIED_Z_THRESHOLD="2.5")
+        assert s.SLOWDOWN_MODIFIED_Z_THRESHOLD == pytest.approx(2.5)
+
+    def test_slowdown_min_samples_overridable(self):
+        s = _fresh_settings(SLOWDOWN_MIN_SAMPLES="5")
+        assert s.SLOWDOWN_MIN_SAMPLES == 5

@@ -14,14 +14,16 @@ The AI/ML microservice for **Collab Code Sandbox** (IT-314, Group 32). This serv
 - **Contracts (T-07 / T-18 v2):** Endpoints and payloads conform to `../docs/ai-ml-contract.md`.
 - **Configurable Limits (DR3 / US-16):**
   - `ai-ml-service` owns AI rate and cost limits: `AI_SLOWDOWN_FACTOR` (FR37.2, default `1.0`), `AI_MAX_TOKENS_PER_REQUEST` (FR40.4, default `4096`), `LLM_TIMEOUT_SECONDS` (FR40.4, default `10.0`), `ROOM_HOURLY_LIMIT` (NFR5.3, default `20`), `MONTHLY_BUDGET_USD` (NFR7.2, default `10.0`), `TOKEN_COST_PER_TOKEN` (default `0.0000035`).
+  - Slowdown detection configurable limits (DR3 / US-68): `SLOWDOWN_FACTOR_THRESHOLD` (FR37.2, default `8.0`), `SLOWDOWN_MODIFIED_Z_THRESHOLD` (default `3.5`), `SLOWDOWN_MIN_SAMPLES` (default `3`), `SLOWDOWN_MAX_HISTORY` (default `100`).
   - See [docs/host-config.md](../docs/host-config.md) for details on host configuration and overrides. Final per-host values are determined only after host benchmarking.
 - **Endpoints:**
   - `GET /health`: Liveness probe for container orchestration and smoke tests.
   - `POST /v1/analyses/complexity`: Rules-first time complexity analysis with verified AI fallback (FR36, US-17, US-22).
+  - `POST /v1/analyses/slowdown`: Statistical slowdown detection against empirical Median and MAD baseline (FR37, US-68).
   - `POST /v1/analyses/crash-explanation`: Deterministic C/C++ sanitizer parser with crash explanation fallback (FR39, DR5).
   - `POST /v1/explain`: Execution failure explainer behind consent, normalized caching, and rate limits (T-16, US-22).
   - `GET /v1/usage`: Aggregate AI telemetry counters (T-18 v2).
-  - `DELETE /v1/rooms/{room_id}/state`: Purges room-scoped cache entries and resets rate-limit state (US-22, US-56, FR32).
+  - `DELETE /v1/rooms/{room_id}/state`: Purges room-scoped cache entries, measurement history, and rate-limit state (US-22, US-56, FR32).
 
 ## Local Development Setup
 
@@ -219,9 +221,82 @@ The dataset generator and its unittest checks require only the Python standard l
 
 Keep generated CSV files out of commits. The production anomaly score threshold will be chosen during Sprint 3 validation.
 
-## Anomaly Detection Baseline (T-15)
+## Slowdown Detection in Run History (US-68, FR37, T-18 v2 §16.2)
 
-**Note:** The current anomaly model is a minimal baseline trained **exclusively on synthetic data** (T-12) to establish the pipeline. It does not yet reflect real user execution metrics. 
+### User Story & Purpose (US-68)
+As a student, I want a warning when a run is far slower than my earlier runs so that I notice a performance regression.
+
+Slowdown detection evaluates execution runtime against an empirical historical baseline built from earlier runs of the exact same code input (`input_hash`).
+
+### Statistical Baseline & Detection Formulas
+For all earlier runs in the room sharing the same `input_hash`, `ai-ml-service` computes:
+1. **Historical Median Runtime:**
+   $$\tilde{x} = \text{median}(x_1, x_2, \dots, x_k)$$
+2. **Median Absolute Deviation (MAD):**
+   $$\text{MAD} = \text{median}(|x_i - \tilde{x}|)$$
+3. **Modified Z-Score (Boris Iglewicz and David Hoaglin, 1993):**
+   $$\text{modified\_z} = 0.6745 \times \frac{T_{\text{curr}} - \tilde{x}}{\text{MAD}}$$
+
+### Dual Flagging Criteria (Regression Decision)
+A run is flagged as a performance slowdown (`is_slowdown: true`) if and only if **BOTH** of the following independent criteria hold:
+1. **Statistical Outlier:** The modified z-score exceeds the configured outlier threshold and runtime is strictly greater than the baseline median:
+   $$\text{modified\_z} > \text{threshold} \quad \text{and} \quad T_{\text{curr}} > \tilde{x}$$
+   (Default threshold: `3.5`, configurable via `SLOWDOWN_MODIFIED_Z_THRESHOLD`).
+2. **Severe Fold Slowdown:** The current runtime is at least 8 times slower than the baseline median:
+   $$\text{slowdown\_factor} = \frac{T_{\text{curr}}}{\tilde{x}} \ge 8.0$$
+   (Default factor: `8.0`, configurable via `SLOWDOWN_FACTOR_THRESHOLD` per FR37.2 and DR3).
+
+### Configurable Limits (DR3 / US-16 / US-68)
+Each threshold is read from environment configuration without hard-coding:
+- `SLOWDOWN_FACTOR_THRESHOLD`: Fold multiplier threshold (default `8.0`).
+- `SLOWDOWN_MODIFIED_Z_THRESHOLD`: Modified z-score statistical outlier threshold (default `3.5`).
+- `SLOWDOWN_MIN_SAMPLES`: Minimum number of earlier runs required to establish a valid baseline (default `3`).
+- `SLOWDOWN_MAX_HISTORY`: Maximum number of measurements retained per `(room_id, input_hash)` bucket (default `100`).
+
+Thresholds may also be dynamically overridden on individual test/analysis requests via HTTP headers (`x-slowdown-factor`, `x-modified-z-threshold`, `x-min-samples`) or query parameters (`factor_threshold`, `z_threshold`, `min_samples`).
+
+### Safe Handling of MAD = 0 Policy
+When more than 50% of historical runs have identical execution times, $\text{MAD} = 0$. To prevent division by zero and eliminate false alarms:
+1. If $T_{\text{curr}} \le \tilde{x}$, `modified_z = 0.0` (not an outlier).
+2. If $T_{\text{curr}} > \tilde{x}$, the service evaluates the mean absolute deviation: $\text{mean\_ad} = \text{mean}(|x_i - \tilde{x}|)$.
+   - If $\text{mean\_ad} > 0$, `modified_z = 0.6745 * (T_curr - median) / mean_ad`.
+   - If all historical samples were strictly identical ($\text{mean\_ad} = 0$), historical variance is zero. Any runtime increase represents a statistical anomaly; the service sets `modified_z = float("inf")` without division by zero.
+3. Crucially, a regression is flagged **only** if Condition 2 ($T_{\text{curr}} \ge 8.0 \times \tilde{x}$) is ALSO satisfied. Normal run fluctuations (e.g., 101 ms vs. 100 ms baseline) have $\text{slowdown\_factor} = 1.01 < 8.0$ and are strictly **not flagged**, preventing false alarms.
+
+### Insufficient History Policy
+A minimum of 3 historical runs (`sample_count >= 3`) with matching `input_hash` is required to establish a baseline. Before reaching this threshold:
+- The service records the current measurement into short-lived storage.
+- It returns `is_slowdown: false`, `slowdown_factor: 1.0`, and an explicit contract-defined message:
+  `"Recorded run measurements. Baseline establishing (k of 3 minimum samples collected)."`
+- The `ai_step` is marked `status: "skipped"` with `error_code: null`.
+
+### Room-Scoped In-Memory Storage & Privacy (NFR8.2, FR37.4, US-52, CR11)
+- Historical measurements are maintained exclusively in `SlowdownStore` (thread-safe in-memory dictionaries protected by `threading.Lock`).
+- Measurements are strictly isolated by `(room_id, input_hash)`. Different rooms and different input hashes never share baselines.
+- **Privacy & Data Minimization (NFR8.2):** Stores **ONLY** numeric primitives: `execution_time_ms`, `peak_memory_mb`, and `timestamp`.
+- **Zero Raw Data Stored:** Source code, stdin, stdout, stderr, prompts, or complete run records are **never stored** in `ai-ml-service`. Canonical run records remain owned exclusively by `sync-service` (US-52).
+- When a run is flagged as a slowdown, it is **not added** to normal baseline measurements, preventing regression contamination of subsequent baselines.
+- Normal runs are added to the baseline up to `SLOWDOWN_MAX_HISTORY` (FIFO eviction).
+
+### Room Deletion Behavior (US-56, FR32)
+When a room is closed or deleted, `execution-service` calls `DELETE /v1/rooms/{room_id}/state` on `ai-ml-service`. This immediately and permanently frees all room-scoped measurements (`SlowdownStore.clear_room(room_id)`), code cache entries, and rate-limit counters. Deleting one room has zero effect on any other room.
+
+### Execution Ordering & AI Independence (NFR9, CR08)
+- **Statistics-Only Feature:** Slowdown detection is a purely mathematical algorithm (T-18 Decision 3) and requires **no external LLM or AI model calls**.
+- **Never Delays Execution (NFR9):** Code execution results are returned immediately by `execution-service`. Slowdown analysis is delivered asynchronously afterwards as a separate `analysis-result` message with the same audience as the corresponding run result (CR08).
+- **Consent and Host Switch Independence:** The statistical detection executes unconditionally regardless of whether user consent is granted or AI is enabled. If consent is missing or AI is disabled by the Host, `ai_step` is marked `status: "skipped"` with the corresponding error code (`CONSENT_MISSING` or `AI_DISABLED`), while the regression flag, slowdown factor, baseline, and messages are returned in full.
+
+---
+
+## Anomaly Detection Baseline (T-15) & Scorer Retirement
+
+**Contract & Scope Status (T-18 Decision 3 / Product Backlog v2 §6.2 Decision 3):**
+1. **Endpoint `POST /v1/anomaly` is Retired:** The v0 anomaly endpoint was a placeholder that always returned "not anomalous" and has been permanently retired.
+2. **Slowdown Detection Replaces Anomaly Route:** Regression detection is implemented via Task 2 (`POST /v1/analyses/slowdown`, FR37, US-68) using empirical Median and MAD statistics; it needs no machine learning model.
+3. **T-15 Scorer Status:** The offline `AnomalyScorer` prototype (`app/ml/scorer.py`) was removed during v2 cleanup and is unwired to any route. It remains outside the v2 production scope.
+4. **Mentor-Check Status:** In accordance with Product Backlog v2 Section 6.2 Decision 3, the mentor check regarding whether a trained ML model is desired remains an open item for the team. No mentor approval has been claimed without evidence.
+
+### Background: Initial Synthetic Baseline Evaluation (T-15 Prototype) 
 
 **Algorithm Choice:** 
 We utilize an **Isolation Forest** via `scikit-learn`. This was chosen because:
