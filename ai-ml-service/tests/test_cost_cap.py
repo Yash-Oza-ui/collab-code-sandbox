@@ -388,6 +388,7 @@ def test_complexity_endpoint_ai_free_results_when_cap_reached():
         "language": "python",
         "consent": True,
         "ai_enabled": True,
+        "rules_first": False,
         "code": "for i in range(10):\n    for j in range(10):\n        pass",
         "measurements": [
             {"input_size": 100, "runtimes_ms": [1.0, 1.1]},
@@ -464,6 +465,7 @@ def test_explain_endpoint_rule_findings_when_cap_reached():
         "language": "python",
         "consent": True,
         "ai_enabled": True,
+        "rules_first": False,
         "code": "for i in range(10):\n    for j in range(10):\n        pass",
         "stderr": "RuntimeError: slow execution",
         "exit_code": 1,
@@ -560,6 +562,7 @@ def test_cache_hits_served_when_cost_cap_reached():
         language="cpp",
         request_type="crash_explanation",
         error_signature="heap-buffer-overflow:14",
+        error_output="AddressSanitizer: heap-buffer-overflow:14",
     )
     cache.set(
         key,

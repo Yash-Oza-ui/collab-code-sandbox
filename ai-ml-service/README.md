@@ -11,12 +11,17 @@ The AI/ML microservice for **Collab Code Sandbox** (IT-314, Group 32). This serv
 ## Architecture & Responsibilities
 
 - **Scaffold (T-04):** FastAPI web service running on port 8000, health check at `/health`.
-- **Contracts (T-07):** Endpoints and payloads conform to `../docs/ai-ml-contract.md`.
+- **Contracts (T-07 / T-18 v2):** Endpoints and payloads conform to `../docs/ai-ml-contract.md`.
+- **Configurable Limits (DR3 / US-16):**
+  - `ai-ml-service` owns AI rate and cost limits: `AI_SLOWDOWN_FACTOR` (FR37.2, default `1.0`), `AI_MAX_TOKENS_PER_REQUEST` (FR40.4, default `4096`), `LLM_TIMEOUT_SECONDS` (FR40.4, default `10.0`), `ROOM_HOURLY_LIMIT` (NFR5.3, default `20`), `MONTHLY_BUDGET_USD` (NFR7.2, default `10.0`), `TOKEN_COST_PER_TOKEN` (default `0.0000035`).
+  - See [docs/host-config.md](../docs/host-config.md) for details on host configuration and overrides. Final per-host values are determined only after host benchmarking.
 - **Endpoints:**
   - `GET /health`: Liveness probe for container orchestration and smoke tests.
-  - `POST /v1/anomaly`: Metric-only anomaly scoring (T-13, T-15).
-  - `POST /v1/explain`: Plain-language failed run explainer (FR13, T-16).
-  - `POST /v1/review`: On-demand code review (FR7, FR12).
+  - `POST /v1/analyses/complexity`: Rules-first time complexity analysis with verified AI fallback (FR36, US-17, US-22).
+  - `POST /v1/analyses/crash-explanation`: Deterministic C/C++ sanitizer parser with crash explanation fallback (FR39, DR5).
+  - `POST /v1/explain`: Execution failure explainer behind consent, normalized caching, and rate limits (T-16, US-22).
+  - `GET /v1/usage`: Aggregate AI telemetry counters (T-18 v2).
+  - `DELETE /v1/rooms/{room_id}/state`: Purges room-scoped cache entries and resets rate-limit state (US-22, US-56, FR32).
 
 ## Local Development Setup
 
@@ -69,9 +74,102 @@ The AI/ML microservice for **Collab Code Sandbox** (IT-314, Group 32). This serv
 | `PORT` | Service listening port | `8000` | No |
 | `LLM_API_KEY` | API key for the external LLM provider | `None` | No (service starts without key) |
 | `LLM_MODEL` | Target LLM model name | `gemini-1.5-flash` | No |
+| `ROOM_HOURLY_LIMIT` | Max outbound AI calls per room per rolling hour (NFR5.3) | `20` | No |
 
 > **Security & Privacy Note (NFR8.2, NFR10):**
 > Never commit `.env` or real API keys to version control. The service starts normally even when `LLM_API_KEY` is not set. The service never logs request bodies, source code, stderr text, or API keys.
+
+## User Consent & Consent Withdrawal (US-17, US-21, FR12.4)
+
+In accordance with `FR12` (Privacy Consent Gate) and `FR12.4` / `US-21` (Withdraw AI Consent):
+
+1. **Per-Session Consent Lifecycle:**
+   - Consent is granted per user session (not per room).
+   - Under US-17, consent is given once upon initial user agreement in a session.
+   - Under US-21, a user can withdraw consent at any time during an active session via the client-side withdrawal control.
+   - Withdrawal is communicated to the backend by the client sending `consent: false` on subsequent analysis requests.
+   - If the user decides to opt back in later during that active session, consent can be granted again by sending `consent: true`. Withdrawing consent does not permanently disable AI for a user or session.
+
+2. **Dual-Gate Enforcement:**
+   - External AI calls strictly require **BOTH** `consent: true` (individual session consent, FR12) and `ai_enabled: true` (room Host AI switch, FR35).
+   - If `consent` is `false` or missing (`null`), the central consent gate (`app.llm.client.call_llm_with_consent`) immediately blocks external LLM calls with 0 outbound calls, 0 token consumption, and no raw code or prompts logged (NFR8.2).
+   - If `consent: true` but `ai_enabled: false`, the call is blocked under `error_code: "AI_DISABLED"`. User consent and Host AI switch are independent controls.
+
+3. **Preservation of AI-Free Functionality:**
+   - Withdrawing consent skips **only** the external AI step.
+   - All AI-free capabilities—code editing, sandbox code execution, deterministic AST/regex rule detection (`slow_patterns`), empirical Big-O regression fitting, and AddressSanitizer crash diagnostics—continue to execute unconditionally and return HTTP 200 OK.
+   - When an AI step is skipped due to withdrawn or missing consent, the service returns HTTP 200 with:
+     - `ai_step.status = "skipped"`
+     - `ai_step.error_code = "CONSENT_MISSING"`
+   - The user receives the standard FR40.5 user-facing fallback message: `"AI analysis skipped: user consent required."`
+
+4. **Session Isolation (No Shared Room State):**
+   - Consent state belongs strictly to the user's session, never to the collaborative room.
+   - In a shared room, one participant withdrawing consent (`consent: false`) has zero effect on another participant's consent (`consent: true`).
+   - The backend never maintains a shared room-level boolean for consent and does not own a second persistence store or consent database.
+
+5. **Client Coordination Contract:**
+   - The frontend team is responsible for the visible withdrawal control (e.g., in room settings or an AI consent toggle).
+   - The client remains the single source of truth for the session's current consent state (as specified in T-18 Decision 8).
+   - The frontend withdrawal control must update the current session's consent state and send the updated boolean value on every subsequent analysis request (`/v1/analyses/complexity`, `/v1/analyses/crash-explanation`, `/v1/explain`).
+   - The backend does not own or maintain a secondary consent store.
+
+## AI Request Control, Normalization & Rate Limiting (US-22)
+
+AI steps across all analysis endpoints enforce the controlled execution sequence defined in `NFR5.1`, `NFR5.2`, `NFR5.3`, and `FR40.3`:
+
+1. **Consent & Host AI Switch Gates (`US-17`, `FR35`):** External AI calls never execute unless both `consent=true` and `ai_enabled=true` in the request. Otherwise, rule-based / deterministic results still return HTTP 200 with a skipped `ai_step` (`CONSENT_MISSING` or `AI_DISABLED`).
+2. **Normalized SHA-256 Code Cache (`app/cache.py`, `NFR5.2`, `NFR8.2`):**
+   - Supported DR1 languages (`python`, `cpp`, `c`, `java`, `javascript`) are normalized before hashing:
+     - **Python:** Tokenized via standard-library `tokenize`; removes `#` comments and excess whitespace/blank lines while strictly preserving semantic docstrings, string literals, and `INDENT`/`DEDENT` block structure.
+     - **C / C++ / Java / JavaScript:** Character-scanner strips `//` and `/* */` comments while strictly preserving string/character/template literals, C++ raw strings (`R"(...)"`), C++ string prefixes (`u8`, `u`, `U`, `L`), Java text blocks (`"""..."""`), and JavaScript regular-expression literals (`/[//]/`). Strictly preserves C/C++ preprocessor directive boundaries (`#define X 1\nX`) and operator token boundaries (`a + ++b` vs `a++ + b`).
+   - Cache key formula: `SHA-256(normalized_code + ":" + language + ":" + request_type + ":" + error_signature + ":" + error_output)`.
+   - Only the 64-character hexadecimal digest is stored in `AnalysisCache`; no source code or stderr is persisted or logged.
+   - Cache hits return immediately without invoking the LLM or consuming room rate-limit quota.
+3. **Per-Room Hourly Rate Limiting (`app/limiter.py`, `NFR5.3`, `DR3`):**
+   - `RoomRateLimiter` tracks outbound LLM call timestamps per `room_id` over a rolling 1-hour window against `ROOM_HOURLY_LIMIT` (default: `20`).
+   - Uses atomic `check_and_reserve(room_id)` under thread lock to prevent race conditions during concurrent requests.
+   - Over-limit requests return HTTP 200 with AI-free findings intact and `ai_step: { "status": "skipped", "error_code": "ROOM_RATE_LIMITED" }`.
+4. **Room State Cleanup (`US-56`, `FR32`):**
+   - `DELETE /v1/rooms/{room_id}/state` evicts room-scoped cache keys and resets that room's rate-limit counters.
+
+## Rules-First Static Analysis (US-67, FR36.4)
+
+Before the system makes a paid AI call regarding slow code, simple deterministic rules look for obvious causes so that AI cost stays low (`FR36.4`, `US-67`).
+
+### Covered Patterns & Static Analysis Rules
+
+1. **Nested Loops (`nested_loops`):**
+   - Detects loop-within-a-loop constructs causing quadratic or polynomial time complexity ($O(n^2)$ or worse).
+   - Identifies the exact line number of the inner loop construct.
+2. **Repeated String Concatenation (`repeated_string_concat`):**
+   - Detects iterative string accumulation inside loop bodies (e.g. `s += str(x)`, `res = res + item`, `strcat`, `.concat()`).
+   - Advises using string buffers, pre-allocated lists, or join operations.
+3. **Linear Search in Loops (`linear_search_in_loop`):**
+   - Detects linear membership testing (`item in list`, `.indexOf()`, `.includes()`, `std::find`) inside an outer loop.
+   - Advises replacing linear collections with hash sets or hash maps for $O(1)$ lookups.
+
+### Supported Languages (DR1)
+
+The static rules cover all five supported languages:
+
+- **Python (`python`):** Full AST-based parsing via Python's standard-library `ast.parse` for exact syntactic node walking; gracefully falls back to lexical line scanning if the user code contains syntax errors.
+- **C++ (`cpp`):** Comment- and string-aware block depth scanner tracking brace nesting levels and regex patterns for loop headers (`for`, `while`, `do {`) and string modifications.
+- **C (`c`):** Comment- and string-aware brace scanner detecting nested loops and library string mutations (`strcat`, `strncat`).
+- **Java (`java`):** Comment- and string-aware brace scanner detecting standard/enhanced for-loops, while-loops, and string concatenation (`+=`, `.concat()`).
+- **JavaScript (`javascript`):** Comment- and string-aware brace scanner supporting standard for-loops, `for..of`, `for..in`, while-loops, and string accumulation.
+
+### False-Positive Protection
+
+- **Sequential Loop Tracking:** Sequential (consecutive, non-nested) loops in both braced (`{ ... }`) and single-statement unbraced formats (`for (...) stmt;`) are tracked using statement boundaries and block depth, ensuring they are strictly **not** reported as nested loops.
+- **Scope-Boundary AST Traversal:** In Python AST analysis, loop body traversal strictly terminates at nested function (`def`, `async def`), class (`class`), and lambda definition boundaries, ensuring loops and string accumulations inside nested definitions are not falsely attributed to the outer loop.
+- **Numeric Accumulation vs. String Concatenation:** Numeric loop accumulation in Python (e.g. `total += i`, `count += 1`, `total = total + i`) is distinguished from string accumulation and is strictly **not** classified as `repeated_string_concat`.
+- **String-Aware Lexical Scanning:** In C-family languages, comments (`//`, `/* */`) are stripped in a string-aware manner; comment markers and braces inside string and character literals (`"//..."`, `"/*...*/"`, `"{...}"`) are preserved as string content and do not corrupt loop or block depth tracking.
+
+### Analysis Flow (Rules versus AI)
+1. **Rule Evaluation (Default & AI-Free):** Evaluates deterministic static rules by default for complexity analysis requests; works without network or AI models regardless of consent.
+2. **Rule Match Avoids AI:** When any rule fires, findings are reported in `slow_patterns` and `ai_step` is marked `status: "skipped"` with `error_code: null`, making **zero outbound AI calls** and incurring $0 cost.
+3. **Controlled AI Fallback:** An AI call is made only when rules find no likely issues (clean code), and strictly subject to user consent (`FR12`, `US-17`) and the room AI switch (`FR35`, `US-59`). Clients may optionally pass `rules_first: false` to request direct AI analysis.
 
 ## Running the Service
 

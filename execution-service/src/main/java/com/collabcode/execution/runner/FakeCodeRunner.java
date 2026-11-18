@@ -1,95 +1,273 @@
 package com.collabcode.execution.runner;
 
-import org.springframework.context.annotation.Primary;
+import com.collabcode.execution.model.RunFile;
+import com.collabcode.execution.model.RunSpec;
+import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Component;
+
+import java.util.Locale;
 
 /**
  * Deterministic in-memory stub for CodeRunner.
  *
- * Used in Sprint 1 while US-09 (DockerCodeRunner) is not yet merged.
- * It never starts a process or touches Docker (FR5.1, NFR3).
+ * This bean is available only when the "stub-runner" Spring profile is active.
+ * The normal application uses DockerRunner; this stub remains available for
+ * controlled offline development and tests that explicitly select the profile.
  *
- * Behaviour (agreed with Quincy so the interface is stable):
- *  1. If stdin is non-empty, echoes its UPPER-CASE version to stdout.
- *  2. If code contains "stderr" (case-insensitive), writes "boom" to stderr
- *     and exits 2 — simulating a runtime failure.
- *  3. If code contains "syntax_error" (case-insensitive), writes a compiler
- *     error to stderr, exit 1, failure_kind "compile_error".
- *  4. Otherwise, returns "Hello from <language>!\n" in stdout, exit 0.
- *
- * Quincy's PR (feature/US-08-run-code-runner-hookup) replaces this bean
- * with DockerCodeRunner. Spring will use DockerCodeRunner when it is on the
- * classpath; the @Primary annotation here is removed in that PR.
- *
- * PLACEHOLDER – replaced by US-09 (DockerCodeRunner).
+ * Simulated outcomes:
+ *  1. Content containing an OOM marker returns exit 137,
+ *     oom_killed=true, failure_kind="non_zero_exit".
+ *  2. Content containing "syntax_error" returns a simulated compile error.
+ *  3. Content containing "stderr" returns a simulated runtime failure.
+ *  4. Non-empty stdin is echoed in uppercase.
+ *  5. Otherwise, a deterministic success result is returned.
  */
-@Primary
 @Component
+@Profile("stub-runner")
 public class FakeCodeRunner implements CodeRunner {
 
     @Override
-    public ExecutionResult execute(String language, String code, String stdin) {
+    public ExecutionResult execute(RunSpec spec) {
+        if (spec == null) {
+            return invalidRequest("Run specification must not be null.");
+        }
 
-        // Case 3: simulate a compile error
-        if (code != null && code.toLowerCase().contains("syntax_error")) {
+        String language = spec.getLanguage();
+        String stdin = spec.getStdin();
+
+        Double compileTime = isCompiled(language) ? 12.0 : null;
+
+        // Case 0: simulate an out-of-memory kill (Decision 9).
+        boolean hasOom = spec.getFiles() != null && spec.getFiles().stream()
+                .filter(file -> file != null)
+                .map(RunFile::getContent)
+                .filter(content -> content != null)
+                .anyMatch(FakeCodeRunner::matchesOom);
+
+        if (hasOom) {
+            String failingModule = findFailingFile(spec, "oom");
             return new ExecutionResult(
-                    /* stdout          */ "",
-                    /* stderr          */ language + ": SyntaxError: unexpected token near line 1\n",
-                    /* exitCode        */ 1,
-                    /* executionTimeMs */ 0.0,
-                    /* peakMemoryMb    */ 0.0,
-                    /* timedOut        */ false,
-                    /* oomKilled       */ false,
-                    /* failureKind     */ "compile_error",
-                    /* outputTruncated */ false,
-                    /* message         */ null
+                    "",
+                    "Killed: Out of memory\n",
+                    137,
+                    25.0,
+                    64.0,
+                    false,
+                    true,
+                    "non_zero_exit",
+                    false,
+                    "Memory limit exceeded",
+                    compileTime,
+                    failingModule
             );
         }
 
-        // Case 2: simulate a stderr / runtime failure
-        if (code != null && code.toLowerCase().contains("stderr")) {
+        // Case 1: simulate a compile error.
+        boolean hasSyntaxError = spec.getFiles() != null && spec.getFiles().stream()
+                .filter(file -> file != null)
+                .map(RunFile::getContent)
+                .filter(content -> content != null)
+                .anyMatch(content ->
+                        content.toLowerCase(Locale.ROOT).contains("syntax_error"));
+
+        if (hasSyntaxError) {
+            String failingModule = findFailingFile(spec, "syntax_error");
             return new ExecutionResult(
-                    /* stdout          */ "",
-                    /* stderr          */ "boom\n",
-                    /* exitCode        */ 2,
-                    /* executionTimeMs */ 12.0,
-                    /* peakMemoryMb    */ 4.0,
-                    /* timedOut        */ false,
-                    /* oomKilled       */ false,
-                    /* failureKind     */ "non_zero_exit",
-                    /* outputTruncated */ false,
-                    /* message         */ null
+                    "",
+                    language + ": SyntaxError: unexpected token near line 1\n",
+                    1,
+                    0.0,
+                    0.0,
+                    false,
+                    false,
+                    "compile_error",
+                    false,
+                    null,
+                    isCompiled(language) ? 0.0 : null,
+                    failingModule
             );
         }
 
-        // Case 1: stdin echoing
+        // Case 2: simulate a stderr / runtime failure.
+        boolean hasStderr = spec.getFiles() != null && spec.getFiles().stream()
+                .filter(file -> file != null)
+                .map(RunFile::getContent)
+                .filter(content -> content != null)
+                .anyMatch(content ->
+                        content.toLowerCase(Locale.ROOT).contains("stderr"));
+
+        if (hasStderr) {
+            String failingModule = findFailingFile(spec, "stderr");
+            return new ExecutionResult(
+                    "",
+                    "boom\n",
+                    2,
+                    12.0,
+                    4.0,
+                    false,
+                    false,
+                    "non_zero_exit",
+                    false,
+                    null,
+                    compileTime,
+                    failingModule
+            );
+        }
+
+        // Combine file content for deterministic marker checks.
+        String code = spec.getFiles() == null ? "" : spec.getFiles().stream()
+                .filter(file -> file != null)
+                .map(RunFile::getContent)
+                .filter(c -> c != null)
+                .collect(java.util.stream.Collectors.joining("\n"));
+
+        // Case 3: timeout / infinite loop simulation (US-13, NFR4.1)
+        if (code.contains("infinite_loop") || code.contains("while True: pass") || code.contains("while true")) {
+            return new ExecutionResult(
+                    "",
+                    "",
+                    124,
+                    5000.0,
+                    0.0,
+                    true,
+                    false,
+                    "timeout",
+                    false,
+                    "Time limit exceeded",
+                    compileTime,
+                    null
+            );
+        }
+
+        // Case 3.5: output flood simulation (US-13)
+        if (code.contains("output_flood")) {
+            return new ExecutionResult(
+                    "A".repeat(1024),
+                    "",
+                    0,
+                    15.0,
+                    4.2,
+                    false,
+                    false,
+                    null,
+                    true,
+                    null,
+                    compileTime,
+                    null
+            );
+        }
+
+        // Case 4: simulate bounded in-flight execution for testing (FR16 / US-11 / US-64)
+        double simulatedTimeMs = 15.0;
+        if (code.toLowerCase(Locale.ROOT).contains("sleep") || code.toLowerCase(Locale.ROOT).contains("delay")) {
+            long delayMs = 3000;
+            java.util.regex.Matcher m = java.util.regex.Pattern.compile("(?:sleep|delay)[\\s_\\(]+(\\d+)")
+                    .matcher(code.toLowerCase(Locale.ROOT));
+            if (m.find()) {
+                try {
+                    long requested = Long.parseLong(m.group(1));
+                    delayMs = requested <= 10 ? requested * 1000 : requested;
+                    delayMs = Math.min(Math.max(delayMs, 50), 5000);
+                } catch (NumberFormatException ignored) {}
+            }
+            long startNanos = System.nanoTime();
+            try {
+                Thread.sleep(delayMs);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            double elapsedMs = (System.nanoTime() - startNanos) / 1_000_000.0;
+            simulatedTimeMs = Math.max(delayMs, elapsedMs);
+        }
+
+        // Case 4.5: stdin echoing.
         if (stdin != null && !stdin.isEmpty()) {
+            double timeMs = (simulatedTimeMs > 15.0) ? simulatedTimeMs : 10.0;
             return new ExecutionResult(
-                    /* stdout          */ stdin.toUpperCase() + "\n",
-                    /* stderr          */ "",
-                    /* exitCode        */ 0,
-                    /* executionTimeMs */ 10.0,
-                    /* peakMemoryMb    */ 4.0,
-                    /* timedOut        */ false,
-                    /* oomKilled       */ false,
-                    /* failureKind     */ null,
-                    /* outputTruncated */ false,
-                    /* message         */ null
+                    stdin.toUpperCase(Locale.ROOT) + "\n",
+                    "",
+                    0,
+                    timeMs,
+                    4.0,
+                    false,
+                    false,
+                    null,
+                    false,
+                    null,
+                    compileTime,
+                    null
             );
         }
 
-        // Case 4: normal success
+        // Case 5: normal success
         return new ExecutionResult(
-                /* stdout          */ "Hello from " + language + "!\n",
-                /* stderr          */ "",
-                /* exitCode        */ 0,
-                /* executionTimeMs */ 15.0,
-                /* peakMemoryMb    */ 4.2,
-                /* timedOut        */ false,
-                /* oomKilled       */ false,
-                /* failureKind     */ null,
-                /* outputTruncated */ false,
-                /* message         */ null
+                "Hello from " + language + "!\n",
+                "",
+                0,
+                simulatedTimeMs,
+                4.2,
+                false,
+                false,
+                null,
+                false,
+                null,
+                compileTime,
+                null
         );
+    }
+
+    private ExecutionResult invalidRequest(String message) {
+        return new ExecutionResult(
+                "",
+                message + "\n",
+                2,
+                0.0,
+                0.0,
+                false,
+                false,
+                "non_zero_exit",
+                false,
+                message,
+                null,
+                null
+        );
+    }
+
+    private static boolean isCompiled(String language) {
+        if (language == null) {
+            return false;
+        }
+        return "cpp".equalsIgnoreCase(language)
+                || "c".equalsIgnoreCase(language)
+                || "java".equalsIgnoreCase(language);
+    }
+
+    private static boolean matchesOom(String content) {
+        if (content == null) {
+            return false;
+        }
+        String lower = content.toLowerCase(Locale.ROOT);
+        return (lower.contains("oom") && !lower.contains("boom"))
+                || lower.contains("out_of_memory");
+    }
+
+    private static String findFailingFile(RunSpec spec, String token) {
+        if (spec.getFiles() == null) {
+            return null;
+        }
+
+        return spec.getFiles().stream()
+                .filter(file -> file != null && file.getContent() != null)
+                .filter(file -> {
+                    String content = file.getContent();
+                    if ("oom".equalsIgnoreCase(token)) {
+                        return matchesOom(content);
+                    }
+                    return content.toLowerCase(Locale.ROOT)
+                            .contains(token.toLowerCase(Locale.ROOT));
+                })
+                .map(RunFile::getName)
+                .findFirst()
+                .orElse(null);
     }
 }

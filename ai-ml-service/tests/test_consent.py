@@ -52,6 +52,7 @@ SAMPLE_COMPLEXITY_PAYLOAD = {
     "language": "python",
     "consent": True,
     "ai_enabled": True,
+    "rules_first": False,
     "code": (
         "def find_duplicates(arr):\n"
         "    dups = []\n"
@@ -773,3 +774,425 @@ def test_matrix_endpoint_explain_permission_permutations(
         assert data["explanation"] == mock_fix
     else:
         assert data["explanation"] is None
+
+
+# ============================================================================
+# 9. US-21: Consent Withdrawal, Restoration & Session Isolation (FR12.4)
+# ============================================================================
+
+
+def test_us21_scenario_1_consent_withdrawn_blocks_outbound_llm():
+    """US-21 Scenario 1: Consent withdrawn during active session (consent: false).
+
+    Verifies across /v1/analyses/complexity, /v1/analyses/crash-explanation, and /v1/explain:
+    1. Zero outbound LLM calls are made (mock_llm.complete call_count == 0).
+    2. AI step is marked status == 'skipped'.
+    3. Error code is 'CONSENT_MISSING'.
+    """
+    mock_llm_complete = AsyncMock(return_value="Suggested AI fix.")
+
+    # 1. Complexity endpoint with consent withdrawn
+    comp_payload = dict(SAMPLE_COMPLEXITY_PAYLOAD)
+    comp_payload["consent"] = False
+    comp_payload["ai_enabled"] = True
+
+    with patch("app.llm.client.LLMClient.complete", mock_llm_complete):
+        resp_comp = client.post("/v1/analyses/complexity", json=comp_payload)
+
+    assert resp_comp.status_code == 200
+    data_comp = resp_comp.json()
+    assert data_comp["ai_step"]["status"] == "skipped"
+    assert data_comp["ai_step"]["error_code"] == "CONSENT_MISSING"
+    assert data_comp["ai_step"]["suggested_fix"] is None
+    assert mock_llm_complete.call_count == 0
+
+    # 2. Crash explanation endpoint with consent withdrawn
+    crash_payload = {
+        "request_id": "us21-crash-withdrawn-001",
+        "room_id": "room-us21-withdrawn",
+        "analysis_id": "an-us21-crash-001",
+        "request_type": "crash_explanation",
+        "language": "cpp",
+        "consent": False,
+        "ai_enabled": True,
+        "sanitizer_output": "==1001==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x1\n #0 in f /app.cpp:10",
+        "code_snippet": "char* buf = (char*)malloc(10); buf[12] = 'x';",
+    }
+
+    with patch("app.llm.client.LLMClient.complete", mock_llm_complete):
+        resp_crash = client.post("/v1/analyses/crash-explanation", json=crash_payload)
+
+    assert resp_crash.status_code == 200
+    data_crash = resp_crash.json()
+    assert data_crash["ai_step"]["status"] == "skipped"
+    assert data_crash["ai_step"]["error_code"] == "CONSENT_MISSING"
+    assert data_crash["ai_step"]["explanation"] is None
+    assert mock_llm_complete.call_count == 0
+
+    # 3. Explain endpoint with consent withdrawn
+    explain_payload = dict(SAMPLE_EXPLAIN_PAYLOAD)
+    explain_payload["consent"] = False
+    explain_payload["ai_enabled"] = True
+
+    with patch("app.llm.client.LLMClient.complete", mock_llm_complete):
+        resp_explain = client.post("/v1/explain", json=explain_payload)
+
+    assert resp_explain.status_code == 200
+    data_explain = resp_explain.json()
+    assert data_explain["ai_step"]["status"] == "skipped"
+    assert data_explain["ai_step"]["error_code"] == "CONSENT_MISSING"
+    assert data_explain["explanation"] is None
+    assert mock_llm_complete.call_count == 0
+
+
+def test_us21_scenario_2_consent_missing_blocks_outbound_llm():
+    """US-21 Scenario 2: Consent missing (omitted or None).
+
+    Verifies missing consent fails closed with 0 outbound LLM calls and CONSENT_MISSING.
+    """
+    mock_llm_complete = AsyncMock(return_value="Suggested AI fix.")
+
+    # Complexity endpoint with consent missing
+    comp_payload = dict(SAMPLE_COMPLEXITY_PAYLOAD)
+    comp_payload.pop("consent", None)
+    comp_payload["ai_enabled"] = True
+
+    with patch("app.llm.client.LLMClient.complete", mock_llm_complete):
+        resp = client.post("/v1/analyses/complexity", json=comp_payload)
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["ai_step"]["status"] == "skipped"
+    assert data["ai_step"]["error_code"] == "CONSENT_MISSING"
+    assert mock_llm_complete.call_count == 0
+
+    # Crash explanation endpoint with consent None
+    crash_payload = {
+        "request_id": "us21-crash-missing-002",
+        "room_id": "room-us21-missing",
+        "analysis_id": "an-us21-crash-002",
+        "request_type": "crash_explanation",
+        "language": "c",
+        "consent": None,
+        "ai_enabled": True,
+        "sanitizer_output": "==1002==ERROR: AddressSanitizer: global-buffer-overflow on address 0x2\n #0 in g /app.c:20",
+        "code_snippet": "int arr[5]; arr[10] = 1;",
+    }
+
+    with patch("app.llm.client.LLMClient.complete", mock_llm_complete):
+        resp_crash = client.post("/v1/analyses/crash-explanation", json=crash_payload)
+
+    assert resp_crash.status_code == 200
+    data_crash = resp_crash.json()
+    assert data_crash["ai_step"]["status"] == "skipped"
+    assert data_crash["ai_step"]["error_code"] == "CONSENT_MISSING"
+    assert mock_llm_complete.call_count == 0
+
+
+def test_us21_scenario_3_ai_free_analysis_preserved_after_withdrawal():
+    """US-21 Scenario 3: AI-free functionality is preserved after consent withdrawal.
+
+    Withdrawing consent skips ONLY the external AI step:
+    - Rule-based AST pattern analysis continues to detect patterns.
+    - Empirical Big-O measurements and regression fitting continue to return.
+    - Sanitizer output parsing continues to parse error types and line numbers.
+    - Returns HTTP 200 with complete AI-free results intact and 0 LLM calls.
+    """
+    mock_llm_complete = AsyncMock(return_value="Suggested AI fix.")
+
+    # 1. Complexity endpoint: rule detection & empirical regression execute AI-free
+    comp_payload = {
+        "request_id": "us21-aifree-comp-001",
+        "room_id": "room-us21-aifree",
+        "analysis_id": "an-us21-aifree-001",
+        "request_type": "complexity",
+        "language": "python",
+        "consent": False,
+        "ai_enabled": True,
+        "rules_first": False,
+        "code": (
+            "def slow_matrix(n):\n"
+            "    res = []\n"
+            "    for i in range(n):\n"
+            "        for j in range(n):\n"
+            "            res.append(i * j)\n"
+            "    return res\n"
+        ),
+        "measurements": [
+            {"input_size": 10, "runtimes_ms": [0.5, 0.6]},
+            {"input_size": 100, "runtimes_ms": [48.0, 52.0]},
+            {"input_size": 200, "runtimes_ms": [195.0, 205.0]},
+        ],
+    }
+
+    with patch("app.llm.client.LLMClient.complete", mock_llm_complete):
+        resp_comp = client.post("/v1/analyses/complexity", json=comp_payload)
+
+    assert resp_comp.status_code == 200
+    data_comp = resp_comp.json()
+    # Empirical regression metrics computed
+    assert data_comp["estimated_complexity"] == "O(n^2)"
+    assert data_comp["growth_rate"] > 1.8
+    assert data_comp["r2_score"] > 0.95
+    assert data_comp["projected_timeout_input_size"] > 0
+    # AST rule findings detected
+    assert len(data_comp["slow_patterns"]) >= 1
+    assert any(p["pattern"] == "nested_loops" for p in data_comp["slow_patterns"])
+    # AI step is skipped
+    assert data_comp["ai_step"]["status"] == "skipped"
+    assert data_comp["ai_step"]["error_code"] == "CONSENT_MISSING"
+    assert mock_llm_complete.call_count == 0
+
+    # 2. Crash explanation endpoint: deterministic sanitizer parser executes AI-free
+    crash_payload = {
+        "request_id": "us21-aifree-crash-001",
+        "room_id": "room-us21-aifree",
+        "analysis_id": "an-us21-aifree-002",
+        "request_type": "crash_explanation",
+        "language": "cpp",
+        "consent": False,
+        "ai_enabled": True,
+        "sanitizer_output": (
+            "==8842==ERROR: AddressSanitizer: stack-buffer-overflow on address 0x7fff\n"
+            "WRITE of size 4 at 0x7fff thread T0\n"
+            "    #0 0x401888 in compute_values /workspace/main.cpp:27:12\n"
+        ),
+        "code_snippet": "int local_arr[10];\nlocal_arr[20] = 99;",
+    }
+
+    with patch("app.llm.client.LLMClient.complete", mock_llm_complete):
+        resp_crash = client.post("/v1/analyses/crash-explanation", json=crash_payload)
+
+    assert resp_crash.status_code == 200
+    data_crash = resp_crash.json()
+    # Parser results intact
+    assert data_crash["error_type"] == "stack-buffer-overflow"
+    assert data_crash["line_number"] == 27
+    assert "stack-buffer-overflow" in data_crash["summary"]
+    # AI step is skipped
+    assert data_crash["ai_step"]["status"] == "skipped"
+    assert data_crash["ai_step"]["error_code"] == "CONSENT_MISSING"
+    assert mock_llm_complete.call_count == 0
+
+
+def test_us21_scenario_4_consent_restoration_session_lifecycle():
+    """US-21 Scenario 4: User grants, withdraws, and restores consent within a session.
+
+    Session lifecycle:
+    1. Request 1 (consent: true, ai_enabled: true) -> LLM invoked once, ai_step.status == 'ok'.
+    2. Request 2 (consent: false, ai_enabled: true) -> 0 new LLM calls, ai_step.status == 'skipped' (CONSENT_MISSING).
+    3. Request 3 (consent: true, ai_enabled: true) -> LLM invoked again (call count 2), ai_step.status == 'ok'.
+
+    Verifies consent withdrawal does not permanently disable AI for the user/session.
+    """
+    mock_llm_complete = AsyncMock(side_effect=["Fix 1: Optimize loops.", "Fix 2: Refactor lookup."])
+
+    with patch("app.llm.client.LLMClient.complete", mock_llm_complete):
+        # Step 1: Initial consent granted
+        req_1 = dict(SAMPLE_COMPLEXITY_PAYLOAD)
+        req_1["request_id"] = "us21-seq-001"
+        req_1["consent"] = True
+        req_1["ai_enabled"] = True
+        req_1["code"] = "def f1(a):\n    for x in a:\n        for y in a:\n            pass"
+
+        resp_1 = client.post("/v1/analyses/complexity", json=req_1)
+        assert resp_1.status_code == 200
+        data_1 = resp_1.json()
+        assert data_1["ai_step"]["status"] == "ok"
+        assert data_1["ai_step"]["suggested_fix"] == "Fix 1: Optimize loops."
+        assert mock_llm_complete.call_count == 1
+
+        # Step 2: User withdraws consent during the active session
+        req_2 = dict(SAMPLE_COMPLEXITY_PAYLOAD)
+        req_2["request_id"] = "us21-seq-002"
+        req_2["consent"] = False
+        req_2["ai_enabled"] = True
+        req_2["code"] = "def f2(b):\n    for x in b:\n        for y in b:\n            pass"
+
+        resp_2 = client.post("/v1/analyses/complexity", json=req_2)
+        assert resp_2.status_code == 200
+        data_2 = resp_2.json()
+        assert data_2["ai_step"]["status"] == "skipped"
+        assert data_2["ai_step"]["error_code"] == "CONSENT_MISSING"
+        assert data_2["ai_step"]["suggested_fix"] is None
+        # Call count must remain 1: NO outbound LLM call on withdrawn consent
+        assert mock_llm_complete.call_count == 1
+
+        # Step 3: User restores consent later in the active session
+        req_3 = dict(SAMPLE_COMPLEXITY_PAYLOAD)
+        req_3["request_id"] = "us21-seq-003"
+        req_3["consent"] = True
+        req_3["ai_enabled"] = True
+        req_3["code"] = "def f3(c):\n    for x in c:\n        for y in c:\n            pass"
+
+        resp_3 = client.post("/v1/analyses/complexity", json=req_3)
+        assert resp_3.status_code == 200
+        data_3 = resp_3.json()
+        assert data_3["ai_step"]["status"] == "ok"
+        assert data_3["ai_step"]["suggested_fix"] == "Fix 2: Refactor lookup."
+        # Call count advances to 2: LLM call succeeds after restoration
+        assert mock_llm_complete.call_count == 2
+
+
+def test_us21_scenario_5_session_isolation_independent_consent_in_same_room():
+    """US-21 Scenario 5: Session isolation in a shared collaborative room.
+
+    Two users in the same room ('room-shared-collab-101'):
+    - User A (Session A) withdraws consent (consent: false).
+    - User B (Session B) grants consent (consent: true).
+
+    Verifies:
+    1. User A's requests are blocked from LLM (ai_step.status == 'skipped', CONSENT_MISSING).
+    2. User B's requests proceed to LLM (ai_step.status == 'ok', 1 call).
+    3. User A's subsequent requests remain blocked.
+    4. Room-level boolean is NEVER used for user consent; consent is per-session.
+    """
+    mock_llm_complete = AsyncMock(return_value="AI suggestion for User B.")
+    shared_room = "room-shared-collab-101"
+
+    with patch("app.llm.client.LLMClient.complete", mock_llm_complete):
+        # User A in room-shared-collab-101 with consent: false
+        payload_user_a = {
+            "request_id": "us21-session-a-01",
+            "room_id": shared_room,
+            "analysis_id": "an-user-a-01",
+            "request_type": "complexity",
+            "language": "python",
+            "consent": False,
+            "ai_enabled": True,
+            "rules_first": False,
+            "code": "def process_a(items):\n    for x in items:\n        for y in items:\n            pass\n",
+            "measurements": [{"input_size": 10, "runtimes_ms": [1.0, 1.1]}],
+        }
+
+        resp_a = client.post("/v1/analyses/complexity", json=payload_user_a)
+        assert resp_a.status_code == 200
+        data_a = resp_a.json()
+        assert data_a["ai_step"]["status"] == "skipped"
+        assert data_a["ai_step"]["error_code"] == "CONSENT_MISSING"
+        assert mock_llm_complete.call_count == 0
+
+        # User B in the EXACT SAME room-shared-collab-101 with consent: true
+        payload_user_b = {
+            "request_id": "us21-session-b-01",
+            "room_id": shared_room,
+            "analysis_id": "an-user-b-01",
+            "request_type": "complexity",
+            "language": "python",
+            "consent": True,
+            "ai_enabled": True,
+            "rules_first": False,
+            "code": "def process_b(items):\n    for x in items:\n        for y in items:\n            pass\n",
+            "measurements": [{"input_size": 10, "runtimes_ms": [1.0, 1.1]}],
+        }
+
+        resp_b = client.post("/v1/analyses/complexity", json=payload_user_b)
+        assert resp_b.status_code == 200
+        data_b = resp_b.json()
+        assert data_b["ai_step"]["status"] == "ok"
+        assert data_b["ai_step"]["suggested_fix"] == "AI suggestion for User B."
+        assert mock_llm_complete.call_count == 1
+
+        # User A makes another request in the same room -> STILL blocked
+        payload_user_a_2 = {
+            "request_id": "us21-session-a-02",
+            "room_id": shared_room,
+            "analysis_id": "an-user-a-02",
+            "request_type": "complexity",
+            "language": "python",
+            "consent": False,
+            "ai_enabled": True,
+            "rules_first": False,
+            "code": "def process_a_v2(items):\n    for x in items:\n        for y in items:\n            pass\n",
+            "measurements": [{"input_size": 10, "runtimes_ms": [1.0, 1.1]}],
+        }
+
+        resp_a_2 = client.post("/v1/analyses/complexity", json=payload_user_a_2)
+        assert resp_a_2.status_code == 200
+        data_a_2 = resp_a_2.json()
+        assert data_a_2["ai_step"]["status"] == "skipped"
+        assert data_a_2["ai_step"]["error_code"] == "CONSENT_MISSING"
+        # Total calls must still be 1 (User B's call only)
+        assert mock_llm_complete.call_count == 1
+
+
+def test_us21_scenario_6_host_ai_switch_independent_of_user_consent():
+    """US-21 Scenario 6: Host AI switch interaction.
+
+    Verifies:
+    1. consent: true with ai_enabled: false does not call LLM (0 calls),
+       preserves AI-free analysis, and returns error_code == 'AI_DISABLED'.
+    2. consent: false with ai_enabled: false returns error_code == 'CONSENT_MISSING'
+       (consent gate precedes Host AI switch).
+    3. User consent does not override Host AI switch, and Host switch does not modify user consent.
+    """
+    mock_llm_complete = AsyncMock(return_value="Mock fix.")
+
+    # 1. consent: true, ai_enabled: false -> blocked with AI_DISABLED
+    payload_host_off = dict(SAMPLE_COMPLEXITY_PAYLOAD)
+    payload_host_off["consent"] = True
+    payload_host_off["ai_enabled"] = False
+
+    with patch("app.llm.client.LLMClient.complete", mock_llm_complete):
+        resp_1 = client.post("/v1/analyses/complexity", json=payload_host_off)
+
+    assert resp_1.status_code == 200
+    data_1 = resp_1.json()
+    assert data_1["ai_step"]["status"] == "skipped"
+    assert data_1["ai_step"]["error_code"] == "AI_DISABLED"
+    assert len(data_1["slow_patterns"]) >= 1
+    assert mock_llm_complete.call_count == 0
+
+    # 2. consent: false, ai_enabled: false -> consent check precedes AI switch
+    payload_both_off = dict(SAMPLE_COMPLEXITY_PAYLOAD)
+    payload_both_off["consent"] = False
+    payload_both_off["ai_enabled"] = False
+
+    with patch("app.llm.client.LLMClient.complete", mock_llm_complete):
+        resp_2 = client.post("/v1/analyses/complexity", json=payload_both_off)
+
+    assert resp_2.status_code == 200
+    data_2 = resp_2.json()
+    assert data_2["ai_step"]["status"] == "skipped"
+    assert data_2["ai_step"]["error_code"] == "CONSENT_MISSING"
+    assert mock_llm_complete.call_count == 0
+
+
+def test_us21_scenario_7_withdrawal_prevents_cache_leakage():
+    """US-21 Scenario 7: Consent withdrawal prevents leaking cached AI responses.
+
+    If an AI response was previously generated and cached in the room (e.g. by another
+    user or earlier in the session), a subsequent request with consent: false
+    MUST NOT return the cached AI fix or explanation. It must return status: 'skipped',
+    error_code: 'CONSENT_MISSING', and suggested_fix: None.
+    """
+    mock_llm_complete = AsyncMock(return_value="Cached AI fix text.")
+    room = "room-cache-consent-isolation"
+
+    with patch("app.llm.client.LLMClient.complete", mock_llm_complete):
+        # 1. Request with consent: true populates the cache
+        payload_primed = dict(SAMPLE_COMPLEXITY_PAYLOAD)
+        payload_primed["room_id"] = room
+        payload_primed["consent"] = True
+        payload_primed["ai_enabled"] = True
+
+        resp_primed = client.post("/v1/analyses/complexity", json=payload_primed)
+        assert resp_primed.status_code == 200
+        assert resp_primed.json()["ai_step"]["status"] == "ok"
+        assert resp_primed.json()["ai_step"]["suggested_fix"] == "Cached AI fix text."
+        assert mock_llm_complete.call_count == 1
+
+        # 2. Same code, same room, but consent: false (withdrawn)
+        payload_withdrawn = dict(SAMPLE_COMPLEXITY_PAYLOAD)
+        payload_withdrawn["room_id"] = room
+        payload_withdrawn["consent"] = False
+        payload_withdrawn["ai_enabled"] = True
+
+        resp_withdrawn = client.post("/v1/analyses/complexity", json=payload_withdrawn)
+        assert resp_withdrawn.status_code == 200
+        data_withdrawn = resp_withdrawn.json()
+        # MUST NOT return the cached fix!
+        assert data_withdrawn["ai_step"]["status"] == "skipped"
+        assert data_withdrawn["ai_step"]["error_code"] == "CONSENT_MISSING"
+        assert data_withdrawn["ai_step"]["suggested_fix"] is None
+        assert mock_llm_complete.call_count == 1

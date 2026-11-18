@@ -2,13 +2,13 @@
 
 **IT-314 Software Engineering | Group 32**  
 **Task:** T-01 · Frontend Client Scaffold  
-**Traceability:** FR1, FR2, FR3, FR14 · EPIC 1 · Sprint 1  
+**Traceability:** FR1, FR2, FR3, FR14 · EPIC 1 · Sprint 1 / Sprint 2  
 
 ---
 
 ## 1. Overview & Technology Choices
 
-The `client/` package is the web frontend for **Collab Code Sandbox**, providing the collaborative Monaco editor interface and room management. It serves as the baseline on which **US-01** (create room & share link), **US-02** (merge simultaneous edits), **US-05** (display name), and **T-11** (run panel) are built.
+The `client/` package is the web frontend for **Collab Code Sandbox**, providing the collaborative Monaco editor interface and room management. It serves as the baseline on which **US-01** (create room & share link), **US-02** (merge simultaneous edits), **US-05** (display name & colour presence), and **T-11** (run panel) are built.
 
 ### Stack Selection
 - **Framework & Bundler:** **Vite** + **React 19** + **TypeScript**
@@ -16,10 +16,10 @@ The `client/` package is the web frontend for **Collab Code Sandbox**, providing
 - **Code Editor:** **Monaco Editor** (`@monaco-editor/react` & `monaco-editor`)
   - *Rationale:* Industry-standard browser editor powering VS Code, supporting syntax highlighting, keybindings, multi-cursor, and high-performance editing for C++, Python, C, Java, and JavaScript.
   - *Note on CDN Dependency:* `@monaco-editor/react` currently fetches the Monaco Editor bundle from CDN (`cdn.jsdelivr.net`) at runtime in the browser. An active internet connection is required when loading the editor.
-- **Collaborative State (CRDT):** **Yjs** (`yjs`)
-  - *Rationale:* High-performance Conflict-free Replicated Data Type (CRDT) document model providing conflict-free simultaneous edit merging without central coordinator locking.
+- **Collaborative State (CRDT) & Awareness:** **Yjs** (`yjs`) & **y-protocols** (`y-protocols/awareness`)
+  - *Rationale:* High-performance Conflict-free Replicated Data Type (CRDT) document model providing conflict-free simultaneous edit merging and decentralised participant awareness presence without central coordinator locking.
 - **Collaboration Integration:** `y-websocket` and `y-monaco`
-  - Rationale: Connects Yjs documents to the WebSocket relay and binds shared document changes to Monaco.
+  - *Rationale:* Connects Yjs documents to the WebSocket relay and binds shared document changes to Monaco.
 - **Testing & Tooling:** **Vitest** with `happy-dom` for DOM-aware tests, and **ESLint** for code quality.
 - **Intended Browser Compatibility Target (NFR12):** Current desktop versions of **Chrome**, **Edge**, and **Firefox**. Standard web APIs are used, avoiding browser-specific extensions. Formal multi-browser test verification is scheduled for **Sprint 2**.
 
@@ -135,6 +135,12 @@ npm test
 Test suites cover:
 - `src/roomId.test.ts`: URL room ID validation and parsing rules (T-06 §3.2).
 - `src/config.test.ts`: Environment configuration parsing and fallback to T-06 service contract defaults.
+- `src/displayName.test.ts`: Display name validation (whitespace trimming, non-empty, max 50 chars).
+- `src/userColor.test.ts`: User colour palette modulo indexing, non-colliding participant colour selection, and fallback logic (US-05).
+- `src/awareness.test.ts`: Yjs awareness presence initialization and peer colour aggregation (US-05).
+- `src/awarenessWs.test.ts`: Stable session ID management (T-06 §3.3), WebSocket URL construction (T-06 §3.1), message framing, and multi-client relay awareness synchronization (US-05).
+- `src/DisplayNamePrompt.test.tsx`: Display name input modal and error message handling.
+- `src/RoomPage.displayName.test.tsx`: Display name gating, room header colour badge rendering, awareness state exposure, and multi-client room sync over relay.
 - `src/roomDoc.test.tsx`:
   - `createRoomDoc` unit tests (instantiation, shared text mutations, clean destruction).
   - `useRoomDoc` StrictMode regression test (verifies that during React StrictMode effect replay, each replaced document is destroyed, the document after effect replay is live, and the document is destroyed on final unmount).
@@ -163,32 +169,191 @@ In T-01:
 - **StrictMode-Safe Lifecycle:** `useRoomDoc` (`src/roomDoc.ts`) creates each `Y.Doc` inside effect setup and destroys that exact instance in effect cleanup. No disposable documents are instantiated during the render phase. In development with React StrictMode enabled, effect replay cleanly destroys the first instance and recreates a live document without leaving stale or destroyed documents.
 - **Ref Availability:** The active document is exposed via `docRef` for subsequent **US-01** and **US-02** integrations.
 - **US-01 / US-02 Integration:** The room page connects to the sync-service using `y-websocket` and binds the shared Yjs document to Monaco using `y-monaco`. The connection is established after the participant enters a display name and the editor is mounted. The provider and binding are cleaned up when the room page unmounts or the room state changes.
-- **Participant Awareness:** Yjs Awareness is used to publish the participant's display name.
+- **Participant Awareness & Presence (US-05):** Yjs Awareness (`y-protocols/awareness`) is used to publish and synchronize the participant's display name and assigned presence colour across control and document sockets.
 
 ---
 
-## 9. Fresh-Clone Verification Procedure (For Reviewers / Teammates)
+## 9. Display Name, Colour Assignment & Presence Awareness (US-05 / FR14)
 
-The following steps are provided for another team member or reviewer to verify the client scaffold on a fresh clone:
+**US-05** allows guests joining a room without GitHub authentication to enter a display name and automatically receive a distinct presence colour:
+1. **Name Prompt & Validation (`src/displayName.ts`, `src/DisplayNamePrompt.tsx`):**
+   - Prompted before entering the room editor.
+   - Validated: trimmed, non-empty, and limited to 50 characters (`MAX_DISPLAY_NAME_LENGTH = 50`).
+2. **Colour Picker (`src/userColor.ts`):**
+   - High-contrast, accessible 10-colour palette sized for room capacity (NFR2).
+   - Pure function `pickUserColor(existingColors, fallbackIndex)` finds an unused colour among active participants in the room, falling back deterministically when all palette colours are taken.
+3. **Yjs Awareness Presence (`src/awareness.ts`):**
+   - Stores user presence in Yjs awareness state under `awareness.setLocalStateField('user', { name, color })`.
+   - Ready for live cursors (US-03) without rework.
+4. **WebSocket Awareness Synchronization & T-20 Protocol (`src/awarenessWs.ts`):**
+   - Implements the T-20 two-socket architecture:
+     - **Control Socket:** `ws://localhost:8081/ws/rooms/{room_id}?session_id={session_id}`
+       - Text-based JSON control frames.
+       - Client sends `{"type": "join", "display_name": "..."}` and receives `{"type": "joined", ...}` along with room `roster` broadcasts.
+     - **Document Socket:** `ws://localhost:8081/ws/rooms/{room_id}/docs/{doc_id}?session_id={session_id}`
+       - Dedicated binary socket for Yjs document updates and awareness frames (default `doc_id = 'main'`).
+       - Enforces T-20 lifecycle: document sockets opened before `join` is completed on the control socket are rejected by the server with close code `4406`.
+       - Binary awareness frames (`MESSAGE_AWARENESS = 1`) and query awareness frames (`MESSAGE_QUERY_AWARENESS = 3`) synchronize participant presence states in real time across peers without echo loops.
+   - Formatted in accordance with T-06 §3.1 / §3.3 and T-20 using stable UUID v4 stored in `localStorage` (`collab_session_id`).
+5. **Browser Console Inspection (DoD #5):**
+   - The active awareness instance is exposed at `window.awareness`.
+   - Reviewers and developers can inspect the active participants and local presence in DevTools console:
+     ```javascript
+     window.awareness.getStates()
+     // Map(2) {
+     //   [clientAId] => { user: { name: 'Alice', color: '#e11d48' } },
+     //   [clientBId] => { user: { name: 'Bob', color: '#2563eb' } }
+     // }
+     ```
 
+---
+
+## 10. Multi-Client Verification Procedure (Reviewers / Teammates)
+
+### Automated Test Verification
+Run the multi-client relay integration suites:
 ```bash
-# 1. From repository root, navigate into the client folder
-cd client
-
-# 2. Clean install dependencies
-npm ci
-
-# 3. Run the automated test suite (all tests must pass)
-npm test
-
-# 4. Compile and verify production build
-npm run build
-
-# 5. Run linter (must pass with 0 errors and 0 warnings)
-npm run lint
-
-# 6. Start the local dev server
-npm run dev
-# -> Open http://localhost:3000/room/test-room in a browser with internet access
-# -> Confirm the header displays "Room: test-room" and the Monaco editor renders
+npm test src/awarenessWs.test.ts src/RoomPage.displayName.test.tsx
 ```
+Both test suites simulate the sync-service T-20 WebSocket relay (Control socket at `/ws/rooms/{room_id}` and Document socket at `/ws/rooms/{room_id}/docs/{doc_id}`) and verify that:
+- Control join handshake (`join` -> `joined`) succeeds before document socket is established.
+- Document sockets opened before completing `join` are rejected with close code `4406`.
+- Client A joins as Alice.
+- Client B joins as Bob.
+- Both clients receive and observe the other's name and colour in their Awareness states over the document socket.
+- Their assigned colours are distinct.
+
+### Manual Two-Client Verification (Browser)
+1. Start the services:
+   - Ensure `sync-service` is running on `ws://localhost:8081` (via Docker Compose or `./gradlew bootRun`).
+   - Start the client: `npm run dev` (opens on `http://localhost:3000`).
+2. **Window A (First Participant):**
+   - Navigate to `http://localhost:3000/room/demo-room-01`.
+   - In the name prompt, enter `Alice` and click **Join room**.
+   - The editor opens with header badge: `Room: demo-room-01 · You: Alice` with a colour dot (e.g. Rose `#e11d48`).
+   - In DevTools console, run:
+     ```javascript
+     Array.from(window.awareness.getStates().values())
+     // -> [{ user: { name: 'Alice', color: '#e11d48' } }]
+     ```
+3. **Window B (Second Participant in Incognito or second browser):**
+   - Navigate to `http://localhost:3000/room/demo-room-01`.
+   - In the name prompt, enter `Bob` and click **Join room**.
+   - The editor opens with header badge: `Room: demo-room-01 · You: Bob` with a distinct colour dot (e.g. Blue `#2563eb`).
+   - In **Window B** console, run:
+     ```javascript
+     Array.from(window.awareness.getStates().values())
+     // -> [{ user: { name: 'Alice', color: '#e11d48' } }, { user: { name: 'Bob', color: '#2563eb' } }]
+     ```
+   - In **Window A** console, re-run:
+     ```javascript
+     Array.from(window.awareness.getStates().values())
+     // -> Both Alice and Bob are present, verified synchronized over the WebSocket relay.
+     ```
+
+---
+
+## 11. Merge Simultaneous Edits Safely (US-02 / FR2)
+
+**US-02** enables multiple participants to edit simultaneously in Monaco without overwriting each other's work or losing changes:
+
+1. **Monaco-to-Yjs Binding (`y-monaco`):**
+   - The Monaco editor text model binds directly to `doc.getText('monaco')` upon mount.
+   - Edits in Monaco mutate the shared Y.Text type, and remote Yjs updates automatically project into the Monaco editor model.
+2. **Relay Document Synchronization Protocol (`src/awarenessWs.ts`):**
+   - The Document Socket (`/ws/rooms/{roomId}/docs/{docId}?session_id={sessionId}`) relays both Yjs document sync frames (`MESSAGE_SYNC = 0`) and Awareness frames (`MESSAGE_AWARENESS = 1`, `MESSAGE_QUERY_AWARENESS = 3`).
+   - Upon connection, the client sends both `syncStep1` (querying peer state) and `syncStep2` (advertising local state) as distinct `MESSAGE_SYNC` frames to establish a bidirectional handshake across the stateless relay.
+   - When a peer receives `syncStep1`, it replies with `syncStep2` and dispatches its own reverse `syncStep1` as an independent, correctly prefixed `MESSAGE_SYNC` frame.
+   - Handshake loop protection: reverse `syncStep1` replies are bounded to execute at most once per connection, preventing echo loops.
+   - Multi-message decoding: `handleIncomingSyncFrame` executes a `while (decoding.hasContent(decoder))` loop, guaranteeing all concatenated Yjs sync messages in any incoming frame are parsed and applied.
+   - Local document updates generate `MESSAGE_SYNC` update frames broadcasted to peers in the same room.
+3. **CRDT Conflict-Free Merging:**
+   - Simultaneous edits at identical or overlapping offsets converge deterministically using Yjs's CRDT engine without custom merge locks or central coordinator requirements.
+4. **Room and Mode Isolation:**
+   - **Pair Mode:** Document synchronization is scoped to the shared `main` document.
+   - **Open Mode:** Document synchronization is scoped per module (`docId = module_id`), ensuring concurrent editing in one module never leaks into or overwrites another module.
+   - **Room Isolation:** Sockets in different rooms never receive or merge each other's edits.
+5. **Pair-Mode Edit Permission Enforcement (CR13):**
+   - When a participant attempts to modify a document in Pair mode without edit permission from the host, the relay drops the update and sends an `edit-rejected` message on the control socket.
+   - The client handles `edit-rejected` by displaying an informative banner: `"You do not have permission to edit this document. Contact the host for edit access."`
+
+### Verification Procedure (Automated vs. Manual)
+
+#### Automated Vitest Regression Suites:
+Run the US-02 test suites:
+```bash
+npm test src/awarenessWs.test.ts src/RoomPage.displayName.test.tsx
+```
+Automated tests verify:
+- Reverse `syncStep1` is transmitted as its own prefixed `MESSAGE_SYNC` frame.
+- Multi-message frames are decoded completely via the decoding loop.
+- Pre-existing divergent edits between two clients converge upon connection without requiring additional edits.
+- Late-joining clients with pre-existing local changes synchronize completely with an active host.
+- Three clients with divergent pre-existing edits converge under controlled message ordering.
+- Relay drops document changes from unauthorized participants in Pair mode and emits `edit-rejected`.
+- RoomPage displays an error banner when `edit-rejected` is received.
+
+#### Manual Verification of Simultaneous Edit Merging (Browser):
+1. Open two browser windows pointing to the same room URL (`/room/{room_id}`).
+2. Join as `Alice` in Window A and `Bob` in Window B.
+3. Place cursors on the same line. Type `AAAA` in Window A and `BBBB` in Window B simultaneously.
+4. **Expected Result:** Both windows converge to identical text containing both `AAAA` and `BBBB` without any overwritten or lost characters.
+5. Repeat with three windows (Window C as `Charlie` typing `CCCC`), verifying all three windows converge to the same text.
+6. Open a window in a separate room: verify edits in the first room never appear in the second room.
+7. **Pair-mode edit permission verification:** In a Pair-mode room where participant B is an observer or ungranted editor, attempt to type in Window B. Verify that changes are rejected by the server and the permission error banner appears.
+
+---
+
+## 12. Client Run Panel & Execution Controls (T-11 / FR4.1, FR4.2, FR4.5)
+
+**T-11** adds the client interface for executing code in the collaborative sandbox:
+
+1. **Run Button (`RunButton`):**
+   - Dispatches an execution request to `POST ${VITE_EXECUTION_API_URL}/v1/runs`.
+   - Disabled while code execution is in flight (`isRunning`), displaying a loading spinner and preventing duplicate submissions.
+   - Designed with a `disabled` property ready for Observer enforcement (FR9.4 / US-27).
+2. **Language Picker (`LanguagePicker`):**
+   - Lists all five DR1 languages: **Python**, **JavaScript**, **C**, **C++**, and **Java** (`python`, `javascript`, `c`, `cpp`, `java`).
+   - Automatically synchronizes syntax highlighting mode in Monaco editor when the language is changed.
+   - Shows future / unsupported languages as disabled with an informative `"not available yet"` label.
+3. **Optional Standard Input (`StdinInput`):**
+   - Collapsible input area allowing the user to provide stdin text passed directly into the running process.
+4. **T-19 `RunSpec` Inline Source Contract:**
+   - In Pair mode, the request is framed as an inline source payload:
+     ```json
+     {
+       "request_id": "<uuid-v4>",
+       "room_id": "<room_id>",
+       "session_id": "<session_id>",
+       "language": "python",
+       "stdin": "<optional stdin>",
+       "source": {
+         "kind": "inline",
+         "files": [{ "name": "main.py", "content": "<editor code>" }],
+         "entry": "main.py"
+       }
+     }
+     ```
+5. **Resilient Error Handling & Timeout Recovery:**
+   - **Secure UUID v4:** Generates fresh UUIDs via `crypto.randomUUID()` with `crypto.getRandomValues()` RFC 4122 fallback (no hardcoded IDs or Math.random).
+   - **Response Validation:** Validates `stdout`, `stderr`, and `exit_code`, distinguishing malformed server responses (`MALFORMED_RESPONSE`) from network outages.
+   - **Timeout Protection:** Configurable timeout (default 15s) using `AbortController` ensures the Run button never stays disabled indefinitely if the backend hangs, and in-flight requests abort on unmount.
+   - **Offline / Unreachable Backend:** Displays an informative banner: `"Execution service is unavailable. Please check that the execution service is running."` without interrupting editor editing.
+   - **HTTP Errors (`QUEUE_FULL`, `UNSUPPORTED_LANGUAGE`, `RUN_NOT_ALLOWED`):** Parses structured JSON error envelopes and shows actionable feedback (such as retry duration for `QUEUE_FULL`).
+6. **Output Panel Slot:**
+   - Reserved output container (`data-testid="run-output-slot"`) ready for Het's output panel (`feature/T-11-run-panel-output`), with clean baseline stdout/stderr previewing.
+
+### Automated Test Verification:
+Run the T-11 test suite:
+```bash
+npm test src/runCode.test.ts src/RunPanel.test.tsx src/RoomPage.runPanel.test.tsx
+```
+
+### Manual Real-Backend Verification Steps:
+1. Start `execution-service` on `http://localhost:8082` (requires Java 21 LTS / Docker).
+2. Start `sync-service` on `http://localhost:8081` and client on `http://localhost:3000`.
+3. Open a room, select Python, type `print("hello")`, click **Run**: verify `hello` appears in stdout.
+4. Type `print(input().upper())`, toggle Stdin, enter `echo-test`, click **Run**: verify `ECHO-TEST` is returned.
+5. Introduce a syntax error `def bad(:`: verify stderr is displayed with non-zero exit code.
+6. Stop `execution-service` and click **Run**: verify error banner `"Execution service is unavailable"` appears without freezing the editor.
+7. Click **Run** rapidly: verify only one request is dispatched while running.

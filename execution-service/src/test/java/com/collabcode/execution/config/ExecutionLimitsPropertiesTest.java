@@ -55,6 +55,12 @@ class ExecutionLimitsPropertiesTest {
     }
 
     @Test
+    @DisplayName("compile-timeout-seconds has a value > 0 (NFR4.5, US-13)")
+    void compileTimeoutSeconds_hasValue() {
+        assertThat(limits.getCompileTimeoutSeconds()).isGreaterThan(0);
+    }
+
+    @Test
     @DisplayName("max-request-body-bytes has a placeholder value > 0 (T-06 section 2)")
     void maxRequestBodyBytes_hasPlaceholderValue() {
         assertThat(limits.getMaxRequestBodyBytes()).isGreaterThan(0);
@@ -65,5 +71,13 @@ class ExecutionLimitsPropertiesTest {
     void queueLimits_haveValues() {
         assertThat(limits.getMaxQueueLength()).isGreaterThanOrEqualTo(1);
         assertThat(limits.getQueueRetryAfterSeconds()).isGreaterThan(0);
+    }
+
+    @Test
+    @DisplayName("Repeated-run budget limits have positive defaults (NFR14, DR3, US-64)")
+    void repeatedRunBudgetLimits_haveValues() {
+        assertThat(limits.getAggregateTimeBudgetMs()).isGreaterThan(0);
+        assertThat(limits.getMaxRunsPerRequest()).isGreaterThanOrEqualTo(1);
+        assertThat(limits.getBudgetRetryAfterSeconds()).isGreaterThan(0);
     }
 }

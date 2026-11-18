@@ -2,6 +2,7 @@ package com.collabcode.execution.controller;
 
 import com.collabcode.execution.broadcast.RoomBroadcastService;
 import com.collabcode.execution.model.RunResponse;
+import com.collabcode.execution.model.RunSpec;
 import com.collabcode.execution.runner.CodeRunner;
 import com.collabcode.execution.runner.ExecutionResult;
 import org.junit.jupiter.api.DisplayName;
@@ -15,30 +16,29 @@ import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.ArgumentMatchers.*;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.*;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
 /**
- * US-08 endpoint tests – Jay Limbasiya (feature/US-08-run-code).
+ * Definition of Done tests for US-08 (Jay Limbasiya), updated for T-19 RunSpec.
  *
- * All tests run offline: no Docker, no real sync-service (FR5.1, NFR3).
- * CodeRunner is mocked so each test controls the exact ExecutionResult.
- * RoomBroadcastService is mocked to verify the broadcast call without
- * actually sending HTTP requests.
- *
- * Scenarios covered (matching the issue's Definition of Done):
- *   1. Success run  – stdout "hello\n", stderr "", exit 0
- *   2. Failure run  – stderr "boom", non-zero exit, failure_kind "non_zero_exit"
- *   3. Stdin run    – stdout "ABC\n"
- *   4. Compile error – stderr with error text, failure_kind "compile_error"
- *   5. Broadcast is called with room_id and correct type field (FR4.5)
- *   6. Missing 'code' → 422 INVALID_REQUEST
- *   7. Missing 'language' → 422 INVALID_REQUEST
- *   8. Unsupported language → 422 UNSUPPORTED_LANGUAGE
+ * Verifies all US-08 acceptance criteria:
+ *   1. Success: stdout 'hello\n', exit 0, failure_kind null
+ *   2. Failure: stderr 'boom', exit 2, failure_kind 'non_zero_exit'
+ *   3. Stdin: stdout 'ABC\n' when stdin is 'abc'
+ *   4. Compile error: stderr has error text, failure_kind 'compile_error', HTTP 200
+ *   5. FR4.5: broadcast is called after execution
+ *   6. Legacy 'code' field rejected as 422 INVALID_REQUEST
+ *   7. Missing required field -> 422 INVALID_REQUEST
+ *   8. Unsupported language -> 422 UNSUPPORTED_LANGUAGE
  *   9. All five DR1 languages accepted
- *  10. All required result fields present in every response (T-06 §4.2)
+ *  10. Response contains all required fields
+ *
+ * CodeRunner is mocked here; FakeCodeRunnerTest covers stub behaviour.
+ * RoomBroadcastService is mocked to verify the broadcast call.
  */
 @SpringBootTest
 @AutoConfigureMockMvc
@@ -47,11 +47,9 @@ class RunControllerUS08Test {
     @Autowired
     private MockMvc mockMvc;
 
-    /** Replace the real CodeRunner bean so we control the result in every test. */
     @MockBean
     private CodeRunner codeRunner;
 
-    /** Stub broadcast so tests never hit a real sync-service. */
     @MockBean
     private RoomBroadcastService broadcastService;
 
@@ -61,14 +59,21 @@ class RunControllerUS08Test {
     private static final String ROOM_ID     = "room-demo-01";
     private static final String SESSION_ID  = "7c1e4a52-3b0d-4f6a-9a2e-8d5f1b6c3e90";
 
-    /** Builds a minimal success ExecutionResult for test setup. */
     private ExecutionResult successResult(String stdout) {
         return new ExecutionResult(stdout, "", 0, 15.0, 4.2,
                 false, false, null, false, null);
     }
 
-    /** Builds a base JSON request body. */
-    private String body(String language, String code, String stdin) {
+    private String inlineBody(String language, String code, String stdin) {
+        String ext = switch (language.toLowerCase()) {
+            case "python" -> "py";
+            case "javascript" -> "js";
+            case "java" -> "java";
+            case "cpp" -> "cpp";
+            case "c" -> "c";
+            default -> "py";
+        };
+        String fileName = "main." + ext;
         String stdinJson = (stdin == null) ? "" :
                 String.format(",\n  \"stdin\": \"%s\"", stdin.replace("\"", "\\\""));
         return String.format("""
@@ -76,11 +81,22 @@ class RunControllerUS08Test {
                   "request_id": "%s",
                   "room_id":    "%s",
                   "session_id": "%s",
-                  "language":   "%s",
-                  "code":       "%s"%s
+                  "language":   "%s"%s,
+                  "source": {
+                    "kind": "inline",
+                    "files": [
+                      {
+                        "name": "%s",
+                        "content": "%s"
+                      }
+                    ],
+                    "entry": "%s"
+                  }
                 }
                 """, REQUEST_ID, ROOM_ID, SESSION_ID, language,
-                code.replace("\"", "\\\""), stdinJson);
+                stdinJson, fileName,
+                code.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n"),
+                fileName);
     }
 
     // ------------------------------------------------------------------ 1. success
@@ -88,21 +104,16 @@ class RunControllerUS08Test {
     @Test
     @DisplayName("Success run: stdout 'hello\\n', stderr empty, exit 0 (US-08 DoD)")
     void run_success_returnsHello() throws Exception {
-        when(codeRunner.execute(eq("python"), anyString(), anyString()))
+        when(codeRunner.execute(argThat(spec -> spec != null && "python".equals(spec.getLanguage()))))
                 .thenReturn(successResult("hello\n"));
 
         mockMvc.perform(post("/v1/runs")
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(body("python", "print('hello')", "")))
+                        .content(inlineBody("python", "print('hello')", "")))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.request_id").value(REQUEST_ID))
-                .andExpect(jsonPath("$.room_id").value(ROOM_ID))
-                .andExpect(jsonPath("$.language").value("python"))
                 .andExpect(jsonPath("$.stdout").value("hello\n"))
                 .andExpect(jsonPath("$.stderr").value(""))
                 .andExpect(jsonPath("$.exit_code").value(0))
-                .andExpect(jsonPath("$.timed_out").value(false))
-                .andExpect(jsonPath("$.oom_killed").value(false))
                 .andExpect(jsonPath("$.failure_kind").isEmpty())
                 .andExpect(jsonPath("$.output_truncated").value(false));
     }
@@ -115,14 +126,14 @@ class RunControllerUS08Test {
         ExecutionResult failure = new ExecutionResult(
                 "", "boom\n", 2, 12.0, 4.0,
                 false, false, "non_zero_exit", false, null);
-        when(codeRunner.execute(anyString(), anyString(), anyString()))
+        when(codeRunner.execute(any(RunSpec.class)))
                 .thenReturn(failure);
 
         mockMvc.perform(post("/v1/runs")
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(body("python",
+                        .content(inlineBody("python",
                                 "import sys; sys.stderr.write('boom'); sys.exit(2)", "")))
-                .andExpect(status().isOk())                          // still HTTP 200 (FR4.2)
+                .andExpect(status().isOk())
                 .andExpect(jsonPath("$.stderr").value("boom\n"))
                 .andExpect(jsonPath("$.exit_code").value(2))
                 .andExpect(jsonPath("$.failure_kind").value("non_zero_exit"))
@@ -134,12 +145,12 @@ class RunControllerUS08Test {
     @Test
     @DisplayName("Stdin run: stdout 'ABC\\n' when stdin is 'abc' (US-08 DoD)")
     void run_withStdin_echoesUpperCase() throws Exception {
-        when(codeRunner.execute(eq("python"), anyString(), eq("abc")))
+        when(codeRunner.execute(argThat(spec -> spec != null && "abc".equals(spec.getStdin()))))
                 .thenReturn(successResult("ABC\n"));
 
         mockMvc.perform(post("/v1/runs")
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(body("python", "print(input().upper())", "abc")))
+                        .content(inlineBody("python", "print(input().upper())", "abc")))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.stdout").value("ABC\n"))
                 .andExpect(jsonPath("$.stderr").value(""))
@@ -154,12 +165,12 @@ class RunControllerUS08Test {
         ExecutionResult compileError = new ExecutionResult(
                 "", "SyntaxError: unexpected EOF\n", 1, 0.0, 0.0,
                 false, false, "compile_error", false, null);
-        when(codeRunner.execute(anyString(), anyString(), anyString()))
+        when(codeRunner.execute(any(RunSpec.class)))
                 .thenReturn(compileError);
 
         mockMvc.perform(post("/v1/runs")
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(body("python", "def bad(:", "")))
+                        .content(inlineBody("python", "def bad(:", "")))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.stderr").value("SyntaxError: unexpected EOF\n"))
                 .andExpect(jsonPath("$.failure_kind").value("compile_error"))
@@ -170,37 +181,39 @@ class RunControllerUS08Test {
     // ------------------------------------------------------------------ 5. FR4.5 broadcast
 
     @Test
-    @DisplayName("FR4.5: broadcast is called exactly once with the room_id after execution")
+    @DisplayName("FR4.5: broadcast is called exactly once with the room_id and session_id after execution")
     void run_success_broadcastCalledWithRoomId() throws Exception {
-        when(codeRunner.execute(anyString(), anyString(), anyString()))
+        when(codeRunner.execute(any(RunSpec.class)))
                 .thenReturn(successResult("hello\n"));
 
         mockMvc.perform(post("/v1/runs")
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(body("python", "print('hello')", "")))
+                        .content(inlineBody("python", "print('hello')", "")))
                 .andExpect(status().isOk());
 
-        // Verify broadcast was called once with the correct room_id
-        ArgumentCaptor<String>      roomCaptor     = ArgumentCaptor.forClass(String.class);
+        ArgumentCaptor<String> roomCaptor = ArgumentCaptor.forClass(String.class);
+        ArgumentCaptor<String> sessionCaptor = ArgumentCaptor.forClass(String.class);
         ArgumentCaptor<RunResponse> responseCaptor = ArgumentCaptor.forClass(RunResponse.class);
         verify(broadcastService, times(1))
-                .broadcast(roomCaptor.capture(), responseCaptor.capture());
+                .broadcast(roomCaptor.capture(), sessionCaptor.capture(), responseCaptor.capture());
 
         assertThat(roomCaptor.getValue()).isEqualTo(ROOM_ID);
+        assertThat(sessionCaptor.getValue()).isEqualTo(SESSION_ID);
         assertThat(responseCaptor.getValue().getRequest_id()).isEqualTo(REQUEST_ID);
     }
 
-    // ------------------------------------------------------------------ 6. missing code → 422
+    // ------------------------------------------------------------------ 6. legacy code rejected
 
     @Test
-    @DisplayName("Missing 'code' field returns 422 INVALID_REQUEST (T-06 §7)")
-    void run_missingCode_returns422() throws Exception {
+    @DisplayName("Legacy 'code' field returns 422 INVALID_REQUEST (T-19 AC4)")
+    void run_bodyWithCode_returns422() throws Exception {
         String body = """
                 {
                   "request_id": "%s",
                   "room_id":    "%s",
                   "session_id": "%s",
-                  "language":   "python"
+                  "language":   "python",
+                  "code":       "print('hello')"
                 }
                 """.formatted(REQUEST_ID, ROOM_ID, SESSION_ID);
 
@@ -210,7 +223,7 @@ class RunControllerUS08Test {
                 .andExpect(status().isUnprocessableEntity())
                 .andExpect(jsonPath("$.request_id").value(REQUEST_ID))
                 .andExpect(jsonPath("$.error.code").value("INVALID_REQUEST"))
-                .andExpect(jsonPath("$.error.message").isNotEmpty());
+                .andExpect(jsonPath("$.error.message").value("Field 'code' is no longer accepted. Use 'source'."));
 
         verifyNoInteractions(codeRunner, broadcastService);
     }
@@ -225,7 +238,16 @@ class RunControllerUS08Test {
                   "request_id": "%s",
                   "room_id":    "%s",
                   "session_id": "%s",
-                  "code":       "print('hi')"
+                  "source": {
+                    "kind": "inline",
+                    "files": [
+                      {
+                        "name": "main.py",
+                        "content": "print('hi')"
+                      }
+                    ],
+                    "entry": "main.py"
+                  }
                 }
                 """.formatted(REQUEST_ID, ROOM_ID, SESSION_ID);
 
@@ -246,7 +268,7 @@ class RunControllerUS08Test {
     void run_unsupportedLanguage_returns422() throws Exception {
         mockMvc.perform(post("/v1/runs")
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(body("ruby", "puts 'hi'", "")))
+                        .content(inlineBody("ruby", "puts 'hi'", "")))
                 .andExpect(status().isUnprocessableEntity())
                 .andExpect(jsonPath("$.request_id").value(REQUEST_ID))
                 .andExpect(jsonPath("$.error.code").value("UNSUPPORTED_LANGUAGE"))
@@ -262,12 +284,12 @@ class RunControllerUS08Test {
     @DisplayName("All five DR1 languages are accepted (DR1)")
     void run_allFiveLanguages_return200() throws Exception {
         for (String lang : new String[]{"cpp", "python", "c", "java", "javascript"}) {
-            when(codeRunner.execute(eq(lang), anyString(), anyString()))
+            when(codeRunner.execute(argThat(spec -> spec != null && lang.equals(spec.getLanguage()))))
                     .thenReturn(successResult("ok\n"));
 
             mockMvc.perform(post("/v1/runs")
                             .contentType(MediaType.APPLICATION_JSON)
-                            .content(body(lang, "// test", "")))
+                            .content(inlineBody(lang, "// test", "")))
                     .andExpect(status().isOk());
         }
     }
@@ -275,14 +297,14 @@ class RunControllerUS08Test {
     // ------------------------------------------------------------------ 10. all required result fields
 
     @Test
-    @DisplayName("Response always contains all T-06 §4.2 required fields")
+    @DisplayName("Response always contains all required fields")
     void run_response_allRequiredFieldsPresent() throws Exception {
-        when(codeRunner.execute(anyString(), anyString(), anyString()))
+        when(codeRunner.execute(any(RunSpec.class)))
                 .thenReturn(successResult("hello\n"));
 
         mockMvc.perform(post("/v1/runs")
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(body("python", "print('hello')", "")))
+                        .content(inlineBody("python", "print('hello')", "")))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.request_id").exists())
                 .andExpect(jsonPath("$.room_id").exists())

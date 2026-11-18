@@ -202,9 +202,11 @@ jobs:
   integration:
     name: integration
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 35 # headroom for up.sh's one build retry on a transient flake
     env:
       SMOKE_TIMEOUT: "120" # cold CI builds start slower than a laptop
+      # Queue-full test polls /actuator/health details; compose defaults to "never".
+      MANAGEMENT_HEALTH_SHOW_DETAILS: always
     steps:
       - uses: actions/checkout@v4
 
@@ -213,6 +215,9 @@ jobs:
 
       - name: Start services
         run: bash tests/integration/up.sh
+
+      - name: Install client dependencies for US-04 Node integration scripts
+        run: npm --prefix client ci
 
       - name: Smoke test and integration tests
         run: bash tests/integration/run-all.sh

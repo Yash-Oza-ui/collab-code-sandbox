@@ -3,14 +3,11 @@ package com.collabcode.execution.runner;
 /**
  * The output produced by one run of user code.
  *
- * This record is the shared contract between the CodeRunner interface
- * (US-08, Jay) and its implementations:
- *   - FakeCodeRunner  – deterministic stub used until US-09 merges
- *   - DockerCodeRunner – real Docker runner (US-09, Quincy)
- *
- * Field names intentionally match T-06 section 4.2 and docs/ai-ml-contract.md
- * so that RunController can copy them straight into RunResponse without
- * translation.
+ * Updated for T-19 (Decision 9):
+ *  - executionTimeMs is the run stage only.
+ *  - compileTimeMs is the compile stage (null if no compile stage).
+ *  - failingModule names the module that caused the failure, or null.
+ *  - OOM kill rule: failure_kind is "non_zero_exit" with oom_killed: true, never "oom".
  */
 public class ExecutionResult {
 
@@ -23,7 +20,7 @@ public class ExecutionResult {
     /** Process exit code (FR4.4). */
     private final int exitCode;
 
-    /** Wall-clock time measured by execution-service in milliseconds (FR4.3, FR6). */
+    /** Wall-clock time in milliseconds for the run stage only (FR4.3, FR6, Decision 9). */
     private final double executionTimeMs;
 
     /** Peak memory usage in megabytes (FR4.3, FR6). */
@@ -37,7 +34,7 @@ public class ExecutionResult {
 
     /**
      * Null on success. One of: "compile_error", "non_zero_exit", "timeout".
-     * Same values as T-07 so execution-service passes them through unchanged.
+     * An OOM kill is always "non_zero_exit" with oomKilled = true, never "oom".
      */
     private final String failureKind;
 
@@ -47,9 +44,18 @@ public class ExecutionResult {
     /**
      * Short human-readable sentence the UI shows beside the output.
      * Null when there is nothing extra to say.
-     * Examples: "Time limit exceeded", "Memory limit exceeded".
      */
     private final String message;
+
+    /**
+     * Time of compile stage in milliseconds; null if no compile stage.
+     */
+    private final Double compileTimeMs;
+
+    /**
+     * Name or id of the module that failed, or null.
+     */
+    private final String failingModule;
 
     public ExecutionResult(
             String stdout,
@@ -62,16 +68,39 @@ public class ExecutionResult {
             String failureKind,
             boolean outputTruncated,
             String message) {
-        this.stdout          = stdout          != null ? stdout          : "";
-        this.stderr          = stderr          != null ? stderr          : "";
+        this(stdout, stderr, exitCode, executionTimeMs, peakMemoryMb, timedOut, oomKilled, failureKind, outputTruncated, message, null, null);
+    }
+
+    public ExecutionResult(
+            String stdout,
+            String stderr,
+            int exitCode,
+            double executionTimeMs,
+            double peakMemoryMb,
+            boolean timedOut,
+            boolean oomKilled,
+            String failureKind,
+            boolean outputTruncated,
+            String message,
+            Double compileTimeMs,
+            String failingModule) {
+        this.stdout          = stdout != null ? stdout : "";
+        this.stderr          = stderr != null ? stderr : "";
         this.exitCode        = exitCode;
         this.executionTimeMs = executionTimeMs;
         this.peakMemoryMb    = peakMemoryMb;
         this.timedOut        = timedOut;
         this.oomKilled       = oomKilled;
-        this.failureKind     = failureKind;
+        // Decision 9 rule: an out-of-memory kill is non_zero_exit with oom_killed: true, never "oom"
+        if (oomKilled && (failureKind == null || "oom".equalsIgnoreCase(failureKind))) {
+            this.failureKind = "non_zero_exit";
+        } else {
+            this.failureKind = failureKind;
+        }
         this.outputTruncated = outputTruncated;
         this.message         = message;
+        this.compileTimeMs   = compileTimeMs;
+        this.failingModule   = failingModule;
     }
 
     // ----- getters -----
@@ -86,4 +115,6 @@ public class ExecutionResult {
     public String  getFailureKind()     { return failureKind; }
     public boolean isOutputTruncated()  { return outputTruncated; }
     public String  getMessage()         { return message; }
+    public Double  getCompileTimeMs()   { return compileTimeMs; }
+    public String  getFailingModule()   { return failingModule; }
 }

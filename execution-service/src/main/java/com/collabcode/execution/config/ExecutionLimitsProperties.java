@@ -9,8 +9,8 @@ import org.springframework.stereotype.Component;
  * Values are read from application.yml under app.execution.limits.
  * They are NEVER hard-coded in Java source (DR3).
  *
- * Real limit values are set in Sprint 2 (NFR4).
- * This class only exposes the structure so US-08 and US-09 can wire it in.
+ * Sprint 3 (US-13): all NFR4 limits are now real, enforced values.
+ * US-14 will add per-language compile-stage support when non-Python runtimes land.
  */
 @Component
 @ConfigurationProperties(prefix = "app.execution.limits")
@@ -25,6 +25,9 @@ public class ExecutionLimitsProperties {
     /** NFR4.3 – maximum number of processes / threads inside the container. */
     private int pidsLimit;
 
+    /** NFR4.5 – compile-stage timeout in seconds. */
+    private int compileTimeoutSeconds;
+
     /** NFR4.4 – maximum total output (stdout + stderr combined), in bytes. */
     private long maxOutputBytes;
 
@@ -37,6 +40,15 @@ public class ExecutionLimitsProperties {
     /** FR16 – seconds the client is told to wait after a QUEUE_FULL refusal (T-06 section 7.1). */
     private int queueRetryAfterSeconds;
 
+    /** NFR14 / US-64 – aggregate wall-clock time budget per repeated-run request, in milliseconds. */
+    private long aggregateTimeBudgetMs;
+
+    /** NFR14 / US-64 – maximum number of runs allowed per repeated-run request. */
+    private int maxRunsPerRequest;
+
+    /** NFR14 / US-64 – seconds sent in Retry-After and error.retry_after_seconds on RUN_BUDGET_EXCEEDED. */
+    private int budgetRetryAfterSeconds;
+
     // ----- getters and setters -----
 
     public int getWallTimeSeconds()            { return wallTimeSeconds; }
@@ -47,6 +59,9 @@ public class ExecutionLimitsProperties {
 
     public int getPidsLimit()                  { return pidsLimit; }
     public void setPidsLimit(int v)            { this.pidsLimit = v; }
+
+    public int getCompileTimeoutSeconds()      { return compileTimeoutSeconds; }
+    public void setCompileTimeoutSeconds(int v) { this.compileTimeoutSeconds = v; }
 
     public long getMaxOutputBytes()            { return maxOutputBytes; }
     public void setMaxOutputBytes(long v)      { this.maxOutputBytes = v; }
@@ -59,4 +74,13 @@ public class ExecutionLimitsProperties {
 
     public int getQueueRetryAfterSeconds()     { return queueRetryAfterSeconds; }
     public void setQueueRetryAfterSeconds(int v) { this.queueRetryAfterSeconds = v; }
+
+    public long getAggregateTimeBudgetMs()     { return aggregateTimeBudgetMs; }
+    public void setAggregateTimeBudgetMs(long v) { this.aggregateTimeBudgetMs = v; }
+
+    public int getMaxRunsPerRequest()          { return maxRunsPerRequest; }
+    public void setMaxRunsPerRequest(int v)    { this.maxRunsPerRequest = v; }
+
+    public int getBudgetRetryAfterSeconds()    { return budgetRetryAfterSeconds; }
+    public void setBudgetRetryAfterSeconds(int v) { this.budgetRetryAfterSeconds = v; }
 }

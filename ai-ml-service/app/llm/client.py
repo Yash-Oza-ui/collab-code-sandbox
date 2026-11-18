@@ -1,7 +1,8 @@
-"""Central LLM client and universal consent gate (FR12, US-17).
+"""Central LLM client and universal consent gate (FR12, FR12.4, US-17, US-21, US-22).
 
 Enforces that NO code or prompt ever reaches an external AI service
 unless user consent is explicitly provided (consent == True).
+Handles consent withdrawal and restoration during active sessions (US-21).
 All outbound LLM calls pass through call_llm_with_consent.
 """
 
@@ -46,12 +47,15 @@ class LLMTimeoutError(LLMProviderError):
     def __init__(
         self,
         message: str = "Upstream LLM provider timed out while generating response.",
+        status_code: int = 504,
+        code: str = "PROVIDER_TIMEOUT",
+        retry_after_seconds: Optional[int] = None,
     ) -> None:
         super().__init__(
             message=message,
-            status_code=504,
-            code="PROVIDER_TIMEOUT",
-            retry_after_seconds=None,
+            status_code=status_code,
+            code=code,
+            retry_after_seconds=retry_after_seconds,
         )
 
 
@@ -61,18 +65,20 @@ class LLMRateLimitError(LLMProviderError):
     def __init__(
         self,
         message: str = "The AI provider returned HTTP 429 (rate limited).",
+        status_code: int = 429,
+        code: str = "RATE_LIMITED_PROVIDER",
         retry_after_seconds: Optional[int] = 30,
     ) -> None:
         super().__init__(
             message=message,
-            status_code=429,
-            code="RATE_LIMITED_PROVIDER",
+            status_code=status_code,
+            code=code,
             retry_after_seconds=retry_after_seconds,
         )
 
 
 class ConsentMissingError(Exception):
-    """Raised when an LLM call is attempted without explicit user consent (FR12.2)."""
+    """Raised when an LLM call is attempted without explicit user consent or after consent withdrawal (FR12.2, FR12.4, US-17, US-21)."""
 
     def __init__(
         self,
@@ -97,6 +103,23 @@ class AIDisabledError(Exception):
         status_code: int = 403,
         code: str = "AI_DISABLED",
         retry_after_seconds: Optional[int] = None,
+    ) -> None:
+        super().__init__(message)
+        self.message = message
+        self.status_code = status_code
+        self.code = code
+        self.retry_after_seconds = retry_after_seconds
+
+
+class RoomRateLimitedError(Exception):
+    """Raised when per-room hourly AI request quota is reached (NFR5.3, US-22, T-18 v2)."""
+
+    def __init__(
+        self,
+        message: str = "Room hourly AI request limit reached. Retry later.",
+        status_code: int = 429,
+        code: str = "ROOM_RATE_LIMITED",
+        retry_after_seconds: Optional[int] = 3600,
     ) -> None:
         super().__init__(message)
         self.message = message
@@ -367,10 +390,10 @@ async def call_llm_with_consent(
     timeout_seconds: Optional[float] = None,
     room_id: Optional[str] = None,
 ) -> str:
-    """Universal consent and Host AI switch gate through which every outbound LLM call must pass (FR12.2, FR35, US-17).
+    """Universal consent and Host AI switch gate through which every outbound LLM call must pass (FR12.2, FR12.4, FR35, US-17, US-21).
 
     Guarantees:
-    1. If consent is missing (None) or False:
+    1. If consent is missing (None) or False (including withdrawal during an active session, US-21):
        - The LLM client is never invoked (0 outbound calls made).
        - No prompts or source code are logged (NFR8.2).
        - ConsentMissingError is raised immediately (HTTP 403 CONSENT_MISSING).
@@ -380,12 +403,15 @@ async def call_llm_with_consent(
     3. If monthly AI budget cap is reached:
        - The LLM client is never invoked (0 outbound calls made).
        - CostCapReachedError is raised immediately (HTTP 402 COST_CAP_REACHED).
-    4. External AI call is permitted ONLY when consent == True, ai_enabled == True,
+    4. External AI call is permitted ONLY when BOTH consent == True AND ai_enabled == True,
        AND monthly spending has not reached the budget cap.
+    5. Session isolation: Consent is evaluated per-request (per session, T-18 Decision 8)
+       without backend persistence or room-level sharing. Restoring consent (consent == True)
+       re-enables external AI calls immediately without persistent blocking.
     """
     if consent is not True:
         # Safe logging: strictly no prompt or code logged (NFR8.2)
-        logger.info("Blocked external AI call: consent is missing or false (FR12.2)")
+        logger.info("Blocked external AI call: consent is missing or false (FR12.2, FR12.4, US-21)")
         raise ConsentMissingError(
             message="User consent is required before code or execution context can be sent to external AI.",
             status_code=403,

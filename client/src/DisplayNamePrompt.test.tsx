@@ -61,4 +61,48 @@ describe('DisplayNamePrompt', () => {
     expect(onSubmit).not.toHaveBeenCalled()
     expect(container.textContent).toContain('Display name cannot be empty.')
   })
+
+  it('renders serverError with alert role when provided', async () => {
+    const onSubmit = vi.fn()
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    root = createRoot(container)
+
+    await act(async () => {
+      root?.render(
+        <DisplayNamePrompt
+          onSubmit={onSubmit}
+          serverError="That display name is already in use in this room."
+        />,
+      )
+    })
+
+    const alert = container.querySelector('[role="alert"]')
+    expect(alert).not.toBeNull()
+    expect(alert?.textContent).toContain('That display name is already in use in this room.')
+  })
+
+  it('disables input and button and shows loading text while submitting', async () => {
+    const onSubmit = vi.fn()
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    root = createRoot(container)
+
+    await act(async () => {
+      root?.render(
+        <DisplayNamePrompt
+          onSubmit={onSubmit}
+          submitting={true}
+          initialValue="Alice"
+        />,
+      )
+    })
+
+    const input = container.querySelector<HTMLInputElement>('#display-name')!
+    const button = container.querySelector<HTMLButtonElement>('button')!
+    expect(input.disabled).toBe(true)
+    expect(input.value).toBe('Alice')
+    expect(button.disabled).toBe(true)
+    expect(button.textContent).toBe('Joining room...')
+  })
 })

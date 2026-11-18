@@ -25,6 +25,8 @@ RUN ./mvnw -B package -DskipTests -q
 # ── Stage 2: run ─────────────────────────────────────────────────────────────
 FROM eclipse-temurin:21-jre-alpine AS runtime
 
+RUN apk add --no-cache docker-cli
+
 WORKDIR /app
 
 # Copy the fat jar produced by the build stage.

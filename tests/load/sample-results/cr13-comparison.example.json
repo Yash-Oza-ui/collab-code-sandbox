@@ -1,0 +1,12 @@
+{
+  "_comment": "Example CR13 comparison: node cr13-compare.mjs results/T1-A-checks-on.json results/T1-A-checks-off.json. Both files carry a server-verified edit_check_mode; the compare refuses a mislabeled pair. The check adds sub-millisecond latency (cached header lookup), and NFR1 holds with it ON.",
+  "cr13": "cost of the per-edit write-permission check (NFR13 vs NFR1)",
+  "variant": "T1-A",
+  "checks_on": { "samples": 4500, "p50_ms": 16.1, "p95_ms": 25.6, "max_ms": 31.0 },
+  "checks_off": { "samples": 4500, "p50_ms": 15.9, "p95_ms": 25.1, "max_ms": 30.4 },
+  "check_cost_ms": { "p50": 0.2, "p95": 0.5 },
+  "nfr1_met_with_checks_on": true,
+  "nfr13_note": "NFR13 is verified only when NFR1 (p95 < 200 ms) holds with the check ON. Modes are server-verified.",
+  "machine": { "hostname": "dev-machine", "platform": "example OS", "arch": "x64", "cpus": 8, "node": "v24.x" },
+  "ran_at": "2026-11-18T00:00:00.000Z"
+}
