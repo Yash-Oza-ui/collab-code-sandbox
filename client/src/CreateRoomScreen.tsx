@@ -1,11 +1,11 @@
 import { useState } from 'react'
 import { createRoom } from './createRoom'
-import type { CreatedRoom } from './createRoom'
+import type { CreatedRoom, CreateRoomChoice, RoomMode, PairPreset, WorkspaceLanguage } from './createRoom'
 import { buildRoomLink } from './roomLink'
 
 export interface CreateRoomScreenProps {
   /** Overridable for tests. Defaults to the real POST /v1/rooms call. */
-  createRoomFn?: () => Promise<CreatedRoom>
+  createRoomFn?: (choice: CreateRoomChoice) => Promise<CreatedRoom>
   /** Origin the link is built on. Defaults to the browser's current origin. */
   origin?: string
 }
@@ -16,6 +16,9 @@ export default function CreateRoomScreen({
   createRoomFn = createRoom,
   origin = window.location.origin,
 }: CreateRoomScreenProps) {
+  const [mode, setMode] = useState<RoomMode>('pair')
+  const [preset, setPreset] = useState<PairPreset>('debug_together')
+  const [language, setLanguage] = useState<WorkspaceLanguage>('python')
   const [creating, setCreating] = useState(false)
   const [created, setCreated] = useState<CreatedRoom | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -26,7 +29,7 @@ export default function CreateRoomScreen({
     setError(null)
     setCopyStatus('idle')
     try {
-      setCreated(await createRoomFn())
+      setCreated(await createRoomFn(mode === 'pair' ? { mode, preset } : { mode, language }))
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Room creation failed.')
     } finally {
@@ -84,6 +87,32 @@ export default function CreateRoomScreen({
           </div>
         ) : (
           <div className="create-room-body">
+            <label htmlFor="room-mode">Room mode</label>
+            <select id="room-mode" value={mode} disabled={creating} onChange={(e) => setMode(e.target.value as RoomMode)}>
+              <option value="pair">Pair</option>
+              <option value="open">Open</option>
+            </select>
+            <p>{mode === 'pair' ? 'Pair coding with a guided preset.' : 'Open workspace with a chosen programming language.'}</p>
+            {mode === 'pair' ? (
+              <>
+                <label htmlFor="pair-preset">Pair preset</label>
+                <select id="pair-preset" value={preset} disabled={creating} onChange={(e) => setPreset(e.target.value as PairPreset)}>
+                  <option value="teach_interview">Teach / Interview</option>
+                  <option value="debug_together">Debug together</option>
+                </select>
+              </>
+            ) : (
+              <>
+                <label htmlFor="workspace-language">Workspace language</label>
+                <select id="workspace-language" value={language} disabled={creating} onChange={(e) => setLanguage(e.target.value as WorkspaceLanguage)}>
+                  <option value="cpp">C++</option>
+                  <option value="python">Python</option>
+                  <option value="c">C</option>
+                  <option value="java">Java</option>
+                  <option value="javascript">JavaScript</option>
+                </select>
+              </>
+            )}
             <button type="button" onClick={handleCreate} disabled={creating}>
               {creating ? 'Creating room...' : 'Create room'}
             </button>

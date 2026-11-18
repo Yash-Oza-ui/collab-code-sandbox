@@ -1,0 +1,4 @@
+# T-22 load harness
+node_modules/
+package-lock.json
+results/

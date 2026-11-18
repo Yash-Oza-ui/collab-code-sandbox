@@ -1,7 +1,7 @@
 """Execution failure explainer router.
 
 Implements T-16 (FR13.1, EPIC 3) failure explanation prototype behind T-07 contract.
-Conforms to docs/ai-ml-contract.md §4.3, §5, FR12.3, US-17 consent gating, US-22 AI control, and US-76 relevant code extraction (FR40.2).
+Conforms to docs/ai-ml-contract.md §4.3, §5, FR12.3, FR12.4, US-17, US-21 consent gating, US-22 AI control, and US-76 relevant code extraction (FR40.2).
 """
 
 import logging

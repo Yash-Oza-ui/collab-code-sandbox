@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
-  PLACEHOLDER_CREATE_ROOM_BODY,
+  buildCreateRoomBody,
   createRoom,
   ownerTokenKey,
 } from './createRoom'
@@ -51,25 +51,25 @@ describe('createRoom', () => {
     vi.unstubAllGlobals()
   })
 
-  it('posts the placeholder body to /v1/rooms', async () => {
+  it('posts the Pair mode body to /v1/rooms', async () => {
     fetchMock.mockResolvedValue(createdResponse())
-    await createRoom(PLATFORM_URL)
+    await createRoom({ mode: 'pair', preset: 'debug_together' }, PLATFORM_URL)
     expect(fetchMock).toHaveBeenCalledWith(`${PLATFORM_URL}/v1/rooms`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(PLACEHOLDER_CREATE_ROOM_BODY),
+      body: JSON.stringify(buildCreateRoomBody({ mode: 'pair', preset: 'debug_together' })),
     })
   })
 
   it('ignores a trailing slash on the platform URL', async () => {
     fetchMock.mockResolvedValue(createdResponse())
-    await createRoom(`${PLATFORM_URL}/`)
+    await createRoom({ mode: 'pair', preset: 'debug_together' }, `${PLATFORM_URL}/`)
     expect(fetchMock.mock.calls[0][0]).toBe(`${PLATFORM_URL}/v1/rooms`)
   })
 
   it('returns the room id and stores the owner token for that room', async () => {
     fetchMock.mockResolvedValue(createdResponse())
-    const result = await createRoom(PLATFORM_URL)
+    const result = await createRoom({ mode: 'pair', preset: 'debug_together' }, PLATFORM_URL)
     expect(result).toEqual({ roomId: ROOM_ID, ownerTokenStored: true })
     expect(storage.setItem).toHaveBeenCalledWith(ownerTokenKey(ROOM_ID), TOKEN)
   })
@@ -88,7 +88,7 @@ describe('createRoom', () => {
         422,
       ),
     )
-    await expect(createRoom(PLATFORM_URL)).rejects.toThrow(
+    await expect(createRoom({ mode: 'pair', preset: 'debug_together' }, PLATFORM_URL)).rejects.toThrow(
       "Field 'mode' is missing or invalid.",
     )
     expect(storage.setItem).not.toHaveBeenCalled()
@@ -96,14 +96,14 @@ describe('createRoom', () => {
 
   it('falls back to a generic message when the error body is not JSON', async () => {
     fetchMock.mockResolvedValue(new Response('Bad gateway', { status: 502 }))
-    await expect(createRoom(PLATFORM_URL)).rejects.toThrow(
+    await expect(createRoom({ mode: 'pair', preset: 'debug_together' }, PLATFORM_URL)).rejects.toThrow(
       'Room creation failed (HTTP 502).',
     )
   })
 
   it('reports a friendly message when the server cannot be reached', async () => {
     fetchMock.mockRejectedValue(new TypeError('Failed to fetch'))
-    await expect(createRoom(PLATFORM_URL)).rejects.toThrow(
+    await expect(createRoom({ mode: 'pair', preset: 'debug_together' }, PLATFORM_URL)).rejects.toThrow(
       'Unable to reach the room server.',
     )
     expect(storage.setItem).not.toHaveBeenCalled()
@@ -113,7 +113,7 @@ describe('createRoom', () => {
     fetchMock.mockResolvedValue(
       jsonResponse({ room_id: 'bad id!', owner_token: TOKEN }, 201),
     )
-    await expect(createRoom(PLATFORM_URL)).rejects.toThrow(
+    await expect(createRoom({ mode: 'pair', preset: 'debug_together' }, PLATFORM_URL)).rejects.toThrow(
       'The room server sent an invalid response.',
     )
     expect(storage.setItem).not.toHaveBeenCalled()
@@ -121,7 +121,7 @@ describe('createRoom', () => {
 
   it('rejects a response without an owner token', async () => {
     fetchMock.mockResolvedValue(jsonResponse({ room_id: ROOM_ID }, 201))
-    await expect(createRoom(PLATFORM_URL)).rejects.toThrow(
+    await expect(createRoom({ mode: 'pair', preset: 'debug_together' }, PLATFORM_URL)).rejects.toThrow(
       'The room server sent an invalid response.',
     )
   })
@@ -131,7 +131,17 @@ describe('createRoom', () => {
     vi.mocked(storage.setItem).mockImplementation(() => {
       throw new Error('storage disabled')
     })
-    const result = await createRoom(PLATFORM_URL)
+    const result = await createRoom({ mode: 'pair', preset: 'debug_together' }, PLATFORM_URL)
     expect(result).toEqual({ roomId: ROOM_ID, ownerTokenStored: false })
+  })
+})
+
+
+describe('US-34 room creation payload', () => {
+  it('sends Pair preset without language', () => {
+    expect(buildCreateRoomBody({ mode: 'pair', preset: 'teach_interview' })).toEqual({ mode: 'pair', preset: 'teach_interview' })
+  })
+  it('sends Open language without preset', () => {
+    expect(buildCreateRoomBody({ mode: 'open', language: 'cpp' })).toEqual({ mode: 'open', language: 'cpp' })
   })
 })

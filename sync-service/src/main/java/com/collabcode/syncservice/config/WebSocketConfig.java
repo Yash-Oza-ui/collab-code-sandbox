@@ -6,7 +6,11 @@ import com.collabcode.syncservice.module.ModuleService;
 import com.collabcode.syncservice.room.RoomRegistry;
 import com.collabcode.syncservice.room.RoomService;
 import com.collabcode.syncservice.room.RoomStore;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.core.env.Environment;
+import org.springframework.core.env.Profiles;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.web.socket.config.annotation.EnableWebSocket;
@@ -35,8 +39,21 @@ import org.springframework.web.socket.server.standard.ServletServerContainerFact
 public class WebSocketConfig implements WebSocketConfigurer {
 
     /** Browser origin allowed to upgrade to WebSocket (contract section 2). */
+    private static final Logger log = LoggerFactory.getLogger(WebSocketConfig.class);
+
     @Value("${CLIENT_ORIGIN:http://localhost:3000}")
     private String clientOrigin;
+
+    /**
+     * The per-edit write-permission check is disabled ONLY when this property is
+     * true AND the {@code loadtest} Spring profile is active (T-22 CR13 baseline).
+     * Production never runs the {@code loadtest} profile, so the check cannot be
+     * turned off there even if this property is set by accident.
+     */
+    @Value("${app.loadtest.edit-check-disabled:false}")
+    private boolean editCheckDisableRequested;
+
+    private final Environment environment;
 
     private final RoomStore roomStore;
     private final RoomService roomService;
@@ -46,7 +63,9 @@ public class WebSocketConfig implements WebSocketConfigurer {
     public WebSocketConfig(RoomStore roomStore,
                            RoomService roomService,
                            ModuleService moduleService,
-                           RoomRegistry roomRegistry) {
+                           RoomRegistry roomRegistry,
+                           Environment environment) {
+        this.environment = environment;
         this.roomStore = roomStore;
         this.roomService = roomService;
         this.moduleService = moduleService;
@@ -64,10 +83,20 @@ public class WebSocketConfig implements WebSocketConfigurer {
 
     @Bean
     public DocumentHandler documentHandler() {
+        // CR13 (T-22): the edit-check bypass is enabled ONLY under the isolated
+        // "loadtest" profile; production never runs it, so the check cannot be
+        // disabled accidentally there.
+        boolean editCheckDisabled = editCheckDisableRequested
+                && environment.acceptsProfiles(Profiles.of("loadtest"));
+        if (editCheckDisabled) {
+            log.warn("LOAD-TEST MODE: the per-edit write-permission check is DISABLED "
+                    + "(loadtest profile + app.loadtest.edit-check-disabled=true). "
+                    + "This is a test-only CR13 baseline and must NEVER run in production.");
+        }
         // Both handlers share the registry, but DocumentHandler explicitly uses
         // the control-socket view to route edit-rejected notifications.
         return new DocumentHandler(roomStore, roomService, moduleService, roomRegistry, roomRegistry,
-                new com.fasterxml.jackson.databind.ObjectMapper());
+                new com.fasterxml.jackson.databind.ObjectMapper(), editCheckDisabled);
     }
 
     // -----------------------------------------------------------------------

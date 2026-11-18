@@ -108,6 +108,7 @@ describe('RoomPage Observer View (US-27, FR9.4)', () => {
   let originalPathname = '/'
 
   beforeEach(() => {
+    sessionStorage.clear() // Each test starts without a previously joined browser tab.
     FakeSocket.instances = []
     FakeSocket.role = 'participant'
     FakeSocket.memberId = 'member-observer-1'
