@@ -42,7 +42,9 @@ from app.slowdown import (
     SlowdownAnalysisRequest,
     SlowdownAnalysisResponse,
     detect_slowdown,
+    generate_slowdown_explanation,
     get_slowdown_store,
+    validate_threshold_overrides,
 )
 
 logger = logging.getLogger(__name__)
@@ -523,44 +525,24 @@ async def analyze_slowdown(
     request.state.request_type = payload.request_type
     request.state.language = payload.language
 
-    # Support optional dynamic thresholds via query parameters or request headers
-    factor_threshold = None
-    if "factor_threshold" in request.query_params:
-        try:
-            factor_threshold = float(request.query_params["factor_threshold"])
-        except ValueError:
-            pass
-    elif request.headers.get("x-slowdown-factor"):
-        try:
-            factor_threshold = float(request.headers["x-slowdown-factor"])
-        except ValueError:
-            pass
+    # Extract query param or header threshold overrides
+    raw_factor = request.query_params.get("factor_threshold") or request.headers.get("x-slowdown-factor")
+    raw_outlier = (
+        request.query_params.get("outlier_threshold")
+        or request.query_params.get("z_threshold")
+        or request.headers.get("x-outlier-threshold")
+        or request.headers.get("x-modified-z-threshold")
+    )
+    raw_min_samples = request.query_params.get("min_samples") or request.headers.get("x-min-samples")
 
-    z_threshold = None
-    if "z_threshold" in request.query_params:
-        try:
-            z_threshold = float(request.query_params["z_threshold"])
-        except ValueError:
-            pass
-    elif request.headers.get("x-modified-z-threshold"):
-        try:
-            z_threshold = float(request.headers["x-modified-z-threshold"])
-        except ValueError:
-            pass
+    # Validate threshold overrides strictly (422 INVALID_REQUEST on invalid, non-finite, or <= 0 values)
+    factor_threshold, outlier_threshold, min_samples = validate_threshold_overrides(
+        factor_param=raw_factor,
+        outlier_param=raw_outlier,
+        min_samples_param=raw_min_samples,
+    )
 
-    min_samples = None
-    if "min_samples" in request.query_params:
-        try:
-            min_samples = int(request.query_params["min_samples"])
-        except ValueError:
-            pass
-    elif request.headers.get("x-min-samples"):
-        try:
-            min_samples = int(request.headers["x-min-samples"])
-        except ValueError:
-            pass
-
-    # Statistical slowdown detection (statistics-only, zero external LLM calls, never delays runs)
+    # Statistical slowdown detection against empirical Median and MAD baseline
     result = detect_slowdown(
         room_id=payload.room_id,
         input_hash=payload.input_hash,
@@ -569,11 +551,25 @@ async def analyze_slowdown(
         consent=payload.consent,
         ai_enabled=payload.ai_enabled,
         factor_threshold=factor_threshold,
-        z_threshold=z_threshold,
+        outlier_threshold=outlier_threshold,
         min_samples=min_samples,
     )
 
-    ai_step = result["ai_step"]
+    # Generate AI explanation when regression is detected and both consent and AI are enabled (§16.2)
+    if result["is_slowdown"] and payload.consent is True and payload.ai_enabled is True:
+        ai_step = await generate_slowdown_explanation(
+            code=payload.current_run.code,
+            language=payload.language,
+            execution_time_ms=payload.current_run.execution_time_ms,
+            baseline_median_ms=result["baseline"].median_ms,
+            slowdown_factor=result["slowdown_factor"],
+            room_id=payload.room_id,
+            consent=payload.consent,
+            ai_enabled=payload.ai_enabled,
+        )
+    else:
+        ai_step = result["ai_step"]
+
     if ai_step.error_code:
         record_fallback(payload.room_id)
     request.state.error_code = ai_step.error_code

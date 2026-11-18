@@ -12,6 +12,7 @@ Verifies:
 import json
 import logging
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 try:
     import jsonschema
@@ -176,24 +177,28 @@ def test_full_slowdown_detection_lifecycle(response_schema):
     assert data4["ai_step"]["status"] == "ok"
 
     # 5. Fifth run: 14.2x severe slowdown regression (1420.0 ms)
-    resp5 = client.post(
-        "/v1/analyses/slowdown",
-        json={
-            "request_id": "req-005",
-            "room_id": room_id,
-            "analysis_id": "ana-005",
-            "request_type": "slowdown",
-            "language": "python",
-            "consent": True,
-            "ai_enabled": True,
-            "input_hash": input_hash,
-            "current_run": {
-                "execution_time_ms": 1420.0,
-                "peak_memory_mb": 18.5,
-                "code": "import time\ntime.sleep(1.4)",
-            },
-        },
+    mock_complete = AsyncMock(
+        return_value="Runtime regression caused by newly introduced blocking sleep call on line 2."
     )
+    with patch("app.llm.client.LLMClient.complete", mock_complete):
+        resp5 = client.post(
+            "/v1/analyses/slowdown",
+            json={
+                "request_id": "req-005",
+                "room_id": room_id,
+                "analysis_id": "ana-005",
+                "request_type": "slowdown",
+                "language": "python",
+                "consent": True,
+                "ai_enabled": True,
+                "input_hash": input_hash,
+                "current_run": {
+                    "execution_time_ms": 1420.0,
+                    "peak_memory_mb": 18.5,
+                    "code": "import time\ntime.sleep(1.4)",
+                },
+            },
+        )
     assert resp5.status_code == 200
     data5 = resp5.json()
     _assert_schema_conformance(data5, response_schema)
@@ -201,6 +206,8 @@ def test_full_slowdown_detection_lifecycle(response_schema):
     assert data5["slowdown_factor"] == pytest.approx(14.2, rel=1e-2)
     assert data5["baseline"]["median_ms"] == pytest.approx(100.0)
     assert "14.2x slower" in data5["message"]
+    assert data5["ai_step"]["status"] == "ok"
+    assert "blocking sleep call" in data5["ai_step"]["explanation"]
 
 
 def test_integration_privacy_logging(caplog):
@@ -294,3 +301,45 @@ def test_integration_dynamic_threshold_overrides():
     # 350ms is 3.5x slower; with factor threshold 3.0, it is flagged as a regression!
     assert data["is_slowdown"] is True
     assert data["slowdown_factor"] == pytest.approx(3.5, rel=1e-2)
+
+
+def test_integration_invalid_threshold_overrides_return_422():
+    """Verify endpoint rejects min_samples=0, negative, and non-finite overrides with 422 INVALID_REQUEST."""
+    client = TestClient(app)
+    room_id = "room-integ-invalid"
+    input_hash = "hash-integ-invalid"
+
+    payload = {
+        "request_id": "test-inv-ovr",
+        "room_id": room_id,
+        "analysis_id": "a-inv-ovr",
+        "request_type": "slowdown",
+        "language": "python",
+        "consent": True,
+        "ai_enabled": True,
+        "input_hash": input_hash,
+        "current_run": {
+            "execution_time_ms": 100.0,
+            "peak_memory_mb": 10.0,
+            "code": "pass",
+        },
+    }
+
+    # Query param min_samples=0
+    resp_0 = client.post("/v1/analyses/slowdown?min_samples=0", json=payload)
+    assert resp_0.status_code == 422
+    assert resp_0.json()["error"]["code"] == "INVALID_REQUEST"
+
+    # Query param factor_threshold=-1.0
+    resp_neg = client.post("/v1/analyses/slowdown?factor_threshold=-1.0", json=payload)
+    assert resp_neg.status_code == 422
+    assert resp_neg.json()["error"]["code"] == "INVALID_REQUEST"
+
+    # Header x-outlier-threshold=inf
+    resp_inf = client.post(
+        "/v1/analyses/slowdown",
+        headers={"x-outlier-threshold": "inf"},
+        json=payload,
+    )
+    assert resp_inf.status_code == 422
+    assert resp_inf.json()["error"]["code"] == "INVALID_REQUEST"

@@ -639,3 +639,352 @@ def test_slowdown_run_not_recorded_to_baseline():
     for m in history:
         assert m["execution_time_ms"] == 100.0
 
+
+# ============================================================================
+# Review Feedback Tests: Overrides, AI Explanation, Contract Criteria, Deferred Diffs
+# ============================================================================
+
+
+def test_override_validation_rejects_invalid_values():
+    """Verify validate_threshold_overrides strictly rejects min_samples <= 0, non-integers, negative, and non-finite thresholds."""
+    from fastapi import HTTPException
+    from app.slowdown import validate_threshold_overrides
+
+    # min_samples = 0
+    with pytest.raises(HTTPException) as exc_0:
+        validate_threshold_overrides(min_samples_param=0)
+    assert exc_0.value.status_code == 422
+    assert exc_0.value.detail["code"] == "INVALID_REQUEST"
+
+    # min_samples < 0
+    with pytest.raises(HTTPException) as exc_neg_min:
+        validate_threshold_overrides(min_samples_param="-2")
+    assert exc_neg_min.value.status_code == 422
+    assert exc_neg_min.value.detail["code"] == "INVALID_REQUEST"
+
+    # min_samples float string
+    with pytest.raises(HTTPException) as exc_float_min:
+        validate_threshold_overrides(min_samples_param="1.5")
+    assert exc_float_min.value.status_code == 422
+    assert exc_float_min.value.detail["code"] == "INVALID_REQUEST"
+
+    # min_samples non-numeric
+    with pytest.raises(HTTPException) as exc_str_min:
+        validate_threshold_overrides(min_samples_param="abc")
+    assert exc_str_min.value.status_code == 422
+
+    # factor_threshold negative
+    with pytest.raises(HTTPException) as exc_neg_factor:
+        validate_threshold_overrides(factor_param="-5.0")
+    assert exc_neg_factor.value.status_code == 422
+    assert exc_neg_factor.value.detail["code"] == "INVALID_REQUEST"
+
+    # factor_threshold zero
+    with pytest.raises(HTTPException) as exc_zero_factor:
+        validate_threshold_overrides(factor_param="0.0")
+    assert exc_zero_factor.value.status_code == 422
+
+    # factor_threshold non-finite (NaN, Inf)
+    with pytest.raises(HTTPException) as exc_nan_factor:
+        validate_threshold_overrides(factor_param="nan")
+    assert exc_nan_factor.value.status_code == 422
+    assert exc_nan_factor.value.detail["code"] == "INVALID_REQUEST"
+
+    with pytest.raises(HTTPException) as exc_inf_factor:
+        validate_threshold_overrides(factor_param="inf")
+    assert exc_inf_factor.value.status_code == 422
+
+    # outlier_threshold zero or negative
+    with pytest.raises(HTTPException) as exc_zero_outlier:
+        validate_threshold_overrides(outlier_param="0.0")
+    assert exc_zero_outlier.value.status_code == 422
+    assert exc_zero_outlier.value.detail["code"] == "INVALID_REQUEST"
+
+    with pytest.raises(HTTPException) as exc_neg_outlier:
+        validate_threshold_overrides(outlier_param="-1.5")
+    assert exc_neg_outlier.value.status_code == 422
+
+    # outlier_threshold non-finite
+    with pytest.raises(HTTPException) as exc_nan_outlier:
+        validate_threshold_overrides(outlier_param="nan")
+    assert exc_nan_outlier.value.status_code == 422
+
+    # Valid values accepted
+    f, o, m = validate_threshold_overrides(
+        factor_param="4.5", outlier_param="2.5", min_samples_param="4"
+    )
+    assert f == pytest.approx(4.5)
+    assert o == pytest.approx(2.5)
+    assert m == 4
+
+
+def test_api_threshold_overrides_endpoint_validation():
+    """Verify endpoint returns HTTP 422 INVALID_REQUEST when invalid query params or headers are passed."""
+    client = TestClient(app)
+    room_id = "test-override-api"
+    input_hash = "hash-override-api"
+
+    base_payload = {
+        "request_id": "req-ovr-1",
+        "room_id": room_id,
+        "analysis_id": "ana-ovr-1",
+        "request_type": "slowdown",
+        "language": "python",
+        "consent": True,
+        "ai_enabled": True,
+        "input_hash": input_hash,
+        "current_run": {
+            "execution_time_ms": 100.0,
+            "peak_memory_mb": 10.0,
+            "code": "pass",
+        },
+    }
+
+    # Query param min_samples=0
+    resp_0 = client.post("/v1/analyses/slowdown?min_samples=0", json=base_payload)
+    assert resp_0.status_code == 422
+    assert resp_0.json()["error"]["code"] == "INVALID_REQUEST"
+
+    # Query param factor_threshold=-2.0
+    resp_neg_f = client.post("/v1/analyses/slowdown?factor_threshold=-2.0", json=base_payload)
+    assert resp_neg_f.status_code == 422
+    assert resp_neg_f.json()["error"]["code"] == "INVALID_REQUEST"
+
+    # Query param outlier_threshold=nan
+    resp_nan = client.post("/v1/analyses/slowdown?outlier_threshold=nan", json=base_payload)
+    assert resp_nan.status_code == 422
+    assert resp_nan.json()["error"]["code"] == "INVALID_REQUEST"
+
+    # Header x-min-samples=-1
+    resp_hdr = client.post(
+        "/v1/analyses/slowdown",
+        headers={"x-min-samples": "-1"},
+        json=base_payload,
+    )
+    assert resp_hdr.status_code == 422
+    assert resp_hdr.json()["error"]["code"] == "INVALID_REQUEST"
+
+
+def test_condition_1_statistical_outlier_contract_alignment():
+    """Verify statistical outlier condition adheres to T_curr > median + 3 * MAD (§16.2)."""
+    store = SlowdownStore()
+    room_id = "room-stat-cond"
+    input_hash = "hash-stat-cond"
+
+    # Seed baseline: [96.0, 98.0, 100.0, 102.0, 104.0]
+    # Median = 100.0, deviations = [4, 2, 0, 2, 4], MAD = 2.0
+    for t in [96.0, 98.0, 100.0, 102.0, 104.0]:
+        store.record_measurement(room_id, input_hash, t, 10.0)
+
+    # Threshold: median + 3 * MAD = 100 + 3 * 2.0 = 106.0
+    # Current runtime = 105.0: below 106.0 -> Condition 1 fails -> is_slowdown=False
+    res_below = detect_slowdown(
+        room_id=room_id,
+        input_hash=input_hash,
+        execution_time_ms=105.0,
+        peak_memory_mb=10.0,
+        store=store,
+    )
+    assert res_below["is_slowdown"] is False
+
+    # Current runtime = 500.0 (5x): exceeds 106.0 (Condition 1 passes), but fails Condition 2 (5 < 8) -> is_slowdown=False
+    res_5x = detect_slowdown(
+        room_id=room_id,
+        input_hash=input_hash,
+        execution_time_ms=500.0,
+        peak_memory_mb=10.0,
+        store=store,
+    )
+    assert res_5x["is_slowdown"] is False
+
+    # Current runtime = 1000.0 (10x): exceeds 106.0 AND 10x >= 8x -> BOTH conditions pass -> is_slowdown=True
+    res_10x = detect_slowdown(
+        room_id=room_id,
+        input_hash=input_hash,
+        execution_time_ms=1000.0,
+        peak_memory_mb=10.0,
+        store=store,
+    )
+    assert res_10x["is_slowdown"] is True
+
+
+def test_ai_explanation_generated_when_slowdown_detected():
+    """Verify AI explanation is generated via LLM when slowdown detected, consent=True, ai_enabled=True (§16.2)."""
+    from unittest.mock import AsyncMock, patch
+    client = TestClient(app)
+    room_id = "room-ai-gen"
+    input_hash = "hash-ai-gen"
+
+    # Establish baseline with 3 normal runs
+    for i in range(3):
+        resp = client.post(
+            "/v1/analyses/slowdown",
+            json={
+                "request_id": f"req-base-{i}",
+                "room_id": room_id,
+                "analysis_id": f"ana-base-{i}",
+                "request_type": "slowdown",
+                "language": "python",
+                "consent": True,
+                "ai_enabled": True,
+                "input_hash": input_hash,
+                "current_run": {
+                    "execution_time_ms": 100.0,
+                    "peak_memory_mb": 10.0,
+                    "code": "print('ok')",
+                },
+            },
+        )
+        assert resp.status_code == 200
+
+    # 4th run: 12x slowdown regression (1200ms) with LLM mocked
+    slowdown_payload = {
+        "request_id": "req-slow-ai-1",
+        "room_id": room_id,
+        "analysis_id": "ana-slow-ai-1",
+        "request_type": "slowdown",
+        "language": "python",
+        "consent": True,
+        "ai_enabled": True,
+        "input_hash": input_hash,
+        "current_run": {
+            "execution_time_ms": 1200.0,
+            "peak_memory_mb": 15.0,
+            "code": "import time\ntime.sleep(1.2)",
+        },
+    }
+
+    mock_complete = AsyncMock(
+        return_value="Runtime regression caused by blocking sleep. Line 2 suspends execution for 1.2s. Remove sleep to restore performance."
+    )
+    with patch("app.llm.client.LLMClient.complete", mock_complete):
+        resp_slow = client.post("/v1/analyses/slowdown", json=slowdown_payload)
+
+    assert resp_slow.status_code == 200
+    data_slow = resp_slow.json()
+    assert data_slow["is_slowdown"] is True
+    assert data_slow["ai_step"]["status"] == "ok"
+    assert data_slow["ai_step"]["error_code"] is None
+    assert data_slow["ai_step"]["explanation"] is not None
+    assert "sleep" in data_slow["ai_step"]["explanation"]
+    assert mock_complete.await_count == 1
+
+    # Second identical regression: served from cache (0 additional LLM calls)
+    slowdown_payload_2 = dict(slowdown_payload)
+    slowdown_payload_2["request_id"] = "req-slow-ai-2"
+    with patch("app.llm.client.LLMClient.complete", mock_complete):
+        resp_cached = client.post("/v1/analyses/slowdown", json=slowdown_payload_2)
+    assert resp_cached.status_code == 200
+    data_cached = resp_cached.json()
+    assert data_cached["ai_step"]["status"] == "ok"
+    assert data_cached["ai_step"]["explanation"] == data_slow["ai_step"]["explanation"]
+    # LLM was NOT called again due to caching (NFR5.2)
+    assert mock_complete.await_count == 1
+
+
+def test_ai_explanation_sentence_limit_enforced():
+    """Verify that an LLM response with more than 3 sentences is trimmed to at most 3 sentences (FR13.1)."""
+    from unittest.mock import AsyncMock, patch
+    client = TestClient(app)
+    room_id = "room-sentence-limit"
+    input_hash = "hash-sentence-limit"
+
+    store = get_slowdown_store()
+    for _ in range(3):
+        store.record_measurement(room_id, input_hash, 100.0, 10.0)
+
+    long_response = (
+        "Sentence one explains the regression. "
+        "Sentence two provides context on latency. "
+        "Sentence three suggests an optimization fix. "
+        "Sentence four should be stripped out. "
+        "Sentence five must not appear."
+    )
+    mock_complete = AsyncMock(return_value=long_response)
+    with patch("app.llm.client.LLMClient.complete", mock_complete):
+        resp = client.post(
+            "/v1/analyses/slowdown",
+            json={
+                "request_id": "req-sent-1",
+                "room_id": room_id,
+                "analysis_id": "ana-sent-1",
+                "request_type": "slowdown",
+                "language": "python",
+                "consent": True,
+                "ai_enabled": True,
+                "input_hash": input_hash,
+                "current_run": {
+                    "execution_time_ms": 1000.0,
+                    "peak_memory_mb": 15.0,
+                    "code": "time.sleep(1.0)",
+                },
+            },
+        )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["ai_step"]["status"] == "ok"
+    expl = data["ai_step"]["explanation"]
+    assert "Sentence one" in expl
+    assert "Sentence three" in expl
+    assert "Sentence four" not in expl
+    assert "Sentence five" not in expl
+
+
+def test_ai_explanation_falls_back_gracefully_on_provider_error():
+    """Verify that if LLM provider fails, ai_step status is skipped with PROVIDER_ERROR without crashing analysis."""
+    from unittest.mock import AsyncMock, patch
+    from app.llm.client import LLMProviderError
+    client = TestClient(app)
+    room_id = "room-err-fallback"
+    input_hash = "hash-err-fallback"
+
+    store = get_slowdown_store()
+    for _ in range(3):
+        store.record_measurement(room_id, input_hash, 100.0, 10.0)
+
+    mock_complete = AsyncMock(side_effect=LLMProviderError("Upstream failure", code="PROVIDER_ERROR"))
+    with patch("app.llm.client.LLMClient.complete", mock_complete):
+        resp = client.post(
+            "/v1/analyses/slowdown",
+            json={
+                "request_id": "req-err-1",
+                "room_id": room_id,
+                "analysis_id": "ana-err-1",
+                "request_type": "slowdown",
+                "language": "python",
+                "consent": True,
+                "ai_enabled": True,
+                "input_hash": input_hash,
+                "current_run": {
+                    "execution_time_ms": 1000.0,
+                    "peak_memory_mb": 15.0,
+                    "code": "time.sleep(1.0)",
+                },
+            },
+        )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["is_slowdown"] is True
+    assert data["ai_step"]["status"] == "skipped"
+    assert data["ai_step"]["error_code"] == "PROVIDER_ERROR"
+    assert data["ai_step"]["explanation"] is None
+
+
+def test_deferred_scope_changed_lines_returns_empty_list():
+    """Verify changed_lines is an empty list per US-68 scope (FR37.3 deferred to US-69)."""
+    store = SlowdownStore()
+    room_id = "room-deferred-diff"
+    input_hash = "hash-deferred-diff"
+
+    for _ in range(3):
+        store.record_measurement(room_id, input_hash, 100.0, 10.0)
+
+    res = detect_slowdown(
+        room_id=room_id,
+        input_hash=input_hash,
+        execution_time_ms=1000.0,
+        peak_memory_mb=10.0,
+        store=store,
+    )
+    assert res["changed_lines"] == []
+

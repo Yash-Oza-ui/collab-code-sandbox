@@ -58,6 +58,9 @@ class TestConfigDefaults:
     def test_slowdown_factor_threshold_has_default(self):
         assert self.settings.SLOWDOWN_FACTOR_THRESHOLD >= 1.0, "FR37.2 slowdown factor threshold must be >= 1.0"
 
+    def test_slowdown_outlier_threshold_has_default(self):
+        assert self.settings.SLOWDOWN_OUTLIER_THRESHOLD == pytest.approx(3.0), "§16.2 outlier threshold default is 3.0"
+
     def test_slowdown_modified_z_threshold_positive(self):
         assert self.settings.SLOWDOWN_MODIFIED_Z_THRESHOLD > 0.0
 
@@ -99,6 +102,11 @@ class TestConfigOverrides:
     def test_slowdown_modified_z_threshold_overridable(self):
         s = _fresh_settings(SLOWDOWN_MODIFIED_Z_THRESHOLD="2.5")
         assert s.SLOWDOWN_MODIFIED_Z_THRESHOLD == pytest.approx(2.5)
+
+    def test_slowdown_outlier_threshold_overridable(self):
+        s = _fresh_settings(SLOWDOWN_OUTLIER_THRESHOLD="2.8")
+        assert s.SLOWDOWN_OUTLIER_THRESHOLD == pytest.approx(2.8)
+        assert s.SLOWDOWN_MODIFIED_Z_THRESHOLD == pytest.approx(2.8)
 
     def test_slowdown_min_samples_overridable(self):
         s = _fresh_settings(SLOWDOWN_MIN_SAMPLES="5")

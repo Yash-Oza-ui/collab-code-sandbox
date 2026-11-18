@@ -14,7 +14,7 @@ The AI/ML microservice for **Collab Code Sandbox** (IT-314, Group 32). This serv
 - **Contracts (T-07 / T-18 v2):** Endpoints and payloads conform to `../docs/ai-ml-contract.md`.
 - **Configurable Limits (DR3 / US-16):**
   - `ai-ml-service` owns AI rate and cost limits: `AI_SLOWDOWN_FACTOR` (FR37.2, default `1.0`), `AI_MAX_TOKENS_PER_REQUEST` (FR40.4, default `4096`), `LLM_TIMEOUT_SECONDS` (FR40.4, default `10.0`), `ROOM_HOURLY_LIMIT` (NFR5.3, default `20`), `MONTHLY_BUDGET_USD` (NFR7.2, default `10.0`), `TOKEN_COST_PER_TOKEN` (default `0.0000035`).
-  - Slowdown detection configurable limits (DR3 / US-68): `SLOWDOWN_FACTOR_THRESHOLD` (FR37.2, default `8.0`), `SLOWDOWN_MODIFIED_Z_THRESHOLD` (default `3.5`), `SLOWDOWN_MIN_SAMPLES` (default `3`), `SLOWDOWN_MAX_HISTORY` (default `100`).
+  - Slowdown detection configurable limits (DR3 / US-68): `SLOWDOWN_FACTOR_THRESHOLD` (FR37.2, default `8.0`), `SLOWDOWN_OUTLIER_THRESHOLD` (default `3.0`, alias `SLOWDOWN_MODIFIED_Z_THRESHOLD`), `SLOWDOWN_MIN_SAMPLES` (default `3`), `SLOWDOWN_MAX_HISTORY` (default `100`).
   - See [docs/host-config.md](../docs/host-config.md) for details on host configuration and overrides. Final per-host values are determined only after host benchmarking.
 - **Endpoints:**
   - `GET /health`: Liveness probe for container orchestration and smoke tests.
@@ -228,39 +228,62 @@ As a student, I want a warning when a run is far slower than my earlier runs so 
 
 Slowdown detection evaluates execution runtime against an empirical historical baseline built from earlier runs of the exact same code input (`input_hash`).
 
-### Statistical Baseline & Detection Formulas
+### Statistical Baseline & Detection Formulas (T-18 v2 §16.2)
 For all earlier runs in the room sharing the same `input_hash`, `ai-ml-service` computes:
 1. **Historical Median Runtime:**
    $$\tilde{x} = \text{median}(x_1, x_2, \dots, x_k)$$
 2. **Median Absolute Deviation (MAD):**
    $$\text{MAD} = \text{median}(|x_i - \tilde{x}|)$$
-3. **Modified Z-Score (Boris Iglewicz and David Hoaglin, 1993):**
+3. **Statistical Outlier Threshold:**
+   $$T_{\text{threshold}} = \tilde{x} + k \cdot \text{MAD}$$
+   where $k$ defaults to `3.0` per contract §16.2 (configurable via `SLOWDOWN_OUTLIER_THRESHOLD`).
+4. **Modified Z-Score Formulation (Boris Iglewicz and David Hoaglin, 1993):**
    $$\text{modified\_z} = 0.6745 \times \frac{T_{\text{curr}} - \tilde{x}}{\text{MAD}}$$
 
 ### Dual Flagging Criteria (Regression Decision)
-A run is flagged as a performance slowdown (`is_slowdown: true`) if and only if **BOTH** of the following independent criteria hold:
-1. **Statistical Outlier:** The modified z-score exceeds the configured outlier threshold and runtime is strictly greater than the baseline median:
-   $$\text{modified\_z} > \text{threshold} \quad \text{and} \quad T_{\text{curr}} > \tilde{x}$$
-   (Default threshold: `3.5`, configurable via `SLOWDOWN_MODIFIED_Z_THRESHOLD`).
+A run is flagged as a performance slowdown (`is_slowdown: true`) if and only if **BOTH** of the following independent criteria hold (§16.2):
+1. **Statistical Outlier:** The execution runtime exceeds three MAD deviations above the historical median:
+   $$T_{\text{curr}} > \tilde{x} + 3 \cdot \text{MAD}$$
+   (Configurable outlier multiplier, default `3.0` via `SLOWDOWN_OUTLIER_THRESHOLD` / `SLOWDOWN_MODIFIED_Z_THRESHOLD`).
 2. **Severe Fold Slowdown:** The current runtime is at least 8 times slower than the baseline median:
    $$\text{slowdown\_factor} = \frac{T_{\text{curr}}}{\tilde{x}} \ge 8.0$$
    (Default factor: `8.0`, configurable via `SLOWDOWN_FACTOR_THRESHOLD` per FR37.2 and DR3).
 
-### Configurable Limits (DR3 / US-16 / US-68)
+### AI Explanation Generation & Gating (FR13.1, FR40.2, §16.2)
+- When a regression is detected (`is_slowdown: true`) and both user consent (`consent: true`) and the Host AI switch (`ai_enabled: true`) are active, `ai-ml-service` generates a concise AI explanation of the regression.
+- **3-Sentence Limit (FR13.1):** The explanation is constrained to plain prose and strictly capped at **3 sentences** via programmatic truncation (`enforce_sentence_limit`).
+- **Data Minimization (FR40.2, NFR8.2):** Code is sliced to a small relevant window (`extract_relevant_section`) rather than sending full source files.
+- **Budget & Rate Protection (NFR5.2, NFR5.3, NFR7.2):** Outbound calls are cached by SHA-256 digest of normalized code to prevent duplicate spend, and respect room hourly limits (`ROOM_HOURLY_LIMIT`) and monthly budget caps (`MONTHLY_BUDGET_USD`).
+- **Fallback on Error / Missing Consent:** If consent is missing (`CONSENT_MISSING`), AI is disabled (`AI_DISABLED`), or provider limits/errors occur (`COST_CAP_REACHED`, `ROOM_RATE_LIMITED`, `PROVIDER_TIMEOUT`, `PROVIDER_ERROR`), the statistical detection results (`is_slowdown`, `slowdown_factor`, `baseline`, and `message`) **are returned in full** with `ai_step: { "status": "skipped", "error_code": "..." }`.
+- **Normal Runs:** When runtime is within normal parameters (`is_slowdown: false`), no AI call is made and `ai_step` returns `{ "status": "ok", "error_code": null, "explanation": null }` per §16.2.
+
+### Clarification on Deferred Scope: `changed_lines` (FR37.3, US-69)
+In US-68 responses, `changed_lines` is returned as an empty list (`[]`).
+- **Reason for Deferral:** Under US-68 / NFR8.2 data minimization, `ai-ml-service` maintains short-lived, metadata-only storage in `SlowdownStore` (storing only numeric runtime and memory metrics, never raw source code).
+- **Scheduled Delivery:** Line-by-line diffing of source code against the last normal run is assigned to **US-69 (FR37.3)** in Sprint 5. Returning `[]` strictly conforms to the JSON schema (`docs/schemas/slowdown-response.json`).
+
+### Configurable Limits & Request-Level Override Validation (DR3 / US-16 / US-68)
 Each threshold is read from environment configuration without hard-coding:
 - `SLOWDOWN_FACTOR_THRESHOLD`: Fold multiplier threshold (default `8.0`).
-- `SLOWDOWN_MODIFIED_Z_THRESHOLD`: Modified z-score statistical outlier threshold (default `3.5`).
+- `SLOWDOWN_OUTLIER_THRESHOLD`: Outlier threshold multiplier (default `3.0`, per §16.2 $T > \tilde{x} + 3 \cdot \text{MAD}$).
+- `SLOWDOWN_MODIFIED_Z_THRESHOLD`: Backward-compatible alias for `SLOWDOWN_OUTLIER_THRESHOLD` (default `3.0`).
 - `SLOWDOWN_MIN_SAMPLES`: Minimum number of earlier runs required to establish a valid baseline (default `3`).
 - `SLOWDOWN_MAX_HISTORY`: Maximum number of measurements retained per `(room_id, input_hash)` bucket (default `100`).
 
-Thresholds may also be dynamically overridden on individual test/analysis requests via HTTP headers (`x-slowdown-factor`, `x-modified-z-threshold`, `x-min-samples`) or query parameters (`factor_threshold`, `z_threshold`, `min_samples`).
+Thresholds may be dynamically overridden on individual analysis requests via HTTP query parameters (`factor_threshold`, `outlier_threshold` / `z_threshold`, `min_samples`) or headers (`x-slowdown-factor`, `x-outlier-threshold`, `x-modified-z-threshold`, `x-min-samples`).
+
+**Override Validation Rules:**
+Overrides are strictly validated before processing. If an invalid value is supplied, the service immediately rejects the request with HTTP 422 `INVALID_REQUEST`:
+- `min_samples`: Must be an integer $\ge 1$. Values $\le 0$, non-integers, floats (e.g., `1.5`), and non-numeric strings are rejected.
+- `factor_threshold`: Must be a finite number $\ge 1.0$. Values $< 1.0$, $\le 0$, negative, NaN, Inf, and non-numeric strings are rejected.
+- `outlier_threshold`: Must be a positive finite number $> 0.0$. Values $\le 0$, negative, NaN, Inf, and non-numeric strings are rejected.
 
 ### Safe Handling of MAD = 0 Policy
 When more than 50% of historical runs have identical execution times, $\text{MAD} = 0$. To prevent division by zero and eliminate false alarms:
-1. If $T_{\text{curr}} \le \tilde{x}$, `modified_z = 0.0` (not an outlier).
+1. If $T_{\text{curr}} \le \tilde{x}$, `condition_1_outlier = False` (not an outlier).
 2. If $T_{\text{curr}} > \tilde{x}$, the service evaluates the mean absolute deviation: $\text{mean\_ad} = \text{mean}(|x_i - \tilde{x}|)$.
-   - If $\text{mean\_ad} > 0$, `modified_z = 0.6745 * (T_curr - median) / mean_ad`.
-   - If all historical samples were strictly identical ($\text{mean\_ad} = 0$), historical variance is zero. Any runtime increase represents a statistical anomaly; the service sets `modified_z = float("inf")` without division by zero.
+   - If $\text{mean\_ad} > 0$, condition 1 checks $T_{\text{curr}} > \tilde{x} + k \cdot \text{mean\_ad}$.
+   - If all historical samples were strictly identical ($\text{mean\_ad} = 0$), historical variance is zero. Any runtime increase represents a statistical anomaly; condition 1 evaluates to `True` without division by zero.
 3. Crucially, a regression is flagged **only** if Condition 2 ($T_{\text{curr}} \ge 8.0 \times \tilde{x}$) is ALSO satisfied. Normal run fluctuations (e.g., 101 ms vs. 100 ms baseline) have $\text{slowdown\_factor} = 1.01 < 8.0$ and are strictly **not flagged**, preventing false alarms.
 
 ### Insufficient History Policy
