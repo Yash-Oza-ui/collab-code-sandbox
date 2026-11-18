@@ -39,6 +39,9 @@ Or set them in `ai-ml-service/.env` (git-ignored, copied from `.env.example`).
 | DR5      | Sanitizer / request body limit (bytes)   | execution-service  | `APP_EXECUTION_LIMITS_MAX_REQUEST_BODY_BYTES`     | `1048576`   | US-13 ✅         |
 | FR16     | Max concurrent runs in queue             | execution-service  | `EXECUTION_MAX_QUEUE_LENGTH`                      | `10`        | US-11 ✅         |
 | FR16     | Retry-After on QUEUE_FULL (seconds)      | execution-service  | `APP_EXECUTION_LIMITS_QUEUE_RETRY_AFTER_SECONDS`  | `5`         | US-11 ✅         |
+| NFR14    | Aggregate repeated-run time budget (ms)  | execution-service  | `APP_EXECUTION_LIMITS_AGGREGATE_TIME_BUDGET_MS`   | `20000`     | US-64 ✅         |
+| NFR14    | Max runs per repeated-run request        | execution-service  | `APP_EXECUTION_LIMITS_MAX_RUNS_PER_REQUEST`       | `10`        | US-64 ✅         |
+| NFR14    | Retry-After on RUN_BUDGET_EXCEEDED (s)   | execution-service  | `APP_EXECUTION_LIMITS_BUDGET_RETRY_AFTER_SECONDS` | `30`        | US-64 ✅         |
 | NFR15    | Max members per room                     | sync-service       | `APP_ROOM_LIMITS_MAX_MEMBERS_PER_ROOM`            | `10`        | US-16 🟡 (US-xx) |
 | FR31.2   | Host-leaves timeout (ms)                 | sync-service       | `APP_ROOM_LIMITS_HOST_LEAVES_TIMEOUT_MS`          | `30000`     | US-16 🟡 (US-xx) |
 | NFR14    | Aggregate run time budget per session    | sync-service       | `APP_ROOM_LIMITS_AGGREGATE_RUN_BUDGET_MS`         | `0` (none)  | US-63 🔲         |
