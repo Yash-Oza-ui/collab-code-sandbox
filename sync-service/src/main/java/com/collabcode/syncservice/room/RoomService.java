@@ -173,12 +173,13 @@ public class RoomService {
         if (old == null) {
             return null;
         }
-        Room fresh = new Room(RoomIds.generate(), old.getMode(), old.getPreset(),
-                old.getLanguage(), old.getOwnerTokenHash());
-        fresh.setRequiresApproval(old.isRequiresApproval());
-        fresh.getMembers().putAll(old.getMembers());
+        Room fresh = old.withNewId(RoomIds.generate());
         store.put(fresh);
         store.remove(roomId);
+        // Move the run history to the new id (US-52/US-68); the old id is retired.
+        if (runRecordStore != null) {
+            runRecordStore.moveRoom(roomId, fresh.getRoomId());
+        }
         return fresh;
     }
 

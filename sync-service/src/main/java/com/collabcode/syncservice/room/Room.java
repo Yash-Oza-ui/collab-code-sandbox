@@ -75,6 +75,20 @@ public class Room {
     public boolean isRequiresApproval() { return requiresApproval; }
     public void setRequiresApproval(boolean v) { this.requiresApproval = v; }
 
+    /**
+     * A copy of this room under a new id (US-28 regenerate-link, V2.18). Carries
+     * every carried-over field — members, the closed and approval flags, the owner
+     * token hash — so a field added later is not silently dropped on regenerate.
+     * The block list is intentionally NOT copied (regenerate clears it, V2.18).
+     */
+    public Room withNewId(String newId) {
+        Room copy = new Room(newId, mode, preset, language, ownerTokenHash);
+        copy.closed = this.closed;
+        copy.requiresApproval = this.requiresApproval;
+        copy.members.putAll(this.members);
+        return copy;
+    }
+
     // ----- Block list (US-28, V2.18) -----
 
     /** A removed member, kept so the Host can list and re-admit them (V2.18). */

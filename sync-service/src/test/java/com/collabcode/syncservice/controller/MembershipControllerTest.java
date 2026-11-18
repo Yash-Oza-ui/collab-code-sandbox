@@ -66,6 +66,46 @@ class MembershipControllerTest {
         return new String[]{b.get("room_id").asText(), b.get("owner_token").asText()};
     }
 
+    private String[] createOpenRoom() throws Exception {
+        HttpRequest req = HttpRequest.newBuilder()
+                .uri(URI.create(base() + "/v1/rooms"))
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString("{\"mode\":\"open\",\"language\":\"python\"}"))
+                .build();
+        JsonNode b = om.readTree(http.send(req, HttpResponse.BodyHandlers.ofString()).body());
+        return new String[]{b.get("room_id").asText(), b.get("owner_token").asText()};
+    }
+
+    /** Request a module as the Host and approve it; returns the module_id. */
+    private String requestAndApproveModule(String roomId, String hostSession, String ownerToken, String name) throws Exception {
+        HttpRequest reqReq = HttpRequest.newBuilder()
+                .uri(URI.create(base() + "/v1/rooms/" + roomId + "/modules"))
+                .header("Content-Type", "application/json")
+                .header("X-Session-Id", hostSession)
+                .POST(HttpRequest.BodyPublishers.ofString("{\"name\":\"" + name + "\"}"))
+                .build();
+        String moduleId = om.readTree(http.send(reqReq, HttpResponse.BodyHandlers.ofString()).body())
+                .get("module_id").asText();
+        HttpRequest approveReq = HttpRequest.newBuilder()
+                .uri(URI.create(base() + "/v1/rooms/" + roomId + "/modules/" + moduleId + "/approve"))
+                .header("Content-Type", "application/json")
+                .header("X-Session-Id", hostSession)
+                .header("X-Owner-Token", ownerToken)
+                .POST(HttpRequest.BodyPublishers.ofString("{}"))
+                .build();
+        http.send(approveReq, HttpResponse.BodyHandlers.ofString());
+        return moduleId;
+    }
+
+    private HttpResponse<String> getModules(String roomId, String sessionId) throws Exception {
+        HttpRequest req = HttpRequest.newBuilder()
+                .uri(URI.create(base() + "/v1/rooms/" + roomId + "/modules"))
+                .header("X-Session-Id", sessionId)
+                .GET()
+                .build();
+        return http.send(req, HttpResponse.BodyHandlers.ofString());
+    }
+
     private HttpResponse<String> post(String path, String sessionId, String ownerToken) throws Exception {
         HttpRequest.Builder rb = HttpRequest.newBuilder()
                 .uri(URI.create(base() + path))
@@ -316,6 +356,63 @@ class MembershipControllerTest {
         CloseStatus close = guest.awaitClose(3, TimeUnit.SECONDS);
         assertThat(close).isNotNull();
         assertThat(close.getCode()).isEqualTo(4411);
+    }
+
+    @Test
+    void remove_broadcastsUpdatedRosterToRemaining() throws Exception {
+        String[] room = createPairRoom();
+        Ws host = Ws.connect(port, "/ws/rooms/" + room[0] + "?session_id=" + HOST);
+        host.sendText("{\"type\":\"join\",\"display_name\":\"Host\",\"owner_token\":\"" + room[1] + "\"}");
+        host.awaitText("joined", 3, TimeUnit.SECONDS);
+        Ws guest = Ws.connect(port, "/ws/rooms/" + room[0] + "?session_id=" + GUEST);
+        guest.sendText("{\"type\":\"join\",\"display_name\":\"Lin\"}");
+        String guestId = awaitMemberId(room[0], GUEST);
+
+        post("/v1/rooms/" + room[0] + "/members/" + guestId + "/remove", HOST, room[1]);
+
+        // The Host receives a fresh roster that no longer lists the removed member (V2.18 step 3).
+        String roster = null;
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+        while (System.nanoTime() < deadline) {
+            String r = host.awaitText("roster", 1, TimeUnit.SECONDS);
+            if (r != null && !r.contains("Lin")) { roster = r; break; }
+        }
+        assertThat(roster).as("a roster without the removed member").isNotNull();
+        assertThat(roster).contains("Host");
+        guest.close();
+        host.close();
+    }
+
+    @Test
+    void removedSession_newDocumentSocket_refused4406() throws Exception {
+        String[] room = createPairRoom();
+        roomService.join(room[0], HOST, "Host", room[1]);
+        String guestId = roomService.join(room[0], GUEST, "Lin", null).getMember().getMemberId();
+        post("/v1/rooms/" + room[0] + "/members/" + guestId + "/remove", HOST, room[1]);
+
+        // A removed session is no longer a member, so its document socket is refused 4406 (not joined).
+        Ws doc = Ws.connect(port, "/ws/rooms/" + room[0] + "/docs/main?session_id=" + GUEST);
+        CloseStatus close = doc.awaitClose(3, TimeUnit.SECONDS);
+        assertThat(close).isNotNull();
+        assertThat(close.getCode()).isEqualTo(4406);
+    }
+
+    @Test
+    void regenerate_preservesModuleOwnership() throws Exception {
+        String[] room = createOpenRoom();
+        roomService.join(room[0], HOST, "Host", room[1]);
+        String moduleId = requestAndApproveModule(room[0], HOST, room[1], "solver.py");
+
+        String newId = om.readTree(post("/v1/rooms/" + room[0] + "/regenerate-link", HOST, room[1]).body())
+                .get("room_id").asText();
+
+        // The module survives the move, under the new id, with its owner intact (moveRoom).
+        HttpResponse<String> mods = getModules(newId, HOST);
+        assertThat(mods.statusCode()).isEqualTo(200);
+        JsonNode arr = om.readTree(mods.body());
+        assertThat(arr).hasSize(1);
+        assertThat(arr.get(0).get("module_id").asText()).isEqualTo(moduleId);
+        assertThat(arr.get(0).get("owner_member_id").asText()).isNotBlank();
     }
 
     private String awaitMemberId(String roomId, String sessionId) throws InterruptedException {

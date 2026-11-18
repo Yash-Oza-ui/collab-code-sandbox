@@ -1,5 +1,7 @@
 package com.collabcode.syncservice.room;
 
+import com.collabcode.syncservice.run.RunRecord;
+import com.collabcode.syncservice.run.RunRecordStore;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -154,5 +156,32 @@ class RoomServiceBlockTest {
     @Test
     void regenerateLink_unknownRoom_returnsNull() {
         assertThat(service.regenerateLink("NoSuchRoom0000000000AA")).isNull();
+    }
+
+    @Test
+    void regenerateLink_closedRoom_staysClosed_andCarriesFlags() {
+        Room room = pairRoom("secret");
+        room.setRequiresApproval(true);
+        room.close();
+        Room fresh = service.regenerateLink(room.getRoomId());
+        assertThat(fresh.isClosed()).isTrue();            // a closed room is not resurrected (V2.18)
+        assertThat(fresh.isRequiresApproval()).isTrue();  // flags carried via Room.withNewId
+    }
+
+    @Test
+    void regenerateLink_movesRunRecords_toNewIdWithRebuiltRoomId() {
+        RunRecordStore runs = new RunRecordStore();
+        RoomService svc = new RoomService(store, runs);
+        Room room = pairRoom("secret");
+        String oldId = room.getRoomId();
+        runs.record(new RunRecord(oldId, "Ada", "2026-11-18T10:00:00Z", "python",
+                List.of("main.py"), List.of(), "abc123", 12.0, 3.0));
+
+        Room fresh = svc.regenerateLink(oldId);
+
+        assertThat(runs.findByRoom(oldId)).isEmpty();                 // old id purged
+        assertThat(runs.findByRoom(fresh.getRoomId())).hasSize(1);    // moved to the new id
+        assertThat(runs.findByRoom(fresh.getRoomId()).get(0).getRoomId())
+                .isEqualTo(fresh.getRoomId());                        // room_id rebuilt
     }
 }

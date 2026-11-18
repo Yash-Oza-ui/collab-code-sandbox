@@ -3,13 +3,11 @@ package com.collabcode.syncservice.controller;
 import com.collabcode.syncservice.handler.ControlHandler;
 import com.collabcode.syncservice.module.ModuleService;
 import com.collabcode.syncservice.room.Member;
-import com.collabcode.syncservice.room.OwnerTokens;
 import com.collabcode.syncservice.room.Role;
 import com.collabcode.syncservice.room.Room;
 import com.collabcode.syncservice.room.RoomMessages;
 import com.collabcode.syncservice.room.RoomRegistry;
 import com.collabcode.syncservice.room.RoomService;
-import com.collabcode.syncservice.room.RoomStore;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -30,7 +28,6 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.regex.Pattern;
 
 /**
  * Remove, re-admit and regenerate-link (US-28, V2.18; FR9.6, CR04).
@@ -50,8 +47,9 @@ import java.util.regex.Pattern;
  *       {@code 4411}.</li>
  * </ul>
  *
- * <p>Every action is Host-only (a valid {@code X-Owner-Token}, V2.6); the private
- * {@code session_id} is never put in a URL, body, log or broadcast (V2.3).
+ * <p>Every action is Host-only (a valid {@code X-Owner-Token}, V2.6) via the
+ * shared {@link HostGuard}; the private {@code session_id} is never put in a URL,
+ * body, log or broadcast (V2.3).
  */
 @RestController
 @RequestMapping("/v1")
@@ -59,22 +57,18 @@ public class MembershipController {
 
     private static final Logger log = LoggerFactory.getLogger(MembershipController.class);
 
-    /** session_id is a client-generated UUID v4 (contract §3.3). */
-    private static final Pattern UUID_V4 = Pattern.compile(
-            "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$");
-
-    private final RoomStore store;
     private final RoomService roomService;
     private final RoomRegistry registry;
     private final ModuleService moduleService;
+    private final HostGuard hostGuard;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
-    public MembershipController(RoomStore store, RoomService roomService,
-                                RoomRegistry registry, ModuleService moduleService) {
-        this.store = store;
+    public MembershipController(RoomService roomService, RoomRegistry registry,
+                                ModuleService moduleService, HostGuard hostGuard) {
         this.roomService = roomService;
         this.registry = registry;
         this.moduleService = moduleService;
+        this.hostGuard = hostGuard;
     }
 
     // -----------------------------------------------------------------------
@@ -88,22 +82,20 @@ public class MembershipController {
             @RequestHeader(value = "X-Session-Id", required = false) String sessionId,
             @RequestHeader(value = "X-Owner-Token", required = false) String ownerToken) {
 
-        Room[] rh = new Room[1];
-        ResponseEntity<Map<String, Object>> bad = hostGuard(roomId, sessionId, ownerToken, rh);
-        if (bad != null) {
-            return bad;
+        HostGuard.Result g = hostGuard.requireHost(roomId, sessionId, ownerToken);
+        if (!g.ok()) {
+            return g.error();
         }
-        Room room = rh[0];
+        Room room = g.room();
 
         // The target must exist, and a Host cannot be removed (this also covers the
         // Host removing themselves — the Host is the only Host, V2.18 rule 1).
         Member target = room.getMembers().get(memberId);
         if (target == null) {
-            return error(HttpStatus.NOT_FOUND, "MEMBER_NOT_FOUND", "Member not found in this room.");
+            return HostGuard.error(HttpStatus.NOT_FOUND, "MEMBER_NOT_FOUND", "Member not found in this room.");
         }
         if (target.getRole() == Role.HOST) {
-            return error(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_REQUEST",
-                    "A Host cannot be removed.");
+            return HostGuard.error(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_REQUEST", "A Host cannot be removed.");
         }
 
         // Records the block FIRST (so a racing reconnect is already refused), then
@@ -111,7 +103,7 @@ public class MembershipController {
         Member removed = roomService.removeMember(roomId, memberId);
         if (removed == null) {
             // Removed by another request between the lookup and here.
-            return error(HttpStatus.NOT_FOUND, "MEMBER_NOT_FOUND", "Member not found in this room.");
+            return HostGuard.error(HttpStatus.NOT_FOUND, "MEMBER_NOT_FOUND", "Member not found in this room.");
         }
 
         // Close the removed member's control AND document sockets (4403, V2.3/V2.5),
@@ -135,15 +127,14 @@ public class MembershipController {
             @RequestHeader(value = "X-Session-Id", required = false) String sessionId,
             @RequestHeader(value = "X-Owner-Token", required = false) String ownerToken) {
 
-        Room[] rh = new Room[1];
-        ResponseEntity<Map<String, Object>> bad = hostGuard(roomId, sessionId, ownerToken, rh);
-        if (bad != null) {
-            return bad;
+        HostGuard.Result g = hostGuard.requireHost(roomId, sessionId, ownerToken);
+        if (!g.ok()) {
+            return g.error();
         }
 
         // member_id must be one currently in the block list (V2.18 rule 1).
         if (!roomService.readmit(roomId, memberId)) {
-            return error(HttpStatus.NOT_FOUND, "MEMBER_NOT_FOUND",
+            return HostGuard.error(HttpStatus.NOT_FOUND, "MEMBER_NOT_FOUND",
                     "That member is not in this room's block list.");
         }
         log.info("Membership: re-admitted member={} (block lifted)", memberId);
@@ -160,10 +151,9 @@ public class MembershipController {
             @RequestHeader(value = "X-Session-Id", required = false) String sessionId,
             @RequestHeader(value = "X-Owner-Token", required = false) String ownerToken) {
 
-        Room[] rh = new Room[1];
-        ResponseEntity<Map<String, Object>> bad = hostGuard(roomId, sessionId, ownerToken, rh);
-        if (bad != null) {
-            return bad;
+        HostGuard.Result g = hostGuard.requireHost(roomId, sessionId, ownerToken);
+        if (!g.ok()) {
+            return g.error();
         }
 
         List<Map<String, Object>> list = new ArrayList<>();
@@ -189,15 +179,14 @@ public class MembershipController {
             @RequestHeader(value = "X-Session-Id", required = false) String sessionId,
             @RequestHeader(value = "X-Owner-Token", required = false) String ownerToken) {
 
-        Room[] rh = new Room[1];
-        ResponseEntity<Map<String, Object>> bad = hostGuard(roomId, sessionId, ownerToken, rh);
-        if (bad != null) {
-            return bad;
+        HostGuard.Result g = hostGuard.requireHost(roomId, sessionId, ownerToken);
+        if (!g.ok()) {
+            return g.error();
         }
 
         Room fresh = roomService.regenerateLink(roomId);
         if (fresh == null) {
-            return error(HttpStatus.NOT_FOUND, "ROOM_NOT_FOUND", "Room not found.");
+            return HostGuard.error(HttpStatus.NOT_FOUND, "ROOM_NOT_FOUND", "Room not found.");
         }
         // Re-key the room's modules (ownership/writers preserved).
         moduleService.moveRoom(roomId, fresh.getRoomId());
@@ -212,32 +201,6 @@ public class MembershipController {
     // -----------------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------------
-
-    /**
-     * Shared Host-only guard, in the V2.6 order: a well-formed caller session id
-     * (422), an existing room (404), the caller having joined it (404), and a valid
-     * owner token (403). Returns the error response, or {@code null} and sets
-     * {@code roomOut[0]} when the caller is the Host.
-     */
-    private ResponseEntity<Map<String, Object>> hostGuard(String roomId, String sessionId,
-                                                          String ownerToken, Room[] roomOut) {
-        if (sessionId == null || !UUID_V4.matcher(sessionId).matches()) {
-            return error(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_REQUEST",
-                    "Header 'X-Session-Id' must be a UUID.");
-        }
-        Room room = store.get(roomId);
-        if (room == null) {
-            return error(HttpStatus.NOT_FOUND, "ROOM_NOT_FOUND", "Room not found.");
-        }
-        if (roomService.findMemberBySession(roomId, sessionId) == null) {
-            return error(HttpStatus.NOT_FOUND, "SESSION_NOT_FOUND", "You are not in this room.");
-        }
-        if (!OwnerTokens.matches(ownerToken, room.getOwnerTokenHash())) {
-            return error(HttpStatus.FORBIDDEN, "NOT_OWNER", "Missing or invalid owner token.");
-        }
-        roomOut[0] = room;
-        return null;
-    }
 
     private void closeSessions(List<WebSocketSession> sessions, int code, String reason) {
         for (WebSocketSession s : sessions) {
@@ -277,18 +240,5 @@ public class MembershipController {
         body.put(idKey, idValue);
         body.put("status", status);
         return body;
-    }
-
-    private ResponseEntity<Map<String, Object>> error(HttpStatus status, String code, String message) {
-        Map<String, Object> error = new LinkedHashMap<>();
-        error.put("code", code);
-        error.put("message", message);
-        error.put("retry_after_seconds", null);
-
-        Map<String, Object> body = new LinkedHashMap<>();
-        body.put("request_id", null);
-        body.put("error", error);
-
-        return ResponseEntity.status(status).body(body);
     }
 }

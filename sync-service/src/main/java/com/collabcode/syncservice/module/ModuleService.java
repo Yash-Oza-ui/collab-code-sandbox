@@ -83,7 +83,12 @@ public class ModuleService {
     public synchronized void moveRoom(String oldRoomId, String newRoomId) {
         Map<String, ModuleRecord> modules = byRoom.remove(oldRoomId);
         if (modules != null) {
-            byRoom.put(newRoomId, modules);
+            // Merge rather than overwrite: if a module was created on the new id in
+            // the gap before this runs, keep it as well as the moved ones (US-28).
+            byRoom.merge(newRoomId, modules, (existing, incoming) -> {
+                existing.putAll(incoming);
+                return existing;
+            });
         }
     }
 
