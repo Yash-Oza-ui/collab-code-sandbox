@@ -12,6 +12,7 @@ from typing import Any, Optional
 from app.llm import (
     AIDisabledError,
     ConsentMissingError,
+    CostCapReachedError,
     LLMProviderError,
     LLMRateLimitError,
     LLMTimeoutError,
@@ -189,6 +190,17 @@ async def run_rule_based_analysis_with_ai_fallback(
             ai_step = {
                 "status": "skipped",
                 "error_code": "AI_DISABLED",
+                "suggested_fix": None,
+                "verified": False,
+                "verified_speedup_pct": None,
+            }
+        except CostCapReachedError:
+            if reraise_ai_errors:
+                raise
+            record_fallback(room_id)
+            ai_step = {
+                "status": "skipped",
+                "error_code": "COST_CAP_REACHED",
                 "suggested_fix": None,
                 "verified": False,
                 "verified_speedup_pct": None,
