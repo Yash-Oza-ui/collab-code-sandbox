@@ -138,7 +138,8 @@ class DockerRunnerResourceLimitsTest {
         ExecutionResult result = runner.execute(spec);
 
         // It either catches the BlockingIOError / OSError when pids limit is reached, or is terminated
-        assertNotEquals(0, result.getExitCode() == 0 && !result.getStdout().contains("FORK_BLOCKED") ? 1 : 0,
+        assertTrue(
+                result.getExitCode() != 0 || result.getStdout().contains("FORK_BLOCKED"),
                 "Fork bomb should be contained and not run indefinitely");
     }
 

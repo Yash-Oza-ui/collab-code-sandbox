@@ -383,8 +383,59 @@ Retry-After: 5
 ```
 
 > **Important (FR16 v2):** repeated runs, including those triggered by
-> automated batch features, count toward the same limit and receive the same
-> refusal. Never add a second gate or bypass this one.
+> automated batch features via `POST /internal/runs`, count toward the same
+> limit and receive the same refusal. Never add a second gate or bypass this one.
+
+---
+
+## Repeated-run budget & internal run endpoint (NFR14, CR10, US-64, T-18 Decision 7)
+
+Features that perform multiple runs (complexity measurement, generated-test batches,
+sanitizer checks) request executions through `POST /internal/runs` authenticated with
+`X-Internal-Token: ${INTERNAL_API_TOKEN}`. Internal runs are **never** broadcast as
+user-visible `run-result` messages.
+
+### How it works
+
+- Each `POST /internal/runs` request gets its own per-request `RunBudget` instance
+  from `RunBudgetFactory` (never a global counter).
+- Before starting the next run, `RunBudget` checks both configured limits:
+  1. Runs-per-request cap (`app.execution.limits.max-runs-per-request`)
+  2. Aggregate execution time budget (`app.execution.limits.aggregate-time-budget-ms`)
+- Every accepted run goes through the **same** `RunQueueGate` (FR16, US-11) and the
+  **same** `CodeRunner` (per-run 5 s wall-clock limit, 128 MB memory limit, container
+  isolation — NFR3, NFR4).
+- When either limit is reached, the next run is refused before starting a container with
+  HTTP `429 Too Many Requests`, `Retry-After` header, and `RUN_BUDGET_EXCEEDED`. Any runs
+  already completed before the limit was hit are preserved on the budget/exception and not lost.
+
+### Configuration (`application.yml`, DR3)
+
+| Key                                               | Default | Notes                                                          |
+|---------------------------------------------------|---------|----------------------------------------------------------------|
+| `app.execution.limits.aggregate-time-budget-ms`   | `20000` | Per-request aggregate wall-clock budget (ms, NFR14)            |
+| `app.execution.limits.max-runs-per-request`       | `10`    | Maximum number of runs allowed per repeated-run request (NFR14)|
+| `app.execution.limits.budget-retry-after-seconds` | `30`    | Sent in `Retry-After` and `error.retry_after_seconds` on 429   |
+
+### `RUN_BUDGET_EXCEEDED` error shape (`docs/examples/v2-error-run-budget-exceeded.json`)
+
+```http
+HTTP 429 Too Many Requests
+Retry-After: 30
+
+{
+  "request_id": "<uuid echoed from request>",
+  "error": {
+    "code": "RUN_BUDGET_EXCEEDED",
+    "message": "Aggregate repeated-run execution budget of 20000ms exceeded (NFR14).",
+    "reason": "aggregate_time_budget",
+    "retry_after_seconds": 30
+  }
+}
+```
+
+`error.reason` is `"aggregate_time_budget"` when the aggregate time budget is hit, or
+`"max_runs_per_request"` when the runs-per-request cap is hit.
 
 ---
 
@@ -492,6 +543,9 @@ They are **never hard-coded** in Java source (DR3). To tune limits per host or e
 | `max-request-body-bytes`   | 1 048 576     | T-06 §2 / DR5| Maximum size of a single run request body (1 MiB).                   |
 | `max-queue-length`         | 10            | FR16 / US-11 | Max concurrent and waiting runs before refusing new runs with 503.   |
 | `queue-retry-after-seconds`| 5             | FR16 / US-11 | Seconds sent in `Retry-After` header and error body on queue full.   |
+| `aggregate-time-budget-ms` | 20 000        | NFR14 / US-64| Aggregate wall-clock time budget per repeated-run request (ms).      |
+| `max-runs-per-request`     | 10            | NFR14 / US-64| Maximum runs allowed per repeated-run request.                       |
+| `budget-retry-after-seconds`| 30           | NFR14 / US-64| Seconds sent in `Retry-After` header and error body on 429 budget hit.|
 
 > **Per-Host Configuration (DR3 / US-16):**
 > Every limit listed above is configurable per deployment host via environment variables

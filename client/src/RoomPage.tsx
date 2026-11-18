@@ -47,6 +47,8 @@ export interface RoomPageProps {
    * In Open mode, must be a valid registered module_id (US-05 / T-17 V2.5).
    */
   docId?: string
+  /** Other registered Open-mode Yjs documents to keep synchronized while inactive. */
+  moduleDocs?: ReadonlyMap<string, Y.Doc>
   /**
    * Optional resolver function to determine document ID from joined message in Open mode.
    */
@@ -66,6 +68,15 @@ export interface RoomPageProps {
 
 export type RoomJoinStatus = 'prompt' | 'joining' | 'joined' | 'refused' | 'error'
 
+function readOwnerToken(roomId: string): string | undefined {
+  try {
+    return localStorage.getItem(ownerTokenKey(roomId)) || undefined
+  } catch {
+    // Storage access may be disabled. The join can proceed without a token.
+    return undefined
+  }
+}
+
 // Reads the room id from the URL (T-06 section 3.2: /room/{room_id}).
 // Manages the Y.Doc lifecycle inside effect setup/cleanup (T-01).
 // Manages the Yjs Awareness lifecycle and user presence colour assignment (US-05 / FR14).
@@ -75,6 +86,7 @@ export default function RoomPage(props: RoomPageProps = {}) {
     awarenessRef: externalAwarenessRef,
     onDisplayNameAccepted,
     docId: propDocId,
+    moduleDocs,
     resolveDocId,
     wsOptions,
   } = props
@@ -86,10 +98,12 @@ export default function RoomPage(props: RoomPageProps = {}) {
   const [joinStatus, setJoinStatus] = useState<RoomJoinStatus>('prompt')
   const [serverError, setServerError] = useState<string | null>(null)
   const [docError, setDocError] = useState<string | null>(null)
+  const [reconnecting, setReconnecting] = useState(false)
   const [pendingName, setPendingName] = useState<string | null>(null)
   const [currentLanguage, setCurrentLanguage] = useState<SupportedLanguage>('python')
   const [runOutput, setRunOutput] = useState<RunResponseData | null>(null)
   // Role from the server's `joined` or `roster` message (T-10 Host badge / US-27 Observer mode)
+  const [roomMode, setRoomMode] = useState<{ mode: string; detail?: string } | null>(null)
   const [role, setRole] = useState<string | null>(null)
   const [myMemberId, setMyMemberId] = useState<string | null>(null)
   const [roster, setRoster] = useState<RosterMember[]>([])
@@ -103,6 +117,8 @@ export default function RoomPage(props: RoomPageProps = {}) {
   const awarenessInstanceRef = useRef<Awareness | null>(null)
   const connRef = useRef<AwarenessWsConnection | null>(null)
   const pendingNameRef = useRef<string | null>(null)
+  // A room-specific name is safe to retain; the session ID remains stable separately.
+  const resumeNameKey = roomId ? `collab_room_name:${roomId}:${wsOptions?.sessionId ?? getCollabSessionId()}` : null
   const joinStatusRef = useRef<RoomJoinStatus>('prompt')
   const onDisplayNameAcceptedRef = useRef(onDisplayNameAccepted)
   const bindingRef = useRef<MonacoBinding | null>(null)
@@ -190,16 +206,28 @@ export default function RoomPage(props: RoomPageProps = {}) {
         roomId,
         doc,
         docId: propDocId,
+        moduleDocs,
         resolveDocId,
         awareness,
         syncWsUrl: wsOptions?.syncWsUrl,
         sessionId,
         WebSocketClass: wsOptions?.WebSocketClass,
         joinTimeoutMs: wsOptions?.joinTimeoutMs,
+        onReconnecting: () => setReconnecting(true),
+        onReconnected: () => {
+          setReconnecting(false)
+          setDocError(null)
+        },
         onJoined: (joined) => {
           myMemberIdRef.current = joined.member_id ?? null
           setMyMemberId(joined.member_id ?? null)
           setRole(joined.role)
+          // V2.3 joined carries mode and preset, but no Open workspace language.
+          // Do not infer it from creation state or the shared URL.
+          setRoomMode({
+            mode: joined.mode,
+            detail: joined.mode === 'pair' ? joined.preset : undefined,
+          })
           const name = pendingNameRef.current
           if (!name) return
 
@@ -213,6 +241,9 @@ export default function RoomPage(props: RoomPageProps = {}) {
           setServerError(null)
           setJoinStatus('joined')
           joinStatusRef.current = 'joined'
+          if (resumeNameKey) {
+            try { sessionStorage.setItem(resumeNameKey, name) } catch { /* storage disabled */ }
+          }
           onDisplayNameAcceptedRef.current?.(name, color)
         },
         onRoster: (roster) => {
@@ -237,8 +268,12 @@ export default function RoomPage(props: RoomPageProps = {}) {
             }
           }
           setServerError(message)
+          setReconnecting(false)
           setJoinStatus('refused')
           joinStatusRef.current = 'refused'
+          if (resumeNameKey) {
+            try { sessionStorage.removeItem(resumeNameKey) } catch { /* storage disabled */ }
+          }
         },
         onJoinTimeout: () => {
           if (joinStatusRef.current === 'joining') {
@@ -255,6 +290,19 @@ export default function RoomPage(props: RoomPageProps = {}) {
           }
         },
         onClose: (event) => {
+          if ([4403, 4404, 4410].includes(event.code)) {
+            setReconnecting(false)
+            setServerError(
+              event.code === 4403
+                ? 'Access to this room was denied.'
+                : event.code === 4404
+                  ? 'Room not found (4404). Please verify the room link.'
+                  : 'This room has been closed.',
+            )
+            setJoinStatus('error')
+            joinStatusRef.current = 'error'
+            return
+          }
           if (joinStatusRef.current === 'refused') {
             // Keep the refusal message intact
             return
@@ -304,6 +352,25 @@ export default function RoomPage(props: RoomPageProps = {}) {
         },
       })
       connRef.current = conn
+      // A refresh creates a new document, but must rejoin with the same identity
+      // before opening document sockets. Never restore a name for another room.
+      if (resumeNameKey && !pendingNameRef.current) {
+        let savedName: string | null = null
+        try {
+          savedName = sessionStorage.getItem(resumeNameKey)
+        } catch {
+          // Storage may be disabled; the manual join flow remains available.
+        }
+
+        if (savedName) {
+          const ownerToken = readOwnerToken(roomId)
+          pendingNameRef.current = savedName
+          setPendingName(savedName)
+          setJoinStatus('joining')
+          joinStatusRef.current = 'joining'
+          conn.join(savedName, ownerToken)
+        }
+      }
       wsCleanup = () => {
         conn.destroy()
         if (connRef.current === conn) {
@@ -331,7 +398,7 @@ export default function RoomPage(props: RoomPageProps = {}) {
         delete (window as unknown as { awareness?: Awareness }).awareness
       }
     }
-  }, [roomId, isInvalidRoomId, docRef, externalAwarenessRef, propDocId, resolveDocId, wsOptions, showRunResult])
+  }, [roomId, isInvalidRoomId, docRef, externalAwarenessRef, propDocId, moduleDocs, resolveDocId, wsOptions, showRunResult, resumeNameKey])
 
   // Keep presence updated in awareness whenever displayName and userColor are set or change
   useEffect(() => {
@@ -350,17 +417,7 @@ export default function RoomPage(props: RoomPageProps = {}) {
     setJoinStatus('joining')
     joinStatusRef.current = 'joining'
 
-    let ownerToken: string | undefined
-    if (roomId && typeof localStorage !== 'undefined') {
-      try {
-        const stored = localStorage.getItem(ownerTokenKey(roomId))
-        if (stored) ownerToken = stored
-      } catch {
-        // ignore localStorage access issues
-      }
-    }
-
-    connRef.current?.join(name, ownerToken)
+    connRef.current?.join(name, roomId ? readOwnerToken(roomId) : undefined)
   }
 
   async function handleMakeObserver(member: RosterMember) {
@@ -457,8 +514,14 @@ export default function RoomPage(props: RoomPageProps = {}) {
 
   return (
     <div className="room-page">
+      {reconnecting && <div role="status" aria-live="polite">Reconnecting to room...</div>}
       <header className="room-header">
         <span>Room: {roomId}</span>
+        {roomMode && (
+          <span className="room-mode-badge" data-testid="room-mode-badge">
+            {roomMode.mode === 'pair' ? 'Pair' : 'Open'}{roomMode.detail ? ` · ${roomMode.detail}` : ''}
+          </span>
+        )}
         {displayName && (
           <>
             <span className="room-header-separator" aria-hidden="true"> · </span>
