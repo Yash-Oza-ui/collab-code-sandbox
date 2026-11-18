@@ -114,30 +114,14 @@ public class FakeCodeRunner implements CodeRunner {
             );
         }
 
-        // Case 3: stdin echoing.
-        if (stdin != null && !stdin.isEmpty()) {
-            return new ExecutionResult(
-                    stdin.toUpperCase(Locale.ROOT) + "\n",
-                    "",
-                    0,
-                    10.0,
-                    4.0,
-                    false,
-                    false,
-                    null,
-                    false,
-                    null,
-                    compileTime,
-                    null
-            );
-        }
-
-        // Case 3.5: timeout / infinite loop simulation (US-13)
+        // Combine file content for deterministic marker checks.
         String code = spec.getFiles() == null ? "" : spec.getFiles().stream()
+                .filter(file -> file != null)
                 .map(RunFile::getContent)
                 .filter(c -> c != null)
                 .collect(java.util.stream.Collectors.joining("\n"));
 
+        // Case 3: timeout / infinite loop simulation (US-13, NFR4.1)
         if (code.contains("infinite_loop") || code.contains("while True: pass") || code.contains("while true")) {
             return new ExecutionResult(
                     "",
@@ -155,7 +139,7 @@ public class FakeCodeRunner implements CodeRunner {
             );
         }
 
-        // Case 3.6: output flood simulation (US-13)
+        // Case 3.5: output flood simulation (US-13)
         if (code.contains("output_flood")) {
             return new ExecutionResult(
                     "A".repeat(1024),
@@ -173,22 +157,46 @@ public class FakeCodeRunner implements CodeRunner {
             );
         }
 
-        // Case 4: simulate bounded in-flight execution for testing (FR16 / US-11)
-        if (code.toLowerCase().contains("sleep") || code.toLowerCase().contains("delay")) {
+        // Case 4: simulate bounded in-flight execution for testing (FR16 / US-11 / US-64)
+        double simulatedTimeMs = 15.0;
+        if (code.toLowerCase(Locale.ROOT).contains("sleep") || code.toLowerCase(Locale.ROOT).contains("delay")) {
             long delayMs = 3000;
-            java.util.regex.Matcher m = java.util.regex.Pattern.compile("(?:sleep|delay)[\\s_\\(]+(\\d+)").matcher(code.toLowerCase());
+            java.util.regex.Matcher m = java.util.regex.Pattern.compile("(?:sleep|delay)[\\s_\\(]+(\\d+)")
+                    .matcher(code.toLowerCase(Locale.ROOT));
             if (m.find()) {
                 try {
                     long requested = Long.parseLong(m.group(1));
                     delayMs = requested <= 10 ? requested * 1000 : requested;
-                    delayMs = Math.min(Math.max(delayMs, 500), 5000);
+                    delayMs = Math.min(Math.max(delayMs, 50), 5000);
                 } catch (NumberFormatException ignored) {}
             }
+            long startNanos = System.nanoTime();
             try {
                 Thread.sleep(delayMs);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
+            double elapsedMs = (System.nanoTime() - startNanos) / 1_000_000.0;
+            simulatedTimeMs = Math.max(delayMs, elapsedMs);
+        }
+
+        // Case 4.5: stdin echoing.
+        if (stdin != null && !stdin.isEmpty()) {
+            double timeMs = (simulatedTimeMs > 15.0) ? simulatedTimeMs : 10.0;
+            return new ExecutionResult(
+                    stdin.toUpperCase(Locale.ROOT) + "\n",
+                    "",
+                    0,
+                    timeMs,
+                    4.0,
+                    false,
+                    false,
+                    null,
+                    false,
+                    null,
+                    compileTime,
+                    null
+            );
         }
 
         // Case 5: normal success
@@ -196,7 +204,7 @@ public class FakeCodeRunner implements CodeRunner {
                 "Hello from " + language + "!\n",
                 "",
                 0,
-                15.0,
+                simulatedTimeMs,
                 4.2,
                 false,
                 false,

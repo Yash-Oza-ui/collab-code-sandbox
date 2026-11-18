@@ -40,6 +40,15 @@ public class ExecutionLimitsProperties {
     /** FR16 – seconds the client is told to wait after a QUEUE_FULL refusal (T-06 section 7.1). */
     private int queueRetryAfterSeconds;
 
+    /** NFR14 / US-64 – aggregate wall-clock time budget per repeated-run request, in milliseconds. */
+    private long aggregateTimeBudgetMs;
+
+    /** NFR14 / US-64 – maximum number of runs allowed per repeated-run request. */
+    private int maxRunsPerRequest;
+
+    /** NFR14 / US-64 – seconds sent in Retry-After and error.retry_after_seconds on RUN_BUDGET_EXCEEDED. */
+    private int budgetRetryAfterSeconds;
+
     // ----- getters and setters -----
 
     public int getWallTimeSeconds()            { return wallTimeSeconds; }
@@ -65,4 +74,13 @@ public class ExecutionLimitsProperties {
 
     public int getQueueRetryAfterSeconds()     { return queueRetryAfterSeconds; }
     public void setQueueRetryAfterSeconds(int v) { this.queueRetryAfterSeconds = v; }
+
+    public long getAggregateTimeBudgetMs()     { return aggregateTimeBudgetMs; }
+    public void setAggregateTimeBudgetMs(long v) { this.aggregateTimeBudgetMs = v; }
+
+    public int getMaxRunsPerRequest()          { return maxRunsPerRequest; }
+    public void setMaxRunsPerRequest(int v)    { this.maxRunsPerRequest = v; }
+
+    public int getBudgetRetryAfterSeconds()    { return budgetRetryAfterSeconds; }
+    public void setBudgetRetryAfterSeconds(int v) { this.budgetRetryAfterSeconds = v; }
 }
