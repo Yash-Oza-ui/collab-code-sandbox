@@ -18,14 +18,16 @@ child = None
 timed_out = False
 termination_requested = False
 started_ns = None
+ended_ns = None
 
 
 def drop_privileges():
-    # Reset oom_score_adj for child so child is prioritized for OOM kill over supervisor
+    # Make the child the preferred OOM victim. Raising oom_score_adj never needs a
+    # capability (lowering it would need CAP_SYS_RESOURCE, which the container drops).
     try:
         with open("/proc/self/oom_score_adj", "w") as f:
-            f.write("0")
-    except Exception:
+            f.write("1000")
+    except OSError:
         pass
 
     try:
@@ -73,7 +75,8 @@ def peak_memory_bytes():
 
 
 def write_metrics():
-    elapsed_ms = 0.0 if started_ns is None else (time.monotonic_ns() - started_ns) / 1_000_000.0
+    end = ended_ns if ended_ns is not None else time.monotonic_ns()
+    elapsed_ms = 0.0 if started_ns is None else (end - started_ns) / 1_000_000.0
     peak_bytes = peak_memory_bytes()
     try:
         child_rss_bytes = int(resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss * 1024)
@@ -123,13 +126,6 @@ def handle_termination(_signum, _frame):
     terminate_child()
 
 
-# Protect supervisor from being the primary victim of the kernel OOM killer
-try:
-    with open("/proc/self/oom_score_adj", "w") as f:
-        f.write("-999")
-except Exception:
-    pass
-
 # Ensure /sandbox/metrics is root-only mode 0700
 try:
     os.makedirs("/sandbox/metrics", exist_ok=True)
@@ -155,11 +151,13 @@ try:
 
     try:
         child.wait(timeout=wall_time_seconds)
+        ended_ns = time.monotonic_ns()
         if child.returncode is not None and child.returncode < 0:
             exit_code = 128 + (-child.returncode)
         else:
             exit_code = child.returncode if child.returncode is not None else 125
     except subprocess.TimeoutExpired:
+        ended_ns = time.monotonic_ns()
         timed_out = True
         terminate_child()
         exit_code = 124

@@ -185,12 +185,17 @@ the container; it does not use `FakeCodeRunner` values.
 ### Failed runs and OOM handling
 - Run timing and peak memory are recorded for successful runs, non-zero exits,
   syntax errors (`compile_error`), timeouts, and OOM kills.
-- **No Fabricated OOM Metrics:** When an OOM kill occurs, the supervisor's negative
-  `oom_score_adj` ensures it survives child termination to record the actual monotonic
-  execution time and cgroup peak memory attained before the kill. If the container
-  was terminated abruptly before metrics could be flushed, `execution_time_ms` and
-  `peak_memory_mb` report `0.0` (unavailable), rather than fabricating the configured
-  memory limit or total container elapsed lifetime.
+- **OOM kills:** the supervisor raises the child's `oom_score_adj` to 1000, which biases the
+  kernel's OOM victim selection toward the submitted process and away from the supervisor.
+  This is a bias, not a guarantee: the kernel chooses the victim by its own scoring, so the
+  supervisor could still be killed in rare cases. The supervisor cannot lower its own score
+  because the container drops `CAP_SYS_RESOURCE`. When the supervisor survives, it records the
+  real monotonic execution time and cgroup peak reached before the kill. If the container
+  ended before the metrics file was written (for example the supervisor was killed),
+  `execution_time_ms` and `peak_memory_mb` report `0.0` (unavailable) rather than a made-up
+  value.
+- **Timeouts:** the clock stops when the wall-time limit fires, so a timed-out run reports
+  about the configured limit; the short SIGTERM-to-SIGKILL grace period is not counted.
 - Python has no separate compile stage, so `compile_time_ms` remains `null`;
   `execution_time_ms` is still populated for syntax errors because the Python
   interpreter must start and parse the submitted file.

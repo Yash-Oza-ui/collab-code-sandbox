@@ -174,10 +174,8 @@ public class DockerRunner implements CodeRunner {
 
             exitCode = process.exitValue();
             oomKilled = inspectOomKilled(containerName);
-            copyRunMetrics(containerName, workspace);
             RunMetrics metrics = readRunMetrics(workspace);
             timedOut = metrics.timedOut();
-
             if (oomKilled) {
                 exitCode = 137;
             } else if (timedOut) {
@@ -528,50 +526,12 @@ public class DockerRunner implements CodeRunner {
         return "non_zero_exit";
     }
 
-    private void copyRunMetrics(String containerName, Path workspace) {
-        if (workspace == null) {
-            return;
-        }
-
-        Path directMetrics = workspace.resolve("metrics").resolve("run-metrics.properties");
-        if (Files.exists(directMetrics)) {
-            return;
-        }
-
-        Process copy = null;
-        try {
-            copy = new ProcessBuilder(
-                    "docker",
-                    "cp",
-                    containerName + ":/sandbox/metrics/run-metrics.properties",
-                    workspace.resolve("run-metrics.properties").toString()
-            )
-                    .redirectOutput(ProcessBuilder.Redirect.DISCARD)
-                    .redirectError(ProcessBuilder.Redirect.DISCARD)
-                    .start();
-
-            if (!copy.waitFor(5, TimeUnit.SECONDS)) {
-                copy.destroyForcibly();
-            }
-        } catch (InterruptedException e) {
-            if (copy != null && copy.isAlive()) {
-                copy.destroyForcibly();
-            }
-            Thread.currentThread().interrupt();
-        } catch (IOException ignored) {
-            // The container may have been removed by Docker after a daemon failure.
-        }
-    }
-
     RunMetrics readRunMetrics(Path workspace) {
         if (workspace == null) {
             return new RunMetrics(0.0, 0.0, false);
         }
 
         Path metricsFile = workspace.resolve("metrics").resolve("run-metrics.properties");
-        if (!Files.exists(metricsFile)) {
-            metricsFile = workspace.resolve("run-metrics.properties");
-        }
 
         Properties properties = new Properties();
         try (InputStream input = Files.newInputStream(metricsFile)) {

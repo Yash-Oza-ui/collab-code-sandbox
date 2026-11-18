@@ -129,4 +129,25 @@ assert r["compile_time_ms"] is None, f"expected compile_time_ms None, got {r['co
 print(f"PASS  syntax-err-metrics {r['execution_time_ms']:.1f} ms, {r['peak_memory_mb']:.1f} MB, failure compile_error")
 PY
 
+# A timed-out run keeps its metrics and the time is about the wall limit, not limit + kill grace.
+# The supervisor stops its clock when the limit fires, so only timer wake-up delay can add time.
+# The SIGTERM-to-SIGKILL grace period is 500 ms, so a run that wrongly counted it would report
+# about limit + 500 ms. The upper bound (limit + 450 ms) therefore tolerates up to 450 ms of CI
+# scheduling delay and still fails if the grace period is included. Do not raise it further.
+WALL_MS="$(( ${APP_EXECUTION_LIMITS_WALL_TIME_SECONDS:-5} * 1000 ))"
+timeout_result="$(post_run $'import signal\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\nwhile True:\n    pass\n')"
+python3 - "$timeout_result" "$WALL_MS" <<'PY'
+import json, sys
+r = json.loads(sys.argv[1])
+wall_ms = float(sys.argv[2])
+lower, upper = wall_ms - 50.0, wall_ms + 450.0
+assert r["timed_out"] is True, f"expected timed_out true, got {r['timed_out']}"
+assert r["exit_code"] == 124, f"expected exit 124, got {r['exit_code']}"
+assert lower <= r["execution_time_ms"] < upper, (
+    f"timeout time should be in [{lower:.0f}, {upper:.0f}) ms (limit {wall_ms:.0f} ms, "
+    f"excluding the 500 ms kill grace), got {r['execution_time_ms']}")
+assert r["peak_memory_mb"] > 0, f"expected peak_memory_mb > 0, got {r['peak_memory_mb']}"
+print(f"PASS  timeout-metrics    {r['execution_time_ms']:.1f} ms, {r['peak_memory_mb']:.1f} MB, exit {r['exit_code']}")
+PY
+
 echo "US-10 RUN-METRICS TEST PASSED"
