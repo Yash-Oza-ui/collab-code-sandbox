@@ -22,7 +22,7 @@ public class Room {
     private final RoomMode mode;
     private final String preset;
     private final String language;
-    private final String ownerTokenHash;
+    private volatile String ownerTokenHash;
 
     /**
      * The room's AI switch default (FR35.2): off in a Teach/Interview room, on
@@ -66,6 +66,13 @@ public class Room {
     public String getPreset() { return preset; }
     public String getLanguage() { return language; }
     public String getOwnerTokenHash() { return ownerTokenHash; }
+
+    /**
+     * Replace the stored owner-token hash (US-54 host transfer, V2.19): the
+     * previous token stops matching at once (T-10). The plaintext token is
+     * delivered to the new Host over its control socket, never stored here.
+     */
+    public void setOwnerTokenHash(String ownerTokenHash) { this.ownerTokenHash = ownerTokenHash; }
     public boolean isAiEnabled() { return aiEnabled; }
     public Map<String, Member> getMembers() { return members; }
 
