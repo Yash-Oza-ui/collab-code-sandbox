@@ -57,6 +57,17 @@ class RoomControllerTest {
     }
 
     @Test
+    void listModules_requiresJoinedSession() throws Exception {
+        String roomId = body(create("{\"mode\":\"open\",\"language\":\"python\"}"))
+                .get("room_id").asText();
+        ResponseEntity<String> response = rest.getForEntity(
+                "http://localhost:" + port + "/v1/rooms/" + roomId + "/modules", String.class);
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+        assertThat(body(response).get("error").get("code").asText())
+                .isEqualTo("SESSION_NOT_FOUND");
+    }
+
+    @Test
     void createOpenRoom_returns201_withServerGeneratedId() throws Exception {
         ResponseEntity<String> response = create("{\"mode\":\"open\",\"language\":\"python\"}");
 

@@ -146,6 +146,14 @@ public class RoomBroadcastService {
         m.put("visibility",         r.getVisibility());
         m.put("saved_versions",     r.getSaved_versions());
         m.put("failure",            r.getFailure());
+
+        // FR29 / US-52: internal run-record metadata consumed & stripped by sync-service before WS broadcast
+        if (r.getInputHash() != null && !r.getInputHash().isBlank()) {
+            m.put("input_hash", r.getInputHash());
+        }
+        if (r.getRunFiles() != null && !r.getRunFiles().isEmpty()) {
+            m.put("files", r.getRunFiles());
+        }
         return m;
     }
 }
