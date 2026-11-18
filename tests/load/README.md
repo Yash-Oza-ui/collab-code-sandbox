@@ -58,24 +58,38 @@ same command with `--url` at the deployed service.
 ## CR13 — cost of the write-permission check
 
 NFR13 checks write permission on every edit; CR13 asks for its latency cost. The
-check lives in `sync-service` (`DocumentHandler`) and is gated by a **test-only**
-switch (`LOADTEST_DISABLE_EDIT_CHECK`, default **off** — the check is always on in
-production). Run the same workload twice and compare:
+check lives in `sync-service` (`DocumentHandler`). Its bypass is **isolated to the
+`loadtest` Spring profile**: it takes effect only when the server runs with
+`spring.profiles.active=loadtest` **and** `app.loadtest.edit-check-disabled=true`.
+Production never runs the `loadtest` profile, so the check can never be disabled
+there — a stray property or env var alone does nothing. When the bypass is active
+the server logs a loud `LOAD-TEST MODE … must NEVER run in production` warning.
+
+The harness does **not** trust its own environment for the mode. Before each run it
+**probes the server behaviourally** (a non-Host edit in a `teach_interview` probe
+room is forwarded to the Host only when the check is OFF) and records that
+**server-verified** mode in the result as `edit_check_mode`. Pass `--edit-check on|off`
+to assert the expected mode; the harness **aborts** rather than write a mislabeled
+report if the server disagrees.
+
+Run the same workload against the two server configurations and compare:
 
 ```bash
-# 1) check ON (default): start sync-service normally, then
-node harness.mjs --variant T1-A --users 10 --edits 50 --out results/T1-A-checks-on.json --label checks-on
+# 1) check ON — start sync-service normally (no loadtest profile):
+#    SERVER_PORT=8081 ./execution-service/mvnw -f sync-service/pom.xml spring-boot:run
+node harness.mjs --variant T1-A --users 10 --edits 50 --edit-check on  --out results/T1-A-checks-on.json
 
-# 2) check OFF (test only): restart sync-service with the flag, then
-#    LOADTEST_DISABLE_EDIT_CHECK=true  (env)  or  -Dloadtest.editCheckDisabled=true  (JVM)
-node harness.mjs --variant T1-A --users 10 --edits 50 --out results/T1-A-checks-off.json --label checks-off
+# 2) check OFF — restart sync-service under the ISOLATED load-test profile:
+#    SPRING_PROFILES_ACTIVE=loadtest APP_LOADTEST_EDIT_CHECK_DISABLED=true SERVER_PORT=8081 \
+#      ./execution-service/mvnw -f sync-service/pom.xml spring-boot:run
+node harness.mjs --variant T1-A --users 10 --edits 50 --edit-check off --out results/T1-A-checks-off.json
 
-# 3) compare
+# 3) compare (refuses unless file 1 is server-verified ON and file 2 OFF):
 node cr13-compare.mjs results/T1-A-checks-on.json results/T1-A-checks-off.json
 ```
 
 Repeat for T1-P and T1-O. **NFR13 is verified only when NFR1 (p95 < 200 ms) holds
-with the check ON** (CR13). The switch never bypasses permissions in production.
+with the check ON** (CR13). The bypass is test-only and impossible in production.
 
 ## Known gaps (marked, not faked)
 

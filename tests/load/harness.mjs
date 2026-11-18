@@ -33,7 +33,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 function parseArgs(argv) {
   const a = { variant: 'T1-P', users: 10, edits: 50, intervalMs: 200, modules: 5,
-              seedLines: 1000, url: 'http://localhost:8081', wsUrl: null, out: null, label: null }
+              seedLines: 1000, url: 'http://localhost:8081', wsUrl: null, out: null, label: null, editCheck: null }
   for (let i = 2; i < argv.length; i++) {
     const [k, inl] = argv[i].split('='); const v = inl !== undefined ? inl : argv[i + 1]
     const take = () => { if (inl === undefined) i++ }
@@ -48,6 +48,7 @@ function parseArgs(argv) {
       case '--ws': a.wsUrl = v; take(); break
       case '--out': a.out = v; take(); break
       case '--label': a.label = v; take(); break
+      case '--edit-check': a.editCheck = v; take(); break // 'on' | 'off' (validated against the server)
       default: break
     }
   }
@@ -150,11 +151,56 @@ function summarise(lat) {
   return { samples: s.length, p50_ms: r(percentile(s, 50)), p95_ms: r(percentile(s, 95)), max_ms: r(s[s.length - 1]) }
 }
 
+// Opens a raw document socket (no Yjs wiring) for the edit-check probe.
+function openRawDoc(wsBase, roomId, docId, sessionId) {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(`${wsBase}/ws/rooms/${roomId}/docs/${docId}?session_id=${sessionId}`)
+    const timer = setTimeout(() => reject(new Error('probe doc socket timeout')), 10000)
+    ws.on('open', () => { clearTimeout(timer); resolve(ws) })
+    ws.on('error', (e) => { clearTimeout(timer); reject(e) })
+  })
+}
+
+// Ground-truth of the server's edit-permission check (NFR13/CR13). In a Pair
+// teach_interview room only the Host may edit, so a NON-Host participant's
+// document change is forwarded to the Host ONLY when the check is disabled.
+// Returns 'on' (check enforced) or 'off' (check bypassed on the server).
+async function probeEditCheck(httpBase, wsBase) {
+  const room = await createRoom(httpBase, 'T1-P') // pair / teach_interview
+  const hostSess = randomUUID(), partSess = randomUUID()
+  const hostCtrl = await joinControl(wsBase, room.room_id, hostSess, 'probe-host', room.owner_token)
+  const partCtrl = await joinControl(wsBase, room.room_id, partSess, 'probe-part', null) // non-Host: cannot edit
+  const hostDoc = await openRawDoc(wsBase, room.room_id, 'main', hostSess)
+  const partDoc = await openRawDoc(wsBase, room.room_id, 'main', partSess)
+  let hostReceived = false
+  hostDoc.on('message', (data) => {
+    const b = new Uint8Array(data)
+    if (b.length >= 2 && b[0] === MESSAGE_SYNC && b[1] === 2) hostReceived = true // sync-update forwarded
+  })
+  await sleep(300)
+  const ydoc = new Y.Doc(); ydoc.getText('code').insert(0, 'probe')
+  const enc = encoding.createEncoder()
+  encoding.writeVarUint(enc, MESSAGE_SYNC)
+  syncProtocol.writeUpdate(enc, Y.encodeStateAsUpdate(ydoc))
+  partDoc.send(encoding.toUint8Array(enc))
+  await sleep(800)
+  hostDoc.close(); partDoc.close(); hostCtrl.close(); partCtrl.close()
+  return hostReceived ? 'off' : 'on'
+}
+
 async function main() {
   const args = parseArgs(process.argv)
   const { variant, users, edits, intervalMs, seedLines, url: httpBase, wsUrl: wsBase } = args
-  const editDisabled = process.env.LOADTEST_DISABLE_EDIT_CHECK === 'true'
-  console.log(`[harness] ${variant} users=${users} edits=${edits} interval=${intervalMs}ms editCheck=${editDisabled ? 'OFF' : 'ON'} target=${httpBase}`)
+
+  // Verify the SERVER's actual edit-check mode (NFR13/CR13) behaviourally, not from
+  // this process's env: a non-Host edit in a teach_interview probe room reaches the
+  // Host only when the check is OFF. The report states this VERIFIED server mode.
+  const serverEditCheck = await probeEditCheck(httpBase, wsBase) // 'on' | 'off'
+  if (args.editCheck && args.editCheck !== serverEditCheck) {
+    throw new Error(`--edit-check=${args.editCheck} but the sync-service actually has the edit check ${serverEditCheck.toUpperCase()}. `
+      + `For a CR13 OFF baseline start the server with -Dspring.profiles.active=loadtest -Dapp.loadtest.edit-check-disabled=true; otherwise run it normally (ON). Refusing to write a mislabeled report.`)
+  }
+  console.log(`[harness] ${variant} users=${users} edits=${edits} interval=${intervalMs}ms editCheck=${serverEditCheck.toUpperCase()}(verified) target=${httpBase}`)
 
   const room = await createRoom(httpBase, variant)
   const sessions = Array.from({ length: users }, () => randomUUID())
@@ -248,7 +294,9 @@ async function main() {
   const result = {
     kind: args.label || 'benchmark',
     variant, users, typists: typistCount, edits_per_typist: edits, typing_interval_ms: intervalMs,
-    seed_lines: seedLines, edit_check: editDisabled ? 'disabled (CR13 baseline, test-only)' : 'enabled (NFR13)',
+    seed_lines: seedLines,
+    edit_check: serverEditCheck === 'off' ? 'disabled (CR13 baseline, test-only) — verified against the server' : 'enabled (NFR13) — verified against the server',
+    edit_check_mode: serverEditCheck,
     latency_ms: stats, nfr1_target_p95_ms: NFR1, nfr1_met: stats.p95_ms == null ? null : stats.p95_ms < NFR1,
     room_full_check: roomFull,
     limits_in_force: { people_limit: 'US-63 (not enforced in main)', module_limit: 'US-63', module_size_limit: '1 MiB document frame cap (DocumentHandler); per-module content limit is US-63' },

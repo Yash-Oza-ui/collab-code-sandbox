@@ -1,5 +1,5 @@
 {
-  "_comment": "Example BENCHMARK output: node harness.mjs --variant T1-P --users 10 --edits 50. Machine values are placeholders; a real run records the actual host (US-31).",
+  "_comment": "Example BENCHMARK output: node harness.mjs --variant T1-P --users 10 --edits 50 --edit-check on. Machine values are placeholders (US-31 records the real host).",
   "kind": "benchmark",
   "variant": "T1-P",
   "users": 10,
@@ -7,7 +7,8 @@
   "edits_per_typist": 50,
   "typing_interval_ms": 200,
   "seed_lines": 1000,
-  "edit_check": "enabled (NFR13)",
+  "edit_check": "enabled (NFR13) — verified against the server",
+  "edit_check_mode": "on",
   "latency_ms": { "samples": 450, "p50_ms": 3.1, "p95_ms": 5.2, "max_ms": 8.4 },
   "nfr1_target_p95_ms": 200,
   "nfr1_met": true,
@@ -23,6 +24,6 @@
   },
   "workload_note": "Test set-up T1: ~5 chars/sec per typist, ~1000-line document. Every typist is measured at the receiving users.",
   "machine": { "hostname": "dev-machine", "platform": "example OS", "arch": "x64", "cpus": 8, "node": "v24.x" },
-  "ran_at": "2026-11-17T00:00:00.000Z",
+  "ran_at": "2026-11-18T00:00:00.000Z",
   "disclaimer": "Development-machine run (CR03). Final-host numbers are US-31."
 }
