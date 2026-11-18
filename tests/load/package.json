@@ -1,0 +1,16 @@
+{
+  "name": "collab-load-harness",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "T-22 load-test harness (T1-P, T1-A, T1-O): measures edit-sync latency (NFR1) against sync-service over the real control and document sockets.",
+  "scripts": {
+    "harness": "node harness.mjs"
+  },
+  "dependencies": {
+    "lib0": "^0.2.99",
+    "ws": "^8.18.0",
+    "y-protocols": "^1.0.7",
+    "yjs": "^13.6.33"
+  }
+}
