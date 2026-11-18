@@ -38,6 +38,10 @@ app:
     internal-url:   ${SYNC_SERVICE_INTERNAL_URL:http://localhost:8081}
     internal-token: ${INTERNAL_API_TOKEN:}
 
+  # Internal inter-service endpoint authentication (T-18 Decision 7, POST /internal/runs)
+  internal:
+    token: ${INTERNAL_API_TOKEN:}
+
   # ---------------------------------------------------------------
   # Resource limits for sandboxed code execution (DR3, NFR4, US-13)
   # Values are configured defaults; never hard-coded in Java (DR3).
@@ -60,3 +64,9 @@ app:
       max-queue-length: 10
       # FR16 – seconds sent in Retry-After and error.retry_after_seconds
       queue-retry-after-seconds: 5
+      # NFR14 / US-64 / CR10 – aggregate wall-clock time budget per repeated-run request (milliseconds)
+      aggregate-time-budget-ms: 20000
+      # NFR14 / US-64 / CR10 – maximum number of runs per repeated-run request
+      max-runs-per-request: 10
+      # NFR14 / US-64 – seconds sent in Retry-After and error.retry_after_seconds on RUN_BUDGET_EXCEEDED
+      budget-retry-after-seconds: 30
