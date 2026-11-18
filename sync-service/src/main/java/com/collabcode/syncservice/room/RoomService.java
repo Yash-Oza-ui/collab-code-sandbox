@@ -183,6 +183,39 @@ public class RoomService {
         return fresh;
     }
 
+    /**
+     * Transfer the Host role (US-54, V2.19; FR31.1). Reissues the owner token
+     * (the previous one stops granting Host rights at once, T-10), demotes every
+     * current Host to participant and promotes {@code targetMemberId}, so there is
+     * exactly one Host after the call. The caller must already have checked that the
+     * target is a current participant (V2.19 rule 2). Returns the new Host, or null
+     * if the room or target is unknown.
+     */
+    public synchronized Member transferHost(String roomId, String targetMemberId, String newOwnerTokenHash) {
+        Room room = store.get(roomId);
+        if (room == null) {
+            return null;
+        }
+        Member target = room.getMembers().get(targetMemberId);
+        if (target == null) {
+            return null;
+        }
+        // Reissue the owner token: the previous token no longer matches (T-10).
+        room.setOwnerTokenHash(newOwnerTokenHash);
+        // Exactly one Host at all times: demote every current Host, then promote the target.
+        for (Member m : room.getMembers().values()) {
+            if (m.getRole() == Role.HOST) {
+                m.setRole(Role.PARTICIPANT);
+                m.setCanEdit(computeCanEdit(room, Role.PARTICIPANT));
+                m.setCanRun(true);
+            }
+        }
+        target.setRole(Role.HOST);
+        target.setCanEdit(computeCanEdit(room, Role.HOST));
+        target.setCanRun(true);
+        return target;
+    }
+
     // ----- helpers -----
 
     private boolean isOwner(Room room, String ownerToken) {
