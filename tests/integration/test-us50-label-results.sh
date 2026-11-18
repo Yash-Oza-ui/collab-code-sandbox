@@ -20,6 +20,93 @@ if ! curl -s --max-time 2 "$base_url/actuator/health" >/dev/null 2>&1; then
   exit 0
 fi
 
+# Detect Python binary: prefer python3 on Linux/CI, fallback to python on Windows
+PYTHON_BIN="python3"
+if ! command -v "$PYTHON_BIN" >/dev/null 2>&1 || ! "$PYTHON_BIN" --version >/dev/null 2>&1; then
+  PYTHON_BIN="python"
+fi
+
+validate_pair_json() {
+  local body="$1"
+  if command -v "$PYTHON_BIN" >/dev/null 2>&1 && "$PYTHON_BIN" --version >/dev/null 2>&1; then
+    printf '%s' "$body" | "$PYTHON_BIN" -c '
+import sys, json, re
+try:
+    data = json.load(sys.stdin)
+    runner = data.get("runner")
+    if not isinstance(runner, dict):
+        sys.exit("runner field is missing or not a dict")
+    display_name = runner.get("display_name")
+    if not isinstance(display_name, str) or not display_name.strip():
+        sys.exit(f"runner.display_name must be a non-empty string, got {display_name!r}")
+    
+    ran_at = data.get("ran_at")
+    if not isinstance(ran_at, str) or not re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$", ran_at):
+        sys.exit(f"ran_at is not a valid ISO 8601 UTC timestamp: {ran_at!r}")
+        
+    saved_versions = data.get("saved_versions")
+    if saved_versions != []:
+        sys.exit(f"saved_versions in Pair mode must be empty list [], got {saved_versions!r}")
+        
+    print("OK")
+except Exception as e:
+    sys.exit(f"Validation failed: {e}")
+' 2>&1
+  else
+    if echo "$body" | grep -q '"runner"' && echo "$body" | grep -q '"display_name"' && echo "$body" | grep -q '"ran_at"' && echo "$body" | grep -q '"saved_versions":\[\]'; then
+      echo "OK"
+    else
+      echo "Pair body validation failed: $body"
+    fi
+  fi
+}
+
+validate_open_json() {
+  local body="$1"
+  if command -v "$PYTHON_BIN" >/dev/null 2>&1 && "$PYTHON_BIN" --version >/dev/null 2>&1; then
+    printf '%s' "$body" | "$PYTHON_BIN" -c '
+import sys, json, re
+try:
+    data = json.load(sys.stdin)
+    runner = data.get("runner")
+    if not isinstance(runner, dict):
+        sys.exit("runner field is missing or not a dict")
+    display_name = runner.get("display_name")
+    if not isinstance(display_name, str) or not display_name.strip():
+        sys.exit(f"runner.display_name must be a non-empty string, got {display_name!r}")
+    
+    ran_at = data.get("ran_at")
+    if not isinstance(ran_at, str) or not re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$", ran_at):
+        sys.exit(f"ran_at is not a valid ISO 8601 UTC timestamp: {ran_at!r}")
+        
+    saved_versions = data.get("saved_versions")
+    if not isinstance(saved_versions, list) or len(saved_versions) == 0:
+        sys.exit(f"saved_versions in Open mode must be a non-empty list, got {saved_versions!r}")
+    for sv in saved_versions:
+        if not isinstance(sv.get("name"), str) or not sv.get("name"):
+            sys.exit(f"saved_version entry missing name: {sv}")
+        if not isinstance(sv.get("version"), int):
+            sys.exit(f"saved_version entry missing integer version: {sv}")
+        if not isinstance(sv.get("module_id"), str) or not sv.get("module_id"):
+            sys.exit(f"saved_version entry missing module_id: {sv}")
+
+    vis = data.get("visibility")
+    if vis != "private":
+        sys.exit(f"expected visibility: private, got {vis!r}")
+        
+    print("OK")
+except Exception as e:
+    sys.exit(f"Validation failed: {e}")
+' 2>&1
+  else
+    if echo "$body" | grep -q '"saved_versions":\[{' && echo "$body" | grep -q '"visibility":"private"'; then
+      echo "OK"
+    else
+      echo "Open body validation failed: $body"
+    fi
+  fi
+}
+
 # 1. Pair mode run result carries runner (display_name), ran_at (ISO UTC), and empty saved_versions (FR26)
 resp_pair="$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST "$endpoint" \
   -H "Content-Type: application/json" \
@@ -49,34 +136,11 @@ if [ "$status_pair" != "200" ]; then
   exit 1
 fi
 
-validate_pair="$(python -c '
-import sys, json, re
-try:
-    data = json.load(sys.stdin)
-    runner = data.get("runner")
-    if not isinstance(runner, dict):
-        sys.exit("runner field is missing or not a dict")
-    display_name = runner.get("display_name")
-    if not isinstance(display_name, str) or not display_name.strip():
-        sys.exit(f"runner.display_name must be a non-empty string, got {display_name!r}")
-    
-    ran_at = data.get("ran_at")
-    if not isinstance(ran_at, str) or not re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$", ran_at):
-        sys.exit(f"ran_at is not a valid ISO 8601 UTC timestamp: {ran_at!r}")
-        
-    saved_versions = data.get("saved_versions")
-    if saved_versions != []:
-        sys.exit(f"saved_versions in Pair mode must be empty list [], got {saved_versions!r}")
-        
-    print("OK")
-except Exception as e:
-    sys.exit(f"Validation failed: {e}")
-' <<< "$body_pair" 2>&1)"
-
-if [ "$validate_pair" = "OK" ]; then
+result_pair="$(validate_pair_json "$body_pair")"
+if [ "$result_pair" = "OK" ]; then
   pass "us50-pair-runner-label" "Pair mode run returns valid runner.display_name, ISO ran_at, and empty saved_versions"
 else
-  fail "us50-pair-runner-label" "$validate_pair"
+  fail "us50-pair-runner-label" "$result_pair"
   exit 1
 fi
 
@@ -103,44 +167,11 @@ if [ "$status_open" != "200" ]; then
   exit 1
 fi
 
-validate_open="$(python -c '
-import sys, json, re
-try:
-    data = json.load(sys.stdin)
-    runner = data.get("runner")
-    if not isinstance(runner, dict):
-        sys.exit("runner field is missing or not a dict")
-    display_name = runner.get("display_name")
-    if not isinstance(display_name, str) or not display_name.strip():
-        sys.exit(f"runner.display_name must be a non-empty string, got {display_name!r}")
-        
-    ran_at = data.get("ran_at")
-    if not isinstance(ran_at, str) or not re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$", ran_at):
-        sys.exit(f"ran_at is not a valid ISO 8601 UTC timestamp: {ran_at!r}")
-        
-    saved_versions = data.get("saved_versions")
-    if not isinstance(saved_versions, list) or len(saved_versions) == 0:
-        sys.exit(f"saved_versions in Open mode must be a non-empty list, got {saved_versions!r}")
-    for sv in saved_versions:
-        if not isinstance(sv.get("name"), str) or not sv.get("name"):
-            sys.exit(f"saved_version entry missing name: {sv}")
-        if not isinstance(sv.get("version"), int):
-            sys.exit(f"saved_version entry missing integer version: {sv}")
-        if not isinstance(sv.get("module_id"), str) or not sv.get("module_id"):
-            sys.exit(f"saved_version entry missing module_id: {sv}")
-
-    if data.get("visibility") != "private":
-        sys.exit(f"expected visibility: private, got {data.get(\"visibility\")!r}")
-        
-    print("OK")
-except Exception as e:
-    sys.exit(f"Validation failed: {e}")
-' <<< "$body_open" 2>&1)"
-
-if [ "$validate_open" = "OK" ]; then
+result_open="$(validate_open_json "$body_open")"
+if [ "$result_open" = "OK" ]; then
   pass "us50-open-saved-versions" "Open mode run returns valid saved_versions details and private visibility"
 else
-  fail "us50-open-saved-versions" "$validate_open"
+  fail "us50-open-saved-versions" "$result_open"
   exit 1
 fi
 
