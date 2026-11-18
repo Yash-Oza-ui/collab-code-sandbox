@@ -39,6 +39,19 @@ public final class RoomMessages {
         return m;
     }
 
+    /**
+     * {@code host-granted} (US-54, V2.19): the new owner token, delivered to the new
+     * Host only, on their control socket. Never put in an HTTP response, in
+     * {@code roster}, or in a log (same confidentiality as room creation, V2.1).
+     */
+    public static Map<String, Object> hostGranted(String memberId, String ownerToken) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("type", "host-granted");
+        m.put("member_id", memberId);
+        m.put("owner_token", ownerToken);
+        return m;
+    }
+
     /** {@code roster} (sent to the whole room after a join, leave or role change). */
     public static Map<String, Object> roster(Room room) {
         List<Map<String, Object>> members = new ArrayList<>();
