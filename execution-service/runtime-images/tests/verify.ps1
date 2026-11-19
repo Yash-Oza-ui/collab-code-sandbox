@@ -129,6 +129,15 @@ if ($uid -ne "0" -and $exitCode -eq 0) {
 } else {
     Check-Fail "Non-root user (NFR3.2)" "Expected non-zero UID, got UID=$uid"
 }
+
+# Probe verification
+$uidOut = docker run --rm --network none -v "${SampleDir}:/sandbox/code:ro" $Image python /sandbox/code/user_id_probe.py 2>$null
+$uidExit = $LASTEXITCODE
+if ($uidExit -eq 0 -and ($uidOut -join " ") -match "NON-ROOT USER") {
+    Check-Pass "Non-root user probe - user_id_probe.py confirmed UID != 0 (NFR3.2)"
+} else {
+    Check-Fail "Non-root user probe (NFR3.2)" "Expected exit=0, got exit=$uidExit output='$uidOut'"
+}
 Write-Host ""
 
 # [8] Network isolation
@@ -139,6 +148,50 @@ if ($netExit -eq 1 -and ($netOut -join " ") -match "NETWORK BLOCKED") {
     Check-Pass "Network isolation - connection refused as expected (NFR3.1)"
 } else {
     Check-Fail "Network isolation (NFR3.1)" "Expected exit=1 with NETWORK BLOCKED, got exit=$netExit output='$netOut'"
+}
+Write-Host ""
+
+# [8b] Read-only code directory
+Write-Host "[8b] Read-only code directory (NFR3.3)..."
+$wrOut = docker run --rm --network none -v "${SampleDir}:/sandbox/code:ro" $Image python /sandbox/code/write_code_dir_probe.py 2>$null
+$wrExit = $LASTEXITCODE
+if ($wrExit -eq 1 -and ($wrOut -join " ") -match "WRITE BLOCKED") {
+    Check-Pass "Read-only code mount - writing to /sandbox/code rejected as expected (NFR3.3)"
+} else {
+    Check-Fail "Read-only code mount (NFR3.3)" "Expected exit=1 with WRITE BLOCKED, got exit=$wrExit output='$wrOut'"
+}
+Write-Host ""
+
+# [8c] Read-only root filesystem
+Write-Host "[8c] Read-only root filesystem (NFR3.3)..."
+docker run --rm --network none --read-only --tmpfs /tmp:rw,noexec,nosuid,size=16m -v "${SampleDir}:/sandbox/code:ro" $Image sh -c "touch /etc/test_ro 2>/dev/null" *>$null
+$fsExit = $LASTEXITCODE
+if ($fsExit -ne 0) {
+    Check-Pass "Read-only root filesystem - modifying root directories rejected (NFR3.3)"
+} else {
+    Check-Fail "Read-only root filesystem (NFR3.3)" "Write outside /tmp succeeded under --read-only"
+}
+Write-Host ""
+
+# [8d] Host filesystem isolation
+Write-Host "[8d] Host filesystem isolation (NFR3.4)..."
+$hostOut = docker run --rm --network none -v "${SampleDir}:/sandbox/code:ro" $Image python /sandbox/code/list_root_probe.py 2>$null
+$hostExit = $LASTEXITCODE
+if ($hostExit -eq 0 -and ($hostOut -join " ") -match "ROOT ISOLATED") {
+    Check-Pass "Host filesystem isolation - no host paths or sensitive files accessible (NFR3.4)"
+} else {
+    Check-Fail "Host filesystem isolation (NFR3.4)" "Expected exit=0, got exit=$hostExit output='$hostOut'"
+}
+Write-Host ""
+
+# [8e] Cross-run isolation
+Write-Host "[8e] Cross-run isolation (NFR3.4)..."
+$xrOut = docker run --rm --network none -v "${SampleDir}:/sandbox/code:ro" $Image python /sandbox/code/read_other_run_probe.py 2>$null
+$xrExit = $LASTEXITCODE
+if ($xrExit -eq 0 -and ($xrOut -join " ") -match "RUN ISOLATED") {
+    Check-Pass "Cross-run isolation - run cannot see other runs' workspaces (NFR3.4)"
+} else {
+    Check-Fail "Cross-run isolation (NFR3.4)" "Expected exit=0, got exit=$xrExit output='$xrOut'"
 }
 Write-Host ""
 

@@ -12,6 +12,7 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
@@ -52,7 +53,86 @@ public class DockerRunner implements CodeRunner {
     private record CapturedOutput(String text, boolean truncated) {}
 
     protected String createContainerName() {
-    return "run-" + UUID.randomUUID();
+        return "run-" + UUID.randomUUID();
+    }
+
+    /**
+     * Builds and returns a {@link ProcessBuilder} for starting a container with all sandbox isolation
+     * rules (NFR3.1-NFR3.4) and execution limits (NFR4) enforced in a single place (US-12).
+     *
+     * Isolation guarantees:
+     * <ul>
+     *   <li><b>NFR3.1: Network isolation</b> — {@code --network none} prevents any inbound or outbound traffic.</li>
+     *   <li><b>NFR3.2: Non-root execution</b> — supervisor drops privileges to UID 1001 before executing code;
+     *       container is hardened with {@code --cap-drop=ALL}, {@code --cap-add=SETUID}, {@code --cap-add=SETGID},
+     *       and {@code --security-opt=no-new-privileges}.</li>
+     *   <li><b>NFR3.3: Read-only filesystem</b> — {@code --read-only} root filesystem and {@code readonly} bind mount
+     *       for the user's code workspace (/sandbox/code). Scratch space is constrained to a noexec, nosuid tmpfs (/tmp).</li>
+     *   <li><b>NFR3.4: Host & cross-run isolation</b> — No host paths are mounted outside the run's ephemeral workspace;
+     *       no container or run can reach another run's files or host directories.</li>
+     *   <li><b>NFR4: Resource limits</b> — memory, memory-swap, and pids-limit strictly enforced.</li>
+     * </ul>
+     *
+     * @param containerName unique container name for this execution
+     * @param workspace run-specific temporary workspace directory containing code files
+     * @param metricsDir run-specific temporary directory for supervisor execution metrics
+     * @param image container image tag
+     * @param commandAndArgs entry executable and arguments to run inside the container
+     * @return configured ProcessBuilder ready to start
+     */
+    protected ProcessBuilder buildIsolatedContainerProcess(
+            String containerName,
+            Path workspace,
+            Path metricsDir,
+            String image,
+            List<String> commandAndArgs
+    ) {
+        List<String> command = new ArrayList<>();
+        command.add("docker");
+        command.add("run");
+        command.add("--interactive");
+
+        // NFR3.1: Network disabled
+        command.add("--network");
+        command.add("none");
+
+        command.add("--name");
+        command.add(containerName);
+
+        // NFR3.2: Non-root security boundaries and capabilities
+        command.add("--cap-drop=ALL");
+        command.add("--cap-add=SETUID");
+        command.add("--cap-add=SETGID");
+        command.add("--security-opt=no-new-privileges");
+        command.add("--user");
+        command.add("0:0");
+
+        // NFR4: Strict resource limits
+        command.add("--memory");
+        command.add(limits.getMemoryMb() + "m");
+        command.add("--memory-swap");
+        command.add(limits.getMemoryMb() + "m");
+        command.add("--pids-limit");
+        command.add(String.valueOf(limits.getPidsLimit()));
+
+        // NFR3.3: Read-only root filesystem and restricted scratch tmpfs
+        command.add("--read-only");
+        command.add("--tmpfs");
+        command.add("/tmp:rw,noexec,nosuid,size=16m");
+
+        // NFR3.3 & NFR3.4: Read-only code mount of ephemeral workspace, no host mounts
+        command.add("--mount");
+        command.add("type=bind,source=" + workspace.toAbsolutePath() + ",target=/sandbox/code,readonly");
+
+        if (metricsDir != null) {
+            command.add("--mount");
+            command.add("type=bind,source=" + metricsDir.toAbsolutePath() + ",target=/sandbox/metrics");
+        }
+
+        command.add(image);
+        command.addAll(commandAndArgs);
+
+        return new ProcessBuilder(command);
     }
 
     public ExecutionResult execute(RunSpec spec) {
@@ -92,10 +172,8 @@ public class DockerRunner implements CodeRunner {
             );
 
             // Allow non-root runtime user (1001) to access the workspace.
-            if (!workspace.toFile().setReadable(true, false)
-                    || !workspace.toFile().setExecutable(true, false)) {
-                throw new IOException("Unable to set workspace permissions");
-            }
+            workspace.toFile().setReadable(true, false);
+            workspace.toFile().setExecutable(true, false);
             writeRunFiles(spec, workspace);
 
             Path metricsDir = workspace.resolve("metrics");
@@ -104,32 +182,17 @@ public class DockerRunner implements CodeRunner {
             metricsDir.toFile().setWritable(true, false);
             metricsDir.toFile().setExecutable(true, false);
 
-            ProcessBuilder builder = new ProcessBuilder(
-                    "docker", "run",
-                    "--interactive",
-                    "--network", "none",
-                    "--name", containerName,
-                    "--cap-drop=ALL",
-                    "--cap-add=SETUID",
-                    "--cap-add=SETGID",
-                    "--security-opt=no-new-privileges",
-                    "--user", "0:0",
-                    "--memory", limits.getMemoryMb() + "m",
-                    "--memory-swap", limits.getMemoryMb() + "m",
-                    "--pids-limit", String.valueOf(limits.getPidsLimit()),
-                    "--read-only",
-                    "--tmpfs", "/tmp:rw,noexec,nosuid,size=16m",
-                    "--mount",
-                    "type=bind,source=" + workspace.toAbsolutePath()
-                            + ",target=/sandbox/code,readonly",
-                    "--mount",
-                    "type=bind,source=" + metricsDir.toAbsolutePath()
-                            + ",target=/sandbox/metrics",
+            ProcessBuilder builder = buildIsolatedContainerProcess(
+                    containerName,
+                    workspace,
+                    metricsDir,
                     PYTHON_IMAGE,
-                    PYTHON_EXECUTABLE,
-                    "/usr/local/bin/collab-sandbox-runner",
-                    String.valueOf(limits.getWallTimeSeconds()),
-                    "/sandbox/code/" + spec.getEntry()
+                    List.of(
+                            PYTHON_EXECUTABLE,
+                            "/usr/local/bin/collab-sandbox-runner",
+                            String.valueOf(limits.getWallTimeSeconds()),
+                            "/sandbox/code/" + spec.getEntry()
+                    )
             );
 
             process = builder.start();
