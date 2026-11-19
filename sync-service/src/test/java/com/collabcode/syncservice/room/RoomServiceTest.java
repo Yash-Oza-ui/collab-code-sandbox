@@ -193,4 +193,19 @@ class RoomServiceTest {
         }
     }
 
+    @Test
+    void takenNameIsRejectedEvenWhenRoomRequiresApproval() {
+        Room room = pairRoom("teach_interview", "secret");
+        service.join(room.getRoomId(), "sess-1", "Ada", null);
+        room.setRequiresApproval(true);
+
+        JoinOutcome duplicate = service.join(room.getRoomId(), "sess-2", "ada", null);
+        assertThat(duplicate.isJoined()).isFalse();
+        assertThat(duplicate.getRefusedReason()).isEqualTo("NAME_TAKEN");
+
+        JoinOutcome freshName = service.join(room.getRoomId(), "sess-3", "Lin", null);
+        assertThat(freshName.isJoined()).isFalse();
+        assertThat(freshName.getRefusedReason()).isEqualTo("APPROVAL_PENDING");
+    }
+
 }
