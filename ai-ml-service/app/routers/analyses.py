@@ -38,6 +38,14 @@ from app.rules.patterns import (
     run_rule_based_analysis_with_ai_fallback,
 )
 from app.section import extract_relevant_section
+from app.slowdown import (
+    SlowdownAnalysisRequest,
+    SlowdownAnalysisResponse,
+    detect_slowdown,
+    generate_slowdown_explanation,
+    get_slowdown_store,
+    validate_threshold_overrides,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -507,6 +515,79 @@ async def get_room_usage_endpoint(room_id: str, request: Request) -> dict[str, A
     return get_room_usage(room_id)
 
 
+@router.post("/analyses/slowdown", response_model=SlowdownAnalysisResponse)
+async def analyze_slowdown(
+    payload: SlowdownAnalysisRequest, request: Request
+) -> SlowdownAnalysisResponse:
+    """Detect runtime slowdown against empirical Median and MAD baseline (FR37, US-68, T-18 v2 §16.2)."""
+    request.state.request_id = payload.request_id
+    request.state.room_id = payload.room_id
+    request.state.request_type = payload.request_type
+    request.state.language = payload.language
+
+    # Extract query param or header threshold overrides
+    raw_factor = request.query_params.get("factor_threshold") or request.headers.get("x-slowdown-factor")
+    raw_outlier = (
+        request.query_params.get("outlier_threshold")
+        or request.query_params.get("z_threshold")
+        or request.headers.get("x-outlier-threshold")
+        or request.headers.get("x-modified-z-threshold")
+    )
+    raw_min_samples = request.query_params.get("min_samples") or request.headers.get("x-min-samples")
+
+    # Validate threshold overrides strictly (422 INVALID_REQUEST on invalid, non-finite, or <= 0 values)
+    factor_threshold, outlier_threshold, min_samples = validate_threshold_overrides(
+        factor_param=raw_factor,
+        outlier_param=raw_outlier,
+        min_samples_param=raw_min_samples,
+    )
+
+    # Statistical slowdown detection against empirical Median and MAD baseline
+    result = detect_slowdown(
+        room_id=payload.room_id,
+        input_hash=payload.input_hash,
+        execution_time_ms=payload.current_run.execution_time_ms,
+        peak_memory_mb=payload.current_run.peak_memory_mb,
+        consent=payload.consent,
+        ai_enabled=payload.ai_enabled,
+        factor_threshold=factor_threshold,
+        outlier_threshold=outlier_threshold,
+        min_samples=min_samples,
+    )
+
+    # Generate AI explanation when regression is detected and both consent and AI are enabled (§16.2)
+    if result["is_slowdown"] and payload.consent is True and payload.ai_enabled is True:
+        ai_step = await generate_slowdown_explanation(
+            code=payload.current_run.code,
+            language=payload.language,
+            execution_time_ms=payload.current_run.execution_time_ms,
+            baseline_median_ms=result["baseline"].median_ms,
+            slowdown_factor=result["slowdown_factor"],
+            room_id=payload.room_id,
+            consent=payload.consent,
+            ai_enabled=payload.ai_enabled,
+        )
+    else:
+        ai_step = result["ai_step"]
+
+    if ai_step.error_code:
+        record_fallback(payload.room_id)
+    request.state.error_code = ai_step.error_code
+
+    return SlowdownAnalysisResponse(
+        request_id=payload.request_id,
+        analysis_id=payload.analysis_id,
+        task="slowdown",
+        input_hash=payload.input_hash,
+        is_slowdown=result["is_slowdown"],
+        slowdown_factor=result["slowdown_factor"],
+        baseline=result["baseline"],
+        changed_lines=result.get("changed_lines", []),
+        message=result["message"],
+        ai_step=ai_step,
+    )
+
+
 @router.delete("/rooms/{room_id}/state")
 async def clear_room_state(room_id: str, request: Request) -> dict[str, Any]:
     """Clean up room-scoped measurement history, cache, counters, and rate limits when closed/deleted (US-22, US-56, FR32, T-18 section 16.5)."""
@@ -516,6 +597,7 @@ async def clear_room_state(room_id: str, request: Request) -> dict[str, Any]:
     clear_room(room_id)
     get_analysis_cache().clear_room(room_id)
     get_room_rate_limiter().clear_room(room_id)
+    get_slowdown_store().clear_room(room_id)
     return {
         "room_id": room_id,
         "status": "cleared",
