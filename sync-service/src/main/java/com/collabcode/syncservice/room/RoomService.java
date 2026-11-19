@@ -113,11 +113,13 @@ public class RoomService {
         if (member == null) {
             return null;
         }
-        member.setRole(newRole);
+        // Change what the member may do before the role label, so a frame that arrives while
+        // this runs never sees the old access together with the new role.
         member.setCanEdit(computeCanEdit(room, newRole));
         // A role change starts from the role's default permissions (V2.17 rule 4), so a
         // Run restriction (US-60) is cleared here; the Host can set it again afterwards.
         member.setCanRun(newRole != Role.OBSERVER);
+        member.setRole(newRole);
         return member;
     }
 

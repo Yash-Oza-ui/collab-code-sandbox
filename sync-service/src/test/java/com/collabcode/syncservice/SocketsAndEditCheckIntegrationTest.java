@@ -1,5 +1,7 @@
 package com.collabcode.syncservice;
 
+import com.collabcode.syncservice.room.Member;
+import com.collabcode.syncservice.room.Role;
 import com.collabcode.syncservice.room.Room;
 import com.collabcode.syncservice.room.RoomService;
 import com.collabcode.syncservice.room.RoomStore;
@@ -807,6 +809,164 @@ class SocketsAndEditCheckIntegrationTest {
             assertThat(handler.closes.get(0).getCode())
                     .as("Close code must be 4410 (room closed)")
                     .isEqualTo(4410);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // US-35: Pair mode enforcement for a participant without edit access
+    // -----------------------------------------------------------------------
+
+    @Test
+    void pairMode_modifiedClient_nonCanonicalUpdateFrames_areDroppedAndRejected() throws Exception {
+        // teach_interview: the participant has no edit access.
+        Map<String, Object> room = createRoom("pair", "teach_interview", null);
+        String roomId     = (String) room.get("room_id");
+        String ownerToken = (String) room.get("owner_token");
+
+        try (WsClient ctrlA = connectControl(roomId, SESSION_A);
+             WsClient ctrlB = connectControl(roomId, SESSION_B)) {
+            sendJoin(ctrlA, "Alice", ownerToken);
+            drainText(ctrlA, 2);
+            sendJoin(ctrlB, "Bob", null);
+            drainText(ctrlB, 2);
+            drainText(ctrlA, 1);
+
+            try (WsClient docA = connectDoc(roomId, "main", SESSION_A);
+                 WsClient docB = connectDoc(roomId, "main", SESSION_B)) {
+
+                // Each frame is an update written the way a modified client would: Yjs decodes
+                // 0x80 0x00 as the number 0 and 0x82 0x00 as the number 2, so receivers apply it.
+                byte[][] frames = {
+                        {(byte) 0x80, 0x00, (byte) 0x82, 0x00, 0x10, 0x20},
+                        {0x00, (byte) 0x82, 0x00, 0x10, 0x20},
+                        {0x00, (byte) 0x81, 0x00, 0x10, 0x20},
+                        {0x05, 0x00, 0x10},
+                };
+                for (byte[] frame : frames) {
+                    docB.sendBinary(frame);
+                    String rejected = pollControlMessage(ctrlB, "edit-rejected", 3, TimeUnit.SECONDS);
+                    assertThat(rejected)
+                            .as("Every non-canonical frame from a member without edit access is rejected")
+                            .contains("\"doc_id\":\"main\"")
+                            .contains("\"reason\":\"no_edit_access\"");
+                }
+                assertThat(docA.pollBinary(500, TimeUnit.MILLISECONDS))
+                        .as("None of the disguised update frames may reach another member")
+                        .isNull();
+            }
+        }
+    }
+
+    @Test
+    void pairMode_participantWithoutEditAccess_awarenessAndQueryAwarenessStillHandled() throws Exception {
+        Map<String, Object> room = createRoom("pair", "teach_interview", null);
+        String roomId     = (String) room.get("room_id");
+        String ownerToken = (String) room.get("owner_token");
+
+        try (WsClient ctrlA = connectControl(roomId, SESSION_A);
+             WsClient ctrlB = connectControl(roomId, SESSION_B)) {
+            sendJoin(ctrlA, "Alice", ownerToken);
+            drainText(ctrlA, 2);
+            sendJoin(ctrlB, "Bob", null);
+            drainText(ctrlB, 2);
+            drainText(ctrlA, 1);
+
+            try (WsClient docA = connectDoc(roomId, "main", SESSION_A);
+                 WsClient docB = connectDoc(roomId, "main", SESSION_B)) {
+
+                byte[] awarenessFrame = {0x01, 0x01, 0x02, 0x03};
+                docB.sendBinary(awarenessFrame);
+                assertThat(docA.pollBinary(3, TimeUnit.SECONDS))
+                        .as("Awareness from a member without edit access is relayed")
+                        .isEqualTo(awarenessFrame);
+                assertThat(docB.pollBinary(3, TimeUnit.SECONDS))
+                        .as("Awareness is echoed back to its sender as before")
+                        .isEqualTo(awarenessFrame);
+
+                byte[] queryAwarenessFrame = {0x03};
+                docB.sendBinary(queryAwarenessFrame);
+                assertThat(docA.pollBinary(3, TimeUnit.SECONDS))
+                        .as("Query-awareness from a member without edit access is relayed")
+                        .isEqualTo(queryAwarenessFrame);
+
+                assertThat(pollControlMessage(ctrlB, "edit-rejected", 300, TimeUnit.MILLISECONDS))
+                        .as("Frames that do not change the document never produce edit-rejected")
+                        .isNull();
+            }
+        }
+    }
+
+    @Test
+    void pairMode_accessChangedMidSession_nextFrameFollowsTheNewAccess() throws Exception {
+        // debug_together: a participant can edit at first.
+        Map<String, Object> room = createRoom("pair", "debug_together", null);
+        String roomId     = (String) room.get("room_id");
+        String ownerToken = (String) room.get("owner_token");
+
+        try (WsClient ctrlA = connectControl(roomId, SESSION_A);
+             WsClient ctrlB = connectControl(roomId, SESSION_B)) {
+            sendJoin(ctrlA, "Alice", ownerToken);
+            drainText(ctrlA, 2);
+            sendJoin(ctrlB, "Bob", null);
+            drainText(ctrlB, 2);
+            drainText(ctrlA, 1);
+            Member bob = roomService.findMemberBySession(roomId, SESSION_B);
+            assertThat(bob).isNotNull();
+
+            try (WsClient docA = connectDoc(roomId, "main", SESSION_A);
+                 WsClient docB = connectDoc(roomId, "main", SESSION_B)) {
+
+                byte[] first = {0x00, 0x02, 0x11, 0x22};
+                docB.sendBinary(first);
+                assertThat(docA.pollBinary(3, TimeUnit.SECONDS))
+                        .as("Before the change, Bob's edit reaches Alice")
+                        .isEqualTo(first);
+
+                // The Host makes Bob an Observer while his sockets stay open.
+                roomService.changeRole(roomId, bob.getMemberId(), Role.OBSERVER);
+
+                docB.sendBinary(new byte[]{0x00, 0x02, 0x33, 0x44});
+                assertThat(docA.pollBinary(500, TimeUnit.MILLISECONDS))
+                        .as("After the change, Bob's edit is dropped")
+                        .isNull();
+                String rejected = pollControlMessage(ctrlB, "edit-rejected", 3, TimeUnit.SECONDS);
+                assertThat(rejected)
+                        .as("An Observer is told the reason 'observer'")
+                        .contains("\"doc_id\":\"main\"")
+                        .contains("\"reason\":\"observer\"");
+
+                // Back to participant: the next edit goes through again.
+                roomService.changeRole(roomId, bob.getMemberId(), Role.PARTICIPANT);
+                byte[] again = {0x00, 0x02, 0x55, 0x66};
+                docB.sendBinary(again);
+                assertThat(docA.pollBinary(3, TimeUnit.SECONDS))
+                        .as("After access is given back, Bob's edit reaches Alice")
+                        .isEqualTo(again);
+            }
+        }
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void pairMode_hasOnlyTheMainDocument_noModulesCanBeRequested() throws Exception {
+        Map<String, Object> room = createRoom("pair", "debug_together", null);
+        String roomId     = (String) room.get("room_id");
+        String ownerToken = (String) room.get("owner_token");
+
+        try (WsClient ctrlA = connectControl(roomId, SESSION_A)) {
+            sendJoin(ctrlA, "Alice", ownerToken);
+            drainText(ctrlA, 2);
+
+            TestRestTemplate rest = new TestRestTemplate();
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.APPLICATION_JSON);
+            headers.set("X-Session-Id", SESSION_A);
+            ResponseEntity<Map> response = rest.postForEntity(
+                    "http://localhost:" + port + "/v1/rooms/" + roomId + "/modules",
+                    new HttpEntity<>(Map.of("name", "extra.py"), headers), Map.class);
+            assertThat(response.getStatusCode().is4xxClientError())
+                    .as("A Pair mode room has one shared file; a module request is refused")
+                    .isTrue();
         }
     }
 
