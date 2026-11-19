@@ -174,7 +174,7 @@ export default function RoomPage(props: RoomPageProps = {}) {
       if (!user?.name || !user.color || !selection?.head) return
 
       const member = rosterRef.current.find(
-        (entry) => entry.display_name === user.name,
+        (entry) => entry.member_id === user.member_id,
       )
 
       if (!member) return
@@ -229,10 +229,10 @@ export default function RoomPage(props: RoomPageProps = {}) {
     awareness.getStates().forEach((state) => {
       const user = (state as AwarenessUserState)?.user
 
-      if (!user?.name || !user.color) return
+      if (!user?.member_id || !user.color) return
 
       const member = rosterRef.current.find(
-        (entry) => entry.display_name === user.name,
+        (entry) => entry.member_id === user.member_id,
       )
 
       if (!member || seenByMemberId.has(member.member_id)) return

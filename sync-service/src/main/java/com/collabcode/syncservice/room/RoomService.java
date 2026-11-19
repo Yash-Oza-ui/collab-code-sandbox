@@ -187,29 +187,7 @@ public class RoomService {
      * Frees their display_name for future joins while keeping US-28 block
      * semantics exclusive to removeMember().
      */
-    public synchronized Member leaveBySessionId(String roomId, String sessionId) {
-        if (roomId == null || sessionId == null) {
-            return null;
-        }
-        Room room = store.get(roomId);
-        if (room == null) {
-            return null;
-        }
-        String targetMemberId = null;
-        Member targetMember = null;
-        for (Member m : room.getMembers().values()) {
-            if (sessionId.equals(m.getSessionId())) {
-                targetMemberId = m.getMemberId();
-                targetMember = m;
-                break;
-            }
-        }
-        if (targetMemberId != null) {
-            room.getMembers().remove(targetMemberId);
-        }
-        return targetMember;
-    }
-    
+
     /**
      * Re-admit a member (US-28, V2.18): remove the one block entry with this
      * member_id. Returns false if no block entry matches (404 MEMBER_NOT_FOUND).
