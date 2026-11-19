@@ -279,16 +279,23 @@ export function handleIncomingAwarenessFrame(
   }
 }
 
+/** Why a member may not run (V2.20). `null` or absent when they may. */
+export type RunDeniedReason = 'observer' | 'run_revoked' | 'host_only'
+
+export interface MemberPermissions {
+  /** Pair mode only; Open mode takes write access from module state. */
+  can_edit?: boolean
+  can_run: boolean
+  run_denied_reason?: RunDeniedReason | null
+}
+
 export interface JoinedMessage {
   type: 'joined'
   member_id: string
   role: string
   mode: string
   preset?: string
-  permissions?: {
-    can_edit: boolean
-    can_run: boolean
-  }
+  permissions?: MemberPermissions
   [key: string]: unknown
 }
 
@@ -303,15 +310,14 @@ export interface RosterMember {
   member_id: string
   display_name: string
   role: string
-  permissions?: {
-    can_edit: boolean
-    can_run: boolean
-  }
+  permissions?: MemberPermissions
 }
 
 export interface RosterMessage {
   type: 'roster'
   members: RosterMember[]
+  /** Host-only running is on (V2.20): only the Host can run. Absent from older servers. */
+  host_only_run?: boolean
   [key: string]: unknown
 }
 
@@ -933,12 +939,31 @@ export function connectAwarenessWs(
   const join = (name: string, token?: string) => {
     if (isDestroyed) return
 
-    // Prevent duplicate join attempts while a request is already queued or active
-    if (activeHandshake) {
-      return
-    }
-    activeHandshake = { name, token }
+    // Prevent duplicate join attempts while a request is already queued or active.
+    if (activeHandshake) return
 
+    // V2.3 closes the control socket after join-refused. A retry must never
+    // send another join on that refused socket, even if its close event is
+    // still in flight. Reset terminal state only for an explicit user retry.
+    if (terminal) {
+      terminal = false
+      reconnecting = false
+      clearReconnectTimer()
+      closeDocumentSocket()
+      const refusedSocket = controlWs
+      controlWs = null
+      if (refusedSocket) {
+        refusedSocket.onopen = null
+        refusedSocket.onmessage = null
+        refusedSocket.onerror = null
+        refusedSocket.onclose = null
+        if (refusedSocket.readyState === WS_OPEN || refusedSocket.readyState === WS_CONNECTING) {
+          refusedSocket.close()
+        }
+      }
+    }
+
+    activeHandshake = { name, token }
     const activeControlWs = controlWs
     if (!activeControlWs || activeControlWs.readyState === WS_CLOSED || activeControlWs.readyState === WS_CLOSING) {
       // Reconnect with a fresh WebSocket attempt

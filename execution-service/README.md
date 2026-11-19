@@ -113,18 +113,25 @@ After execution finishes, execution-service broadcasts the run result to sync-se
 
 ---
 
-## ⚠️ StubPermissionLookupService
+## Permission lookup (US-60, T-17 V2.11, FR41.4)
 
-`StubPermissionLookupService` is an in-memory stub activated by the
-`stub-permissions` Spring profile (enabled by default in `application.yml`).
-It returns `can_run: true` for every session that is not one of the
-well-known test session IDs (`OBSERVER_SESSION_ID`, `REVOKED_SESSION_ID`,
-`HOST_ONLY_SESSION_ID`, `NOT_IN_ROOM_SESSION_ID`).
+On every run request execution-service asks sync-service who the caller is and whether they may run
+(`GET {SYNC_SERVICE_INTERNAL_URL}/internal/rooms/{room_id}/sessions/{session_id}` with
+`X-Internal-Token`). The answer is never cached, so a change by the Host (Run taken away, Host-only
+running) refuses the member's very next run with `403 RUN_NOT_ALLOWED` and `error.reason` of
+`observer`, `run_revoked` or `host_only`.
 
-**This stub must be replaced** when sync-service implements real session
-lookup (T-20). To disable it, remove `stub-permissions` from
-`spring.profiles.active` and register a production `PermissionLookupService`
-bean.
+- **`HttpPermissionLookupService`** is the real lookup and the default. It fails closed: no
+  connection, a timeout, `401`, a `5xx` or an answer without a boolean `can_run` is
+  `503 ROOM_SERVICE_UNAVAILABLE` and the code is not run. `404 ROOM_NOT_FOUND` is
+  `404 ROOM_NOT_FOUND`; `404 SESSION_NOT_FOUND` is `403 RUN_NOT_ALLOWED` with reason `not_in_room`.
+  It needs `SYNC_SERVICE_INTERNAL_URL` and `INTERNAL_API_TOKEN` (the same settings as the result broadcast).
+- **`StubPermissionLookupService`** is an in-memory stub, used only when the `stub-permissions`
+  Spring profile is active (`SPRING_PROFILES_ACTIVE=stub-permissions`). It returns `can_run: true` for every
+  session that is not one of the well-known test session IDs (`OBSERVER_SESSION_ID`, `REVOKED_SESSION_ID`,
+  `HOST_ONLY_SESSION_ID`, `NOT_IN_ROOM_SESSION_ID`). The unit tests and the integration stack in
+  `docker-compose.yml` select it, because the older run scripts use made-up rooms and sessions. To run the
+  integration stack with the real lookup: `EXECUTION_SPRING_PROFILES= bash tests/integration/up.sh`.
 
 ---
 

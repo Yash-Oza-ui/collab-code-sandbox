@@ -4,11 +4,9 @@ server:
 spring:
   application:
     name: execution-service
-  # Until sync-service implements real session lookup (T-20), activate the
-  # in-memory stub that returns can_run: true for every session.
-  # Remove this profile once the real PermissionLookupService is wired.
-  profiles:
-    active: stub-permissions
+  # US-60: permissions come from sync-service (HttpPermissionLookupService) unless the
+  # in-memory stub is selected on purpose, e.g. SPRING_PROFILES_ACTIVE=stub-permissions
+  # (the integration stack in docker-compose.yml does that for the legacy run scripts).
   # Enforce the 1 MiB run-request body cap (T-06 section 2).
   # Overridden by app.execution.limits.max-request-body-bytes at runtime.
   servlet:
@@ -47,6 +45,13 @@ app:
   # Values are configured defaults; never hard-coded in Java (DR3).
   # ---------------------------------------------------------------
   execution:
+    # Sandboxed Docker runtime images by language (DR1, DR3, US-14)
+    images:
+      cpp: collab-sandbox-cpp:0.1.0
+      python: collab-sandbox-python:0.2.0
+      c: collab-sandbox-c:0.1.0
+      java: collab-sandbox-java:0.1.0
+      javascript: collab-sandbox-javascript:0.1.0
     limits:
       # NFR4.1 – maximum wall-clock time per run (seconds)
       wall-time-seconds: 5

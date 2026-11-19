@@ -4,9 +4,11 @@ import com.collabcode.syncservice.run.RunRecordStore;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
+import java.text.Normalizer;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 
 /**
  * Join and roster logic (T-17 V2.3, V2.4; FR42).
@@ -58,15 +60,16 @@ public class RoomService {
             return JoinOutcome.joined(existing);
         }
 
+        // FR42: uniqueness is case-insensitive, across different sessions only.
+        // Check before approval: a taken name must not enter an approval queue.
+        if (findByName(room, displayName) != null) {
+            return JoinOutcome.refused("NAME_TAKEN");
+        }
+
         // FR9.3 / US-26: if the room requires Host approval, the join is held as
         // APPROVAL_PENDING. The control socket must remain open (V2.3 review 2).
         if (room.isRequiresApproval()) {
             return JoinOutcome.refused("APPROVAL_PENDING");
-        }
-
-        // A display name already used by a DIFFERENT session is refused (FR42).
-        if (findByName(room, displayName) != null) {
-            return JoinOutcome.refused("NAME_TAKEN");
         }
 
         Role role = isOwner(room, ownerToken) ? Role.HOST : Role.PARTICIPANT;
@@ -113,10 +116,49 @@ public class RoomService {
         if (member == null) {
             return null;
         }
-        member.setRole(newRole);
+        // Change what the member may do before the role label, so a frame that arrives while
+        // this runs never sees the old access together with the new role.
         member.setCanEdit(computeCanEdit(room, newRole));
+        // A role change starts from the role's default permissions (V2.17 rule 4), so a
+        // Run restriction (US-60) is cleared here; the Host can set it again afterwards.
         member.setCanRun(newRole != Role.OBSERVER);
+        member.setRole(newRole);
         return member;
+    }
+
+    /**
+     * Take Run away from a participant, or give it back (US-60, V2.20; FR41.2).
+     * Returns the member, or null if the room or member is unknown. The caller has
+     * already checked that the member is a participant (not the Host, not an Observer).
+     *
+     * <p>This and {@link #setHostOnlyRun} are the only two places run permission
+     * changes, so the audit log of US-58 (FR34) records the change events from here.
+     */
+    public synchronized Member setMemberRunAllowed(String roomId, String memberId, boolean allowed) {
+        Room room = store.get(roomId);
+        if (room == null) {
+            return null;
+        }
+        Member member = room.getMembers().get(memberId);
+        if (member == null) {
+            return null;
+        }
+        member.setCanRun(allowed);
+        return member;
+    }
+
+    /**
+     * Switch Host-only running on or off for the room (US-60, V2.20; FR41.3).
+     * Returns the room, or null if it is unknown. See {@link #setMemberRunAllowed}
+     * for the audit (US-58) note.
+     */
+    public synchronized Room setHostOnlyRun(String roomId, boolean hostOnlyRun) {
+        Room room = store.get(roomId);
+        if (room == null) {
+            return null;
+        }
+        room.setHostOnlyRun(hostOnlyRun);
+        return room;
     }
 
     /**
@@ -250,11 +292,21 @@ public class RoomService {
 
     private Member findByName(Room room, String displayName) {
         for (Member m : room.getMembers().values()) {
-            if (m.getDisplayName().equals(displayName)) {
+            if (nameKey(m.getDisplayName()).equals(nameKey(displayName))) {
                 return m;
             }
         }
         return null;
+    }
+
+    /**
+     * Comparison key only: keep the display spelling unchanged in the roster.
+     * Locale-independent case matching also treats full-width Unicode variants
+     * like "Ａｄａ" as the same name as "Ada".
+     */
+    private static String nameKey(String name) {
+        return Normalizer.normalize(name.strip(), Normalizer.Form.NFKC)
+                .toLowerCase(Locale.ROOT);
     }
 
     /**
