@@ -4,6 +4,7 @@ import com.collabcode.syncservice.run.RunRecordStore;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -42,6 +43,12 @@ public class RoomService {
         Room room = store.get(roomId);
         if (room == null) {
             throw new IllegalArgumentException("unknown room: " + roomId);
+        }
+
+        // US-28 (V2.18, CR04): a removed session is blocked — a reconnect, refresh,
+        // new tab or a different display name is refused at join with USER_BLOCKED.
+        if (room.isBlocked(sessionId)) {
+            return JoinOutcome.refused("USER_BLOCKED");
         }
 
         // Reconnect: the same session rejoining (refresh or a second tab) is
@@ -106,10 +113,146 @@ public class RoomService {
         if (member == null) {
             return null;
         }
-        member.setRole(newRole);
+        // Change what the member may do before the role label, so a frame that arrives while
+        // this runs never sees the old access together with the new role.
         member.setCanEdit(computeCanEdit(room, newRole));
+        // A role change starts from the role's default permissions (V2.17 rule 4), so a
+        // Run restriction (US-60) is cleared here; the Host can set it again afterwards.
         member.setCanRun(newRole != Role.OBSERVER);
+        member.setRole(newRole);
         return member;
+    }
+
+    /**
+     * Take Run away from a participant, or give it back (US-60, V2.20; FR41.2).
+     * Returns the member, or null if the room or member is unknown. The caller has
+     * already checked that the member is a participant (not the Host, not an Observer).
+     *
+     * <p>This and {@link #setHostOnlyRun} are the only two places run permission
+     * changes, so the audit log of US-58 (FR34) records the change events from here.
+     */
+    public synchronized Member setMemberRunAllowed(String roomId, String memberId, boolean allowed) {
+        Room room = store.get(roomId);
+        if (room == null) {
+            return null;
+        }
+        Member member = room.getMembers().get(memberId);
+        if (member == null) {
+            return null;
+        }
+        member.setCanRun(allowed);
+        return member;
+    }
+
+    /**
+     * Switch Host-only running on or off for the room (US-60, V2.20; FR41.3).
+     * Returns the room, or null if it is unknown. See {@link #setMemberRunAllowed}
+     * for the audit (US-58) note.
+     */
+    public synchronized Room setHostOnlyRun(String roomId, boolean hostOnlyRun) {
+        Room room = store.get(roomId);
+        if (room == null) {
+            return null;
+        }
+        room.setHostOnlyRun(hostOnlyRun);
+        return room;
+    }
+
+    /**
+     * Remove a member (US-28, V2.18). Records the block FIRST — keyed by the
+     * member's private session_id, with its member_id, display_name and the
+     * removal time — so a racing reconnect (FR11) is already refused, THEN drops
+     * the member from the roster. Returns the removed member (whose session_id the
+     * caller uses to close its sockets), or null if the room or member is unknown.
+     */
+    public synchronized Member removeMember(String roomId, String memberId) {
+        Room room = store.get(roomId);
+        if (room == null) {
+            return null;
+        }
+        Member member = room.getMembers().get(memberId);
+        if (member == null) {
+            return null;
+        }
+        room.block(member.getSessionId(), member.getMemberId(), member.getDisplayName(), Instant.now());
+        room.getMembers().remove(memberId);
+        return member;
+    }
+
+    /**
+     * Re-admit a member (US-28, V2.18): remove the one block entry with this
+     * member_id. Returns false if no block entry matches (404 MEMBER_NOT_FOUND).
+     */
+    public synchronized boolean readmit(String roomId, String memberId) {
+        Room room = store.get(roomId);
+        if (room == null) {
+            return false;
+        }
+        return room.unblockByMemberId(memberId);
+    }
+
+    /** The blocked members of a room (US-28 list), or empty if the room is unknown. */
+    public List<Room.BlockedSession> listBlocked(String roomId) {
+        Room room = store.get(roomId);
+        if (room == null) {
+            return List.of();
+        }
+        return new ArrayList<>(room.blockedSessions());
+    }
+
+    /**
+     * Regenerate the room link (US-28, V2.18): move the room's state to a new,
+     * unguessable id (NFR16, US-62) — members keep their member_ids (V2.3) — leave
+     * the block list behind (a new link is a fresh start) and make the old id stop
+     * resolving. Modules are re-keyed by the caller (ModuleService). Returns the
+     * new Room, or null if the room is unknown.
+     */
+    public synchronized Room regenerateLink(String roomId) {
+        Room old = store.get(roomId);
+        if (old == null) {
+            return null;
+        }
+        Room fresh = old.withNewId(RoomIds.generate());
+        store.put(fresh);
+        store.remove(roomId);
+        // Move the run history to the new id (US-52/US-68); the old id is retired.
+        if (runRecordStore != null) {
+            runRecordStore.moveRoom(roomId, fresh.getRoomId());
+        }
+        return fresh;
+    }
+
+    /**
+     * Transfer the Host role (US-54, V2.19; FR31.1). Reissues the owner token
+     * (the previous one stops granting Host rights at once, T-10), demotes every
+     * current Host to participant and promotes {@code targetMemberId}, so there is
+     * exactly one Host after the call. The caller must already have checked that the
+     * target is a current participant (V2.19 rule 2). Returns the new Host, or null
+     * if the room or target is unknown.
+     */
+    public synchronized Member transferHost(String roomId, String targetMemberId, String newOwnerTokenHash) {
+        Room room = store.get(roomId);
+        if (room == null) {
+            return null;
+        }
+        Member target = room.getMembers().get(targetMemberId);
+        if (target == null) {
+            return null;
+        }
+        // Reissue the owner token: the previous token no longer matches (T-10).
+        room.setOwnerTokenHash(newOwnerTokenHash);
+        // Exactly one Host at all times: demote every current Host, then promote the target.
+        for (Member m : room.getMembers().values()) {
+            if (m.getRole() == Role.HOST) {
+                m.setRole(Role.PARTICIPANT);
+                m.setCanEdit(computeCanEdit(room, Role.PARTICIPANT));
+                m.setCanRun(true);
+            }
+        }
+        target.setRole(Role.HOST);
+        target.setCanEdit(computeCanEdit(room, Role.HOST));
+        target.setCanRun(true);
+        return target;
     }
 
     // ----- helpers -----

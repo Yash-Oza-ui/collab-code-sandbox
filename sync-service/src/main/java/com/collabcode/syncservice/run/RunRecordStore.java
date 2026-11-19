@@ -120,6 +120,34 @@ public class RunRecordStore {
         return list != null ? list.size() : 0;
     }
 
+    /**
+     * Re-key a room's run records when its link is regenerated (US-28, V2.18): the
+     * room id changes, so each immutable record is rebuilt with the new room_id and
+     * the newest-first ordering (sequence + timestamp) is preserved. The old id is
+     * left empty so a later US-56 deletion of it purges nothing stale.
+     */
+    public void moveRoom(String oldRoomId, String newRoomId) {
+        if (oldRoomId == null || newRoomId == null || oldRoomId.equals(newRoomId)) {
+            return;
+        }
+        List<StoredEntry> entries = recordsByRoom.remove(oldRoomId);
+        if (entries == null || entries.isEmpty()) {
+            return;
+        }
+        List<StoredEntry> moved = new CopyOnWriteArrayList<>();
+        for (StoredEntry e : entries) {
+            RunRecord r = e.record;
+            RunRecord rekeyed = new RunRecord(newRoomId, r.getRunnerDisplayName(), r.getRanAt(),
+                    r.getLanguage(), r.getFiles(), r.getSavedVersions(), r.getInputHash(),
+                    r.getExecutionTimeMs(), r.getPeakMemoryMb());
+            moved.add(new StoredEntry(rekeyed, e.parsedRanAt, e.sequence));
+        }
+        recordsByRoom.merge(newRoomId, moved, (existing, incoming) -> {
+            existing.addAll(incoming);
+            return existing;
+        });
+    }
+
     private static Instant parseInstantOrNull(String value) {
         if (value == null || value.isBlank()) {
             return null;

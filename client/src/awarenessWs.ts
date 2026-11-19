@@ -279,16 +279,23 @@ export function handleIncomingAwarenessFrame(
   }
 }
 
+/** Why a member may not run (V2.20). `null` or absent when they may. */
+export type RunDeniedReason = 'observer' | 'run_revoked' | 'host_only'
+
+export interface MemberPermissions {
+  /** Pair mode only; Open mode takes write access from module state. */
+  can_edit?: boolean
+  can_run: boolean
+  run_denied_reason?: RunDeniedReason | null
+}
+
 export interface JoinedMessage {
   type: 'joined'
   member_id: string
   role: string
   mode: string
   preset?: string
-  permissions?: {
-    can_edit: boolean
-    can_run: boolean
-  }
+  permissions?: MemberPermissions
   [key: string]: unknown
 }
 
@@ -303,15 +310,14 @@ export interface RosterMember {
   member_id: string
   display_name: string
   role: string
-  permissions?: {
-    can_edit: boolean
-    can_run: boolean
-  }
+  permissions?: MemberPermissions
 }
 
 export interface RosterMessage {
   type: 'roster'
   members: RosterMember[]
+  /** Host-only running is on (V2.20): only the Host can run. Absent from older servers. */
+  host_only_run?: boolean
   [key: string]: unknown
 }
 

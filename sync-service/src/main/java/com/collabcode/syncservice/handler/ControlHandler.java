@@ -56,6 +56,12 @@ public class ControlHandler extends AbstractWebSocketHandler {
     /** Room is closed / destroyed. */
     public static final int CLOSE_ROOM_CLOSED = 4410;
 
+    /** A member the Host removed (US-28, V2.3); their live sockets are closed. */
+    public static final int CLOSE_REMOVED = 4403;
+
+    /** The room link was regenerated (US-28, V2.18); reconnect with the new link. */
+    public static final int CLOSE_LINK_REGENERATED = 4411;
+
     // Shared validation patterns (same rules as T-02 / RelayHandler)
     static final Pattern ROOM_ID_OK = Pattern.compile("^[A-Za-z0-9_-]{1,64}$");
     static final Pattern UUID_V4_OK = Pattern.compile(
@@ -235,9 +241,14 @@ public class ControlHandler extends AbstractWebSocketHandler {
 
         if (!outcome.isJoined()) {
             String reason = outcome.getRefusedReason();
-            String humanMessage = "NAME_TAKEN".equals(reason)
-                    ? "The display name '" + displayName + "' is already taken in this room."
-                    : "Join refused: " + reason;
+            String humanMessage;
+            if ("NAME_TAKEN".equals(reason)) {
+                humanMessage = "The display name '" + displayName + "' is already taken in this room.";
+            } else if ("USER_BLOCKED".equals(reason)) {
+                humanMessage = "The Host has removed you from this room.";
+            } else {
+                humanMessage = "Join refused: " + reason;
+            }
             sendText(session, objectMapper.writeValueAsString(
                     RoomMessages.joinRefused(reason, humanMessage)));
             log.info("Control: join refused room={} reason={}", roomId, reason);

@@ -425,6 +425,48 @@ describe('executeRun API client (Fix 1, 2, 3)', () => {
     }
   })
 
+  it('shows the plain-words reason for each RUN_NOT_ALLOWED refusal (US-60, FR41.4)', async () => {
+    const cases: Array<[string, string]> = [
+      ['observer', 'Observers cannot run code.'],
+      ['run_revoked', 'The Host has turned off running for you.'],
+      ['host_only', 'Only the Host can run code in this room right now.'],
+      ['not_in_room', 'You are not in this room.'],
+    ]
+    for (const [reason, text] of cases) {
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 403,
+        json: async () => ({
+          request_id: 'r',
+          error: { code: 'RUN_NOT_ALLOWED', message: 'server text', reason, retry_after_seconds: null },
+        }),
+      })
+
+      const result = await executeRun({ ...defaultOptions, fetchFn: fetchMock as unknown as typeof fetch })
+
+      expect(result.ok).toBe(false)
+      if (!result.ok) {
+        expect(result.code).toBe('RUN_NOT_ALLOWED')
+        expect(result.reason).toBe(reason)
+        expect(result.status).toBe(403)
+        expect(result.error).toBe(text)
+      }
+    }
+  })
+
+  it('falls back to the server message for an unknown RUN_NOT_ALLOWED reason', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 403,
+      json: async () => ({ error: { code: 'RUN_NOT_ALLOWED', message: 'Not today.', reason: 'something_new' } }),
+    })
+
+    const result = await executeRun({ ...defaultOptions, fetchFn: fetchMock as unknown as typeof fetch })
+
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.error).toBe('Not today.')
+  })
+
   it('handles service unavailable / network connection failure gracefully', async () => {
     const fetchMock = vi.fn().mockRejectedValue(new TypeError('Failed to fetch'))
 

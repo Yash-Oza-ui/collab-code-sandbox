@@ -23,7 +23,7 @@ FROM python:3.12.9-slim-bookworm
 # ---- Metadata ----
 LABEL org.opencontainers.image.title="collab-sandbox-python" \
       org.opencontainers.image.description="Python 3.12 sandboxed execution runtime (T-14)" \
-      org.opencontainers.image.version="0.1.0" \
+      org.opencontainers.image.version="0.2.0" \
       org.opencontainers.image.source="https://github.com/Yash-Oza-ui/collab-code-sandbox"
 
 # ---- Non-root user (NFR3.2) ----
@@ -41,7 +41,13 @@ WORKDIR /sandbox/code
 # /sandbox is writable by the sandbox user for temporary stdout/stderr
 # capture when the service uses a write mount alongside the read-only
 # source mount. /sandbox/code itself is expected to be read-only at runtime.
-RUN chown -R sandbox:sandbox /sandbox
+RUN mkdir -p /sandbox/code /sandbox/metrics \
+ && chown -R sandbox:sandbox /sandbox
+
+# Trusted supervisor: measures only the user process, not Docker startup.
+# Keep it root-owned and non-writable by the sandbox user.
+COPY --chown=root:root runner.py /usr/local/bin/collab-sandbox-runner
+RUN chmod 0555 /usr/local/bin/collab-sandbox-runner
 
 # ---- Switch to non-root user ----
 USER sandbox
