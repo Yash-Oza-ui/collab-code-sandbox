@@ -60,16 +60,16 @@ public class RoomService {
             return JoinOutcome.joined(existing);
         }
 
+        // FR42: uniqueness is case-insensitive, across different sessions only.
+        // Check before approval: a taken name must not enter an approval queue.
+        if (findByName(room, displayName) != null) {
+            return JoinOutcome.refused("NAME_TAKEN");
+        }
+
         // FR9.3 / US-26: if the room requires Host approval, the join is held as
         // APPROVAL_PENDING. The control socket must remain open (V2.3 review 2).
         if (room.isRequiresApproval()) {
             return JoinOutcome.refused("APPROVAL_PENDING");
-        }
-
-        // FR42: uniqueness is case-insensitive, across different sessions only.
-        // Normalize Unicode compatibility characters before comparing names.
-        if (findByName(room, displayName) != null) {
-            return JoinOutcome.refused("NAME_TAKEN");
         }
 
         Role role = isOwner(room, ownerToken) ? Role.HOST : Role.PARTICIPANT;
