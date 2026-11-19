@@ -153,7 +153,10 @@ ws://localhost:8081/ws/rooms/{room_id}/docs/{doc_id}?session_id={uuid-v4}
   - `0 2`: Sync update (incremental update) — carries document changes; dropped if sender cannot edit.
   - `1 ...`: Awareness — forwarded.
   - `3`: Query awareness — forwarded.
-  - If dropped, an `edit-rejected` text message is sent to the sender's control socket.
+  - **Anything else is treated as a possible change** and dropped if the sender cannot edit: an unknown message type, an unknown sync sub-type, or a first byte of `0x80` or more. Yjs reads these numbers as variable-length integers, so a modified client can write a real update as, for example, `80 00 82 00 ...`; receivers apply it, so the relay does not forward it for a member without edit access. Only the three read-only shapes above (`0 0`, `1`, `3`) pass for such a member.
+  - A member with edit access is never limited by this check; its frames are forwarded unchanged.
+  - The decision uses the member's current `can_edit` on the server for every frame, so a role change by the Host (for example to Observer) applies from the next frame.
+  - If dropped, an `edit-rejected` text message is sent to the sender's control socket (never an HTTP error). Frame contents are not logged.
 - In Pair mode: `doc_id` is `"main"`. In Open mode: `doc_id` is the module id.
 
 ---
@@ -218,8 +221,8 @@ mvn test
 ```
 Test classes:
 - `RelayIntegrationTest` — health, binary relay, room isolation, awareness echo, disconnect, internal broadcast, 4400/4404.
-- `SocketsAndEditCheckIntegrationTest` — join/roster flow, NAME_TAKEN, CR13 edit check, contract reasons, 4406 not-joined, doc_id isolation.
-- `DocumentHandlerUnitTest` — first-two-bytes edit-check logic (`0 0`, `0 1`, `0 2`, `1`, `3`) and close-code constants.
+- `SocketsAndEditCheckIntegrationTest` — join/roster flow, NAME_TAKEN, CR13 edit check, contract reasons, 4406 not-joined, doc_id isolation, Pair mode enforcement against disguised update frames, and access changed mid-session.
+- `DocumentHandlerUnitTest` — first-two-bytes edit-check logic (`0 0`, `0 1`, `0 2`, `1`, `3`, and frames written with longer number encodings or unknown types) and close-code constants.
 - `RoomServiceTest` — join/roster logic, roles, NAME_TAKEN (Femina's part, used by control handler).
 - `RoomControllerTest` — POST /v1/rooms validation.
 - `OwnerControllerTest` — GET /v1/rooms/{id}/owner.
