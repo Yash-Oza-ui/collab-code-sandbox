@@ -29,10 +29,6 @@ export function setUserAwareness(awareness: Awareness, user: UserPresence): void
 }
 
 /**
- * Gets the local user presence from the awareness instance.
- */
-
-/**
  * Replace remote cursor label text with the server's V2.4 roster names.
  *
  * Awareness is client-writable, so its `user.name` must never be displayed as
@@ -66,6 +62,7 @@ export function applyRosterNamesToAwareness(
   }
 }
 
+/** Gets the local user presence from the awareness instance. */
 export function getLocalUserAwareness(awareness: Awareness): UserPresence | null {
   const state = awareness.getLocalState() as AwarenessUserState | null
   return state?.user ?? null
