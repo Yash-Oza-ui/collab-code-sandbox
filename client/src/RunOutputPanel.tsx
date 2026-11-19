@@ -10,9 +10,12 @@ function formatRanAt(ranAt: string): string {
 }
 
 /**
- * Output of one run (T-11, US-08). The same component shows the result for the person who
- * pressed Run and, through the `run-result` frame, for every other participant in the room.
- * Only `runner.display_name` is shown; ids are never rendered.
+ * Output of one run (T-11, US-08, US-50 / FR26).
+ *
+ * Shows the result for the person who pressed Run and, through the `run-result` frame,
+ * for every participant in the room. Labels every shown result with runner display name
+ * and local time (with raw timestamp in tooltip). In Open mode, labels the saved
+ * versions that were run. Member IDs are never rendered.
  */
 export default function RunOutputPanel({ result }: RunOutputPanelProps) {
   const runnerName = result.runner?.display_name
@@ -32,17 +35,53 @@ export default function RunOutputPanel({ result }: RunOutputPanelProps) {
   return (
     <div className="run-output-preview" data-testid="run-output-preview">
       <div className="run-output-meta" data-testid="run-output-meta">
-        {runnerName && (
-          <span data-testid="run-output-runner">
-            Run by {runnerName}
-            {result.ran_at ? ` at ${formatRanAt(result.ran_at)}` : ''}
+        {(runnerName || result.ran_at) && (
+          <span className="run-output-attribution" data-testid="run-output-attribution">
+            {runnerName && (
+              <span data-testid="run-output-runner">
+                Run by {runnerName}
+              </span>
+            )}
+            {result.ran_at && (
+              <span
+                className="run-output-time"
+                data-testid="run-output-time"
+                title={result.ran_at}
+              >
+                {runnerName ? ' at ' : 'Ran at '}
+                {formatRanAt(result.ran_at)}
+              </span>
+            )}
           </span>
         )}
         <span data-testid="run-output-outcome">{outcome}</span>
         <span data-testid="run-output-stats">
+          {result.compile_time_ms !== null && result.compile_time_ms !== undefined
+            ? `${result.compile_time_ms.toFixed(0)} ms compile, `
+            : ''}
           {result.execution_time_ms.toFixed(0)} ms, {result.peak_memory_mb.toFixed(1)} MB
         </span>
       </div>
+
+      {result.saved_versions && result.saved_versions.length > 0 && (
+        <div className="run-output-saved-versions" data-testid="run-output-saved-versions">
+          <span>saved version: </span>
+          {result.saved_versions.map((sv, idx) => (
+            <span
+              key={sv.module_id || `${sv.name}-${sv.version}`}
+              data-testid={`saved-version-${sv.name}`}
+              title={
+                sv.saved_at
+                  ? `Saved by ${sv.saved_by?.display_name ?? 'unknown'} at ${sv.saved_at}`
+                  : undefined
+              }
+            >
+              {idx > 0 ? ', ' : ''}
+              {sv.name} v{sv.version}
+            </span>
+          ))}
+        </div>
+      )}
 
       {result.output_truncated && (
         <div className="run-output-notice" data-testid="run-output-truncated" role="status">
