@@ -15,6 +15,12 @@ public class Member {
     private final String displayName;
     private Role role;
     private boolean canEdit;
+    /**
+     * The member's own Run grant (US-60, V2.20). {@code false} means the Host took
+     * Run away (FR41.2), or the member is an Observer. It is not the effective
+     * permission: Host-only running and the Host's own right are applied by
+     * {@link Room#canRun(Member)}, which is what every reader must use.
+     */
     private boolean canRun;
 
     public Member(String memberId, String sessionId, String displayName,
