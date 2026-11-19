@@ -1,322 +1,183 @@
-# T-14 · Runtime Images
+# US-14 · Runtime Images for Main Coursework Languages
 
-**Part of:** EPIC 2 – Sandboxed Execution Engine | Sprint 1
-**Traceability:** FR5, DR1, DR2 · T-14
-**Reviewers:** Jay Limbasiya
-**Bhavya's PR branch:** `feature/T-14-runtime-images` | **Quincy's branch:** `feature/T-14-runtime-images-checks`
+**Part of:** EPIC 2 – Sandboxed Execution Engine | Sprint 3
+**Traceability:** DR1, DR2, DR3, DR4, DR5, NFR3, NFR4, FR5 · US-14
+**PR Branch:** `feature/US-14-language-images`
+**Reviewers:** Yash Oza, Digvijay Parmar (sanitizer check)
 
 ---
 
 ## 1. Purpose
 
-T-14 delivers the **Docker runtime image(s)** that the container runner (US-09) needs in order to execute user-submitted code. Without a runtime image there is nothing to run code _in_. This folder also defines the **run convention** — how source code reaches the container, how stdin is fed, and how stdout, stderr, and the exit code are captured — so that US-09 can be built against a stable, agreed contract.
+US-14 expands sandboxed execution from Python-only (T-14) to all five main coursework languages specified by **DR1**: **C++, Python, C, Java, and JavaScript**.
 
-A second goal is to make it easy to add a new language later (US-14, Sprint 2) without rewriting the existing language support.
+Each language executes inside its own dedicated runtime image built from a pinned base image in the repository. Compiled languages (**C++, C, Java**) run through a distinct compile stage (**NFR4.5**) followed by a run stage. Interpreted languages (**Python, JavaScript**) execute directly in a run stage.
+
+The **C and C++ images include full toolchain support for AddressSanitizer (ASan) and UndefinedBehaviorSanitizer (UBSan)** to prepare for the sanitizer run feature (**US-73**), without enabling sanitizers during normal runs.
 
 ---
 
-## 2. Directory Structure
+## 2. Supported Languages & Testing Priority Order (DR1)
+
+Testing and build priority strictly follows **DR1**:
+
+| Priority | Language Identifier | Runtime Image Tag | Base Image (Pinned) | Type | File Naming Rule (DR4, T-17 V2.8) |
+|---|---|---|---|---|---|
+| **1** | `cpp` | `collab-sandbox-cpp:0.1.0` | `debian:12.9-slim` | Compiled | `.cpp`, `.cc`, `.cxx` (e.g. `main.cpp`) |
+| **2** | `python` | `collab-sandbox-python:0.2.0` | `python:3.12.9-slim-bookworm` | Interpreted | `.py` (e.g. `main.py`) |
+| **3** | `c` | `collab-sandbox-c:0.1.0` | `debian:12.9-slim` | Compiled | `.c` (e.g. `main.c`) |
+| **4** | `java` | `collab-sandbox-java:0.1.0` | `eclipse-temurin:21.0.6_7-jdk-noble` | Compiled | `.java` (matches public class name, e.g. `Main.java`) |
+| **5** | `javascript` | `collab-sandbox-javascript:0.1.0` | `node:22.14.0-bookworm-slim` | Interpreted | `.js` (e.g. `main.js`) |
+
+> **File Naming Rule (DR4, T-17 V2.8):** File names come dynamically from the run request (`source.entry` and `source.files[i].name`), **not** a fixed `solution.py`-style name. Filenames must be plain names with the language-appropriate extension and without directory traversal characters (`/`, `\`, `..`).
+
+---
+
+## 3. Directory Structure
 
 ```
 execution-service/runtime-images/
 ├── README.md                   ← this file
-├── python/                     ← Sprint 1 runtime (Python 3.12)
-│   ├── Dockerfile              ← image definition, pinned base
-│   └── samples/                ← small programs used during verification
-│       ├── hello_world.py      ← no-stdin hello-world
-│       ├── stdin_echo.py       ← reads stdin, writes uppercased to stdout
-│       ├── stderr_split.py     ← writes one line each to stdout and stderr
-│       ├── exit_nonzero.py     ← exits with code 42
-│       └── network_probe.py    ← attempts a TCP connection (must fail in sandbox)
+├── cpp/                        ← Priority 1: C++ runtime (g++ 12, ASan/UBSan support)
+│   ├── Dockerfile
+│   └── samples/
+│       ├── hello_world.cpp
+│       ├── stdin_echo.cpp
+│       ├── stderr_split.cpp
+│       ├── exit_nonzero.cpp
+│       ├── network_probe.cpp
+│       ├── compile_error.cpp
+│       └── sanitizer_sample.cpp
+├── python/                     ← Priority 2: Python runtime (Python 3.12)
+│   ├── Dockerfile
+│   └── samples/
+│       ├── hello_world.py
+│       ├── stdin_echo.py
+│       ├── stderr_split.py
+│       ├── exit_nonzero.py
+│       ├── network_probe.py
+│       └── compile_error.py
+├── c/                          ← Priority 3: C runtime (gcc 12, ASan/UBSan support)
+│   ├── Dockerfile
+│   └── samples/
+│       ├── hello_world.c
+│       ├── stdin_echo.c
+│       ├── stderr_split.c
+│       ├── exit_nonzero.c
+│       ├── network_probe.c
+│       ├── compile_error.c
+│       └── sanitizer_sample.c
+├── java/                       ← Priority 4: Java runtime (Eclipse Temurin JDK 21)
+│   ├── Dockerfile
+│   └── samples/
+│       ├── Main.java
+│       ├── StdinEcho.java
+│       ├── StderrSplit.java
+│       ├── ExitNonzero.java
+│       ├── NetworkProbe.java
+│       └── CompileError.java
+├── javascript/                 ← Priority 5: JavaScript runtime (Node.js 22)
+│   ├── Dockerfile
+│   └── samples/
+│       ├── hello_world.js
+│       ├── stdin_echo.js
+│       ├── stderr_split.js
+│       ├── exit_nonzero.js
+│       └── network_probe.js
 └── tests/
-    └── verify.sh               ← reproducible verification script (all AC checks)
+    ├── verify.sh               ← Bash test script running all checks in priority order
+    └── verify.ps1              ← PowerShell equivalent for Windows environments
 ```
-
-The `samples/` directory is **never baked into the image**. It is bind-mounted read-only at run time, exactly as real user code will be.
 
 ---
 
-## 3. Language Choice and Rationale
+## 4. Compiler Sanitizer Support for C and C++ (US-73, DR5)
 
-| Item | Value |
-|---|---|
-| Sprint 1 runtime language | **Python 3.12** |
-| Base image | `python:3.12.9-slim-bookworm` |
-| Non-root user | `sandbox` (UID 1001, GID 1001) |
+> **Sanitizer Runtime Support Note:** The C and C++ images contain the compiler and runtime library support (`libasan8` and `libubsan1`) required for AddressSanitizer and UndefinedBehaviorSanitizer runs under **US-73**. Sanitizers are not enabled for normal runs, ensuring zero performance overhead for standard lab execution. Sanitizer builds require higher memory (>128 MB), which is configured under US-16 and enforced in US-73.
 
-**Why Python, not C++ or Java?**
-
-- **DR1** sets the eventual priority order as C++, Python, C, Java, JavaScript.
-- **NFR4.5** reserves a separate compile-stage timeout for _compiled_ languages and explicitly defers compiled-language support to Sprint 2.
-- C++ and Java both require an explicit compilation step before execution. Adding compilation in Sprint 1 would violate NFR4.5's scope boundary and introduce significant extra complexity.
-- Python is an **interpreted** language: `python solution.py` executes directly without a separate compile phase, making it the correct Sprint 1 choice.
-- C++ will be the first language added in Sprint 2 (US-14), following the extension procedure in §9 below.
-
-**Language ambiguity note — Java as a runtime vs. project implementation language:**
-
-The project's backend services (execution-service, sync-service) are implemented in **Java / Spring Boot**. This refers to the _implementation language_ of the services themselves. T-14 is about the _submitted-code runtime language_ — the language whose source code runs inside the Docker container. These are separate concerns. Java source files also require compilation (even Java source-file launch mode performs internal compilation), so Java as a submitted-code runtime is also Sprint 2 work under NFR4.5. No team decision document was found confirming Java as a Sprint 1 submitted-code runtime. If the team wishes to change this decision, a team-level agreement is required before implementation changes are made.
-
----
-
-## 4. Prerequisites
-
-| Requirement | Version / Detail |
-|---|---|
-| Docker Engine | 24.x or later |
-| OS | Linux, macOS, or Windows with WSL 2 |
-| Available disk | ~200 MB for the image |
-| Internet access | Required only at _build_ time (to pull the base image) |
-
----
-
-## 5. Build the Image
-
-Run from the **repository root**:
-
+To verify sanitizer toolchain readiness in the C and C++ images:
 ```bash
-docker build \
-  -t collab-sandbox-python:0.2.0 \
-  execution-service/runtime-images/python
-```
-
-Verify the build succeeded:
-
-```bash
-docker images collab-sandbox-python
-# Expected output: a row showing collab-sandbox-python  0.1.0  ...
-```
-
-Record the reported size in §11 (Image Size) and update this README before raising the PR.
-
----
-
-## 6. Run Convention
-
-This section defines the **contract** between the execution service (US-09) and the runtime image. All invocations must follow it exactly.
-
-### 6.1 How source code reaches the container
-
-Source code is **never baked into the image**. For every run the execution service:
-
-1. Writes the submitted source file to a temporary host directory, e.g. `/tmp/run-<uuid>/solution.py`.
-2. Bind-mounts that directory into the container at `/sandbox/code`, read-only.
-3. Passes the execution command that references the mounted path.
-
-```
-/tmp/run-<uuid>/solution.py   (host, write once, then read-only)
-         ↕  bind mount, read-only
-/sandbox/code/solution.py     (container, read-only)
-```
-
-The temporary directory and its contents are deleted by the service after the container exits.
-
-### 6.2 Exact invocation
-
-```bash
-# No stdin
-docker run \
-  --rm \
-  --network none \
-  --name run-<uuid> \
-  -v /tmp/run-<uuid>:/sandbox/code:ro \
-  collab-sandbox-python:0.1.0 \
-  python /sandbox/code/solution.py
-
-# With stdin (pipe from the execution service)
-echo "<stdin content>" | docker run \
-  --rm \
-  -i \
-  --network none \
-  --name run-<uuid> \
-  -v /tmp/run-<uuid>:/sandbox/code:ro \
-  collab-sandbox-python:0.1.0 \
-  python /sandbox/code/solution.py
-```
-
-| Flag | Purpose |
-|---|---|
-| `--rm` | Destroys the container and its writable layer immediately on exit (FR5.2) |
-| `--network none` | No network access during execution (NFR3.1) |
-| `--name run-<uuid>` | Unique name so parallel runs never collide |
-| `-v .../run-<uuid>:/sandbox/code:ro` | Read-only mount of submitted source (NFR3.3) |
-| `-i` | Keep stdin open when piping user input (omit if no stdin) |
-
-### 6.3 Capturing stdout, stderr, and exit code
-
-The execution service captures streams and the exit code like this:
-
-```bash
-# Capture stdout and stderr independently, preserve exit code
-STDOUT=$(docker run --rm --network none -i \
-  --name run-<uuid> \
-  -v /tmp/run-<uuid>:/sandbox/code:ro \
-  collab-sandbox-python:0.1.0 \
-  python /sandbox/code/solution.py \
-  2>/tmp/run-<uuid>/stderr.txt < /tmp/run-<uuid>/stdin.txt)
-EXIT_CODE=$?
-STDERR=$(cat /tmp/run-<uuid>/stderr.txt)
-```
-
-In Java (the execution service language), the equivalent is `ProcessBuilder` with `redirectErrorStream(false)`, reading `getInputStream()` and `getErrorStream()` concurrently, then calling `waitFor()` for the exit code.
-
-### 6.4 Exit codes
-
-| Exit code | Meaning |
-|---|---|
-| 0 | Program terminated successfully |
-| 1-254 | Program exited with that code (propagated as-is) |
-| 124 | Reserved for timeout kill (Sprint 2, NFR4.1) |
-| 137 | OOM kill (Sprint 2, NFR4.2) |
-| Non-zero from `docker run` | Container startup failure (image missing, mount error, etc.) |
-
-The execution service must distinguish a container-startup failure (docker exits nonzero before the program runs) from a program-level nonzero exit. Sprint 2 will add resource limits and timeout handling.
-
-### 6.5 Container cleanup
-
-`--rm` ensures Docker removes the container automatically after it exits, including when the program crashes. The execution service must additionally:
-
-1. Remove the temporary host directory: `rm -rf /tmp/run-<uuid>`
-2. If the container fails to start, call `docker rm -f run-<uuid>` defensively.
-
-### 6.6 What is NOT in scope for Sprint 1
-
-The following are Sprint 2 additions (NFR4, NFR3 full enforcement):
-
-- `--memory 128m --memory-swap 128m` — memory cap (NFR4.2)
-- `--pids-limit 64` — process/thread cap (NFR4.3)
-- `--cpus` / `--cpu-shares` — CPU cap
-- `timeout` wrapper or `--stop-timeout` — wall-clock timeout (NFR4.1)
-- `--read-only` container filesystem — full filesystem lockdown (NFR3.3 full)
-- Output size cap (NFR4.4)
-
-Do not hard-code any of these values; they will be read from service configuration (DR3) in Sprint 2.
-
----
-
-## 7. Exact Commands for Verification
-
-All commands are run from the **repository root** with the image already built.
-
-### 7.1 Hello-world (no stdin)
-
-```bash
+# C++ sanitizer check:
 docker run --rm --network none \
-  -v "$(pwd)/execution-service/runtime-images/python/samples:/sandbox/code:ro" \
-  collab-sandbox-python:0.1.0 \
-  python /sandbox/code/hello_world.py
-```
+  -v "$(pwd)/execution-service/runtime-images/cpp/samples:/sandbox/code:ro" \
+  collab-sandbox-cpp:0.1.0 \
+  sh -c "g++ -fsanitize=address,undefined -g -O1 /sandbox/code/sanitizer_sample.cpp -o /tmp/san && /tmp/san"
 
-**Expected stdout:**
-```
-Hello, Sandbox!
-```
-**Expected stderr:** (empty)
-**Expected exit code:** `0`
-
-### 7.2 Hello-world (with stdin — stdin is ignored)
-
-```bash
-echo "ignored input" | docker run --rm -i --network none \
-  -v "$(pwd)/execution-service/runtime-images/python/samples:/sandbox/code:ro" \
-  collab-sandbox-python:0.1.0 \
-  python /sandbox/code/hello_world.py
-```
-
-**Expected stdout:** `Hello, Sandbox!`
-**Expected exit code:** `0`
-
-### 7.3 stdin piped to program (uppercase echo)
-
-```bash
-echo "hello sandbox" | docker run --rm -i --network none \
-  -v "$(pwd)/execution-service/runtime-images/python/samples:/sandbox/code:ro" \
-  collab-sandbox-python:0.1.0 \
-  python /sandbox/code/stdin_echo.py
-```
-
-**Expected stdout:** `HELLO SANDBOX`
-**Expected exit code:** `0`
-
-### 7.4 stdout and stderr captured independently
-
-```bash
+# C sanitizer check:
 docker run --rm --network none \
-  -v "$(pwd)/execution-service/runtime-images/python/samples:/sandbox/code:ro" \
-  collab-sandbox-python:0.1.0 \
-  python /sandbox/code/stderr_split.py \
-  2>/tmp/stderr_check.txt
-
-echo "stdout: $(cat /tmp/stderr_check.txt)"  # Will be empty - stdout was above
-# Or capture separately:
-STDOUT=$(docker run --rm --network none \
-  -v "$(pwd)/execution-service/runtime-images/python/samples:/sandbox/code:ro" \
-  collab-sandbox-python:0.1.0 \
-  python /sandbox/code/stderr_split.py 2>/tmp/stderr_check.txt)
-STDERR=$(cat /tmp/stderr_check.txt)
-echo "stdout='$STDOUT'  stderr='$STDERR'"
+  -v "$(pwd)/execution-service/runtime-images/c/samples:/sandbox/code:ro" \
+  collab-sandbox-c:0.1.0 \
+  sh -c "gcc -fsanitize=address,undefined -g -O1 /sandbox/code/sanitizer_sample.c -o /tmp/san && /tmp/san"
 ```
 
-**Expected:** `stdout='STDOUT line'  stderr='STDERR line'`
+---
 
-### 7.5 Nonzero exit code preserved
+## 5. Build the Images
+
+Build the runtime images from the repository root in testing priority order:
 
 ```bash
-docker run --rm --network none \
-  -v "$(pwd)/execution-service/runtime-images/python/samples:/sandbox/code:ro" \
-  collab-sandbox-python:0.1.0 \
-  python /sandbox/code/exit_nonzero.py
-echo "Exit code: $?"
+# 1. C++
+docker build -t collab-sandbox-cpp:0.1.0 execution-service/runtime-images/cpp
+
+# 2. Python
+docker build -t collab-sandbox-python:0.2.0 execution-service/runtime-images/python
+
+# 3. C
+docker build -t collab-sandbox-c:0.1.0 execution-service/runtime-images/c
+
+# 4. Java
+docker build -t collab-sandbox-java:0.1.0 execution-service/runtime-images/java
+
+# 5. JavaScript
+docker build -t collab-sandbox-javascript:0.1.0 execution-service/runtime-images/javascript
 ```
 
-**Expected exit code:** `42`
+---
 
-### 7.6 Non-root user
+## 6. Run Conventions & Contract
 
-```bash
-docker run --rm --network none collab-sandbox-python:0.1.0 id
-```
+### 6.1 Two-Stage Execution for Compiled Languages (NFR4.5)
 
-**Expected output (example):** `uid=1001(sandbox) gid=1001(sandbox) groups=1001(sandbox)`
+For **C++, C, and Java**, execution proceeds in two distinct stages:
 
-### 7.7 Network isolation
+1. **Compile Stage:**
+   - Isolated container with `--read-only` root, source mount `:ro` at `/sandbox/code`, and output directory at `/sandbox/build`.
+   - Timeout: `compile-timeout-seconds` (configured default 10 s, NFR4.5).
+   - If compilation fails (exit code != 0), execution terminates immediately. The runner returns `failure_kind: "compile_error"`, compiler output in `stderr`, `execution_time_ms: 0.0`, and `compile_time_ms` capturing the compile duration.
+2. **Run Stage:**
+   - Fresh isolated container with `--read-only` root, source mount `:ro`, and compiled build directory mounted `:ro` at `/sandbox/build`.
+   - Timeout: `wall-time-seconds` (configured default 5 s, NFR4.1).
+   - User stdin is piped to the running process.
+   - Stdout and stderr are captured independently up to `max-output-bytes` (1 MiB).
 
-```bash
-docker run --rm --network none \
-  -v "$(pwd)/execution-service/runtime-images/python/samples:/sandbox/code:ro" \
-  collab-sandbox-python:0.1.0 \
-  python /sandbox/code/network_probe.py
-echo "Exit code: $?"
-```
+### 6.2 Interpreted Languages
 
-**Expected stdout:** `NETWORK BLOCKED`
-**Expected exit code:** `1`
-**Expected stderr:** contains `Expected error: ...` (OSError detail)
+For **Python and JavaScript**, code is executed directly in a single run stage without a compile step:
+- Python: `python /sandbox/code/<entry>`
+- JavaScript: `node /sandbox/code/<entry>`
+- `compile_time_ms` is `null`.
 
-### 7.8 Code not baked into image
+### 6.3 Invocation Commands Summary
 
-```bash
-docker run --rm --network none collab-sandbox-python:0.1.0 \
-  sh -c 'test -f /sandbox/code/hello_world.py && echo FOUND || echo ABSENT'
-```
+| Language | Compile Command (Stage 1) | Run Command (Stage 2) |
+|---|---|---|
+| **C++** | `g++ -O2 -std=c++20 -I/sandbox/code /sandbox/code/*.cpp -o /sandbox/build/a.out` | `/sandbox/build/a.out` |
+| **Python** | _None_ | `python /sandbox/code/<entry>` |
+| **C** | `gcc -O2 -std=c17 -I/sandbox/code /sandbox/code/*.c -o /sandbox/build/a.out -lm` | `/sandbox/build/a.out` |
+| **Java** | `javac -d /sandbox/build /sandbox/code/*.java` | `java -cp /sandbox/build <ClassName>` |
+| **JavaScript** | _None_ | `node /sandbox/code/<entry>` |
 
-**Expected:** `ABSENT`
+---
 
-### 7.9 Container cleanup
+## 7. Verification
 
-```bash
-docker run --rm --network none --name t14-cleanup-test \
-  -v "$(pwd)/execution-service/runtime-images/python/samples:/sandbox/code:ro" \
-  collab-sandbox-python:0.1.0 \
-  python /sandbox/code/hello_world.py
-
-docker ps -a --filter "name=t14-cleanup-test" --format '{{.Names}}'
-# Expected: (empty — container was removed by --rm)
-```
-
-### 7.10 Run all checks with the verification script
+Run the verification test suite in priority order across all five languages with a single command:
 
 **Linux / macOS / Git Bash:**
 ```bash
+cd execution-service/runtime-images && bash tests/verify.sh
+# Or from repository root:
 bash execution-service/runtime-images/tests/verify.sh
 ```
 
@@ -325,149 +186,52 @@ bash execution-service/runtime-images/tests/verify.sh
 powershell -ExecutionPolicy Bypass -File execution-service/runtime-images/tests/verify.ps1
 ```
 
-Expected: all 11 checks print `PASS`.
+### Verification Checks Performed for Each Language:
+1. Docker daemon reachability
+2. Pinned runtime image presence
+3. Hello-world without stdin (exit code 0, stdout `Hello, Sandbox!`)
+4. Hello-world with stdin supplied (stdin ignored, exit code 0)
+5. Stdin pipe uppercase echo (exit code 0, stdout `HELLO SANDBOX`)
+6. Stream independence (stdout and stderr captured separately)
+7. Exit code preservation (exit code 42 propagated accurately)
+8. Non-root user execution (`UID 1001`, `sandbox` user, NFR3.2)
+9. Network isolation (`--network none`, socket connections blocked, NFR3.1)
+10. Source code not baked into bare image (FR5.2)
+11. Compile error reporting for compiled languages (`failure_kind: "compile_error"`, NFR4.5)
+12. AddressSanitizer and UndefinedBehaviorSanitizer toolchain readiness (C and C++, US-73)
+13. Container cleanup verification (`--rm`)
+14. Measured image size reporting (AC8)
 
 ---
 
-## 8. Image Size
+## 8. How to Add a New Language
 
-```bash
-docker images collab-sandbox-python:0.1.0 --format "{{.Size}}"
-# Or for exact bytes:
-docker image inspect collab-sandbox-python:0.1.0 --format '{{.Size}}'
-```
+Adding a new language runtime is a structured, isolated operation:
 
-**Measured size:** `177.6 MB` (186,189,789 bytes, compressed image size ~45.4 MB on disk). Built from `python:3.12.9-slim-bookworm`.
-
----
-
-## 9. How to Add a New Language (US-14)
-
-Adding a new language is a **one-folder operation**. It does not change the Python folder or any shared infrastructure.
-
-### Step-by-step
-
-1. **Create a new language folder** alongside `python/`:
-
-   ```
-   execution-service/runtime-images/
-   └── cpp/              ← new language
-       ├── Dockerfile
-       └── samples/
-           ├── hello_world.cpp
-           ├── stdin_echo.cpp
-           └── ...
-   ```
-
-2. **Write the Dockerfile.** Follow the same conventions:
-   - Pin the base image to a specific version (no `latest`).
-   - Create a `sandbox` user (UID 1001, GID 1001) and switch to it.
+1. **Create a language folder** under `execution-service/runtime-images/<language>/`.
+2. **Author the Dockerfile**:
+   - Pin base image to an exact tag (no floating `latest`).
+   - Create non-root user `sandbox` with UID/GID 1001.
    - Set `WORKDIR /sandbox/code`.
-   - Do NOT add a `CMD` or `ENTRYPOINT`; the service supplies the command.
-   - Do NOT bake source code into the image.
-   - No secrets or credentials.
+   - Never bake user code into the image.
+   - Switch to `USER sandbox`.
+3. **Add standard test samples** in `samples/` (`hello_world`, `stdin_echo`, `stderr_split`, `exit_nonzero`, `network_probe`, and `compile_error` if compiled).
+4. **Register the language** in `execution-service/src/main/resources/application.yml` under `app.execution.images.<language>`.
+5. **Update `DockerRunner.java`** compile and run command templates.
+6. **Add test cases** in `tests/verify.sh` and `tests/verify.ps1`.
+7. **Document the language** in this README.
 
-3. **Build and tag** the new image independently:
+---
 
-   ```bash
-   docker build -t collab-sandbox-cpp:0.1.0 \
-                execution-service/runtime-images/cpp
-   ```
+## 9. Acceptance Criteria Traceability
 
-4. **Write sample programs** in `cpp/samples/` matching the same test scenarios (hello-world, stdin, stderr split, nonzero exit, network probe). Use the language's native source extension and compiler/interpreter invocation.
-
-5. **Run the verification script** against the new image:
-
-   ```bash
-   IMAGE=collab-sandbox-cpp:0.1.0 \
-   SAMPLE_DIR=execution-service/runtime-images/cpp/samples \
-     bash execution-service/runtime-images/tests/verify.sh
-   ```
-
-   > **Note:** The current `verify.sh` uses Python-specific commands (`python /sandbox/code/...`). When verifying a compiled language such as C++, you will need to adapt the commands (compile step + run step). Update `verify.sh` to accept a `LANG_CMD` environment variable, or create a separate `verify_cpp.sh`, to keep the original Python checks unmodified.
-
-6. **Document** in the new folder's section of this README (or a separate `cpp/README.md`) the run command convention for that language.
-
-7. **Tell the execution service** about the new language: add the image tag and command template to the service's language configuration (DR3). Do not hard-code.
-
-### Files each language folder must provide
-
-| File | Required | Purpose |
+| Requirement / AC | Description | Status |
 |---|---|---|
-| `Dockerfile` | ✅ | Image definition |
-| `samples/hello_world.<ext>` | ✅ | Basic smoke test |
-| `samples/stdin_echo.<ext>` | ✅ | stdin verification |
-| `samples/stderr_split.<ext>` | ✅ | Stream independence |
-| `samples/exit_nonzero.<ext>` | ✅ | Exit code preservation |
-| `samples/network_probe.<ext>` | ✅ | Isolation verification |
-| `README.md` or section in this file | ✅ | Run command convention, image size |
-
----
-
-## 10. Constraints, Trade-offs, and Limitations
-
-| Topic | Detail |
-|---|---|
-| Python 3.12 only | Only Python is supported in Sprint 1. C++ is Sprint 2 first add. |
-| No resource limits yet | Memory, CPU, process, and time limits are Sprint 2 (NFR4). |
-| No output size cap | Sprint 2 (NFR4.4). The service should currently truncate large output defensively. |
-| Non-root recommended | NFR3.2 is implemented now; it becomes a hard requirement in Sprint 2. |
-| Network disabled | `--network none` is applied now; NFR3.1 is ready. |
-| Read-only mount | Implemented at runtime via `:ro`; NFR3.3 is met. |
-| Not a full security sandbox | `--network none` and a non-root user are hardening measures, not a complete isolation boundary. Full sandbox hardening (seccomp, AppArmor, capabilities) is out of scope for Sprint 1. |
-| Python source-file mode | No compilation is needed. Python 3.12 interprets `.py` files directly. |
-
----
-
-## 11. Assumptions and Decisions Needing Team Confirmation
-
-| Item | Status | Who needs to confirm |
-|---|---|---|
-| Python as Sprint 1 runtime | Justified by T-14 issue text (NFR4.5) — **no conflicting team decision found** | — |
-| Java as Sprint 1 runtime | **Not supported**: Java requires compilation; NFR4.5 defers compiled languages to Sprint 2 | Team must confirm if they override this |
-| C++ as Sprint 2 first add | Follows DR1 priority order | Jay + Quincy |
-| Source file named `solution.py` | Convention proposed by Bhavya — **not yet agreed with Jay/Quincy** | Jay Limbasiya |
-| UID/GID 1001 for sandbox user | Proposed by Bhavya — no conflict with known service users | Team review |
-| Image tag format `collab-sandbox-<lang>:<version>` | Proposed naming — not formally agreed | Team review |
-
----
-
-## 12. Acceptance-Criteria Traceability
-
-| # | Acceptance Criterion | Implementation | Test / Command | Status |
-|---|---|---|---|---|
-| AC1 | Language choice recorded with rationale | §3 of this README | README review | ✅ Done |
-| AC2 | Dockerfile exists with pinned base | `python/Dockerfile` — `FROM python:3.12.9-slim-bookworm` | `docker image inspect` | ✅ Verified (PASS) |
-| AC3 | Hello-world runs in the image | `samples/hello_world.py` | §7.1 / verify check 2 | ✅ Verified (PASS) |
-| AC4a | Hello-world works without stdin | `samples/hello_world.py` | §7.1 / verify check 2 | ✅ Verified (PASS) |
-| AC4b | Hello-world works with stdin supplied | `samples/hello_world.py` | §7.2 / verify check 3 | ✅ Verified (PASS) |
-| AC5 | Run convention documented (code, stdin, stdout, stderr, exit) | §6 of this README | §7.3–7.5 / verify checks 4–6 | ✅ Verified (PASS) |
-| AC6 | README explains how to add a language | §9 of this README | Teammate walkthrough | ✅ Done |
-| AC7 | Tests verify requirements and are reproducible | `tests/verify.sh` & `tests/verify.ps1` | `verify.sh` / `verify.ps1` | ✅ Verified (PASS - 11/11 checks) |
-| AC8 | README contains image size | §8 | `docker images` | ✅ Done (177.6 MB) |
-| AC9 | Compatible with Java architecture | Runtime is Python (submitted code); service is Java. No conflict. | Architecture review | ✅ Done |
-
-**Requirement traceability:**
-
-| Requirement | Satisfied by |
-|---|---|
-| FR5.1 — each run in its own container | `--rm --name run-<uuid>` (§6.2) |
-| FR5.2 — container destroyed after run | `--rm` flag + temp dir cleanup (§6.5) |
-| DR1 — five languages eventually | Python now; §9 extension procedure for the rest |
-| DR2 — team's own Docker containers | `python:3.12.9-slim-bookworm` pulled and maintained by team (Dockerfile in repo) |
-| NFR3.1 — no network at runtime | `--network none` (§6.2) |
-| NFR3.2 — non-root user | `sandbox` UID 1001 in Dockerfile |
-| NFR3.3 — read-only code mount | `:ro` bind mount (§6.2) |
-| NFR4.5 — compiled languages deferred | Python chosen; C++ (Sprint 2) will add compile step |
-
----
-
-## 13. Sprint 2 Work (Out of Scope Here)
-
-- Add resource limits to `docker run`: `--memory`, `--memory-swap`, `--pids-limit`, `--cpus`
-- Add wall-clock timeout (NFR4.1) — wrap with `timeout` or use Docker's `--stop-timeout`
-- Add C++ runtime image (DR1, US-14)
-- Add remaining languages: C, Java, JavaScript
-- Read all limits from configuration (DR3)
-- Add output size cap (NFR4.4)
-- Full NFR3 enforcement: seccomp profile, read-only filesystem flag
+| **DR1** | Five languages supported: C++, Python, C, Java, JavaScript | ✅ Implemented |
+| **DR1 Priority** | Testing priority: C++ first, then Python, C, Java, JavaScript | ✅ Verified in `verify.sh`, `verify.ps1`, README |
+| **NFR4.5** | Compiled languages compile in compile stage and run in run stage; compile error returns `failure_kind: "compile_error"` | ✅ Implemented in `DockerRunner` & verified |
+| **DR4 / T-17 V2.8** | File names come from request, not fixed `solution.py` name | ✅ Implemented & documented |
+| **Pinned Base Images** | All images use pinned base tags without floating `latest` | ✅ Implemented in all Dockerfiles |
+| **US-73 Ready** | C and C++ images include ASan and UBSan compiler support without enabling for normal runs | ✅ Built into C/C++ images & verified |
+| **NFR3 / NFR4** | 5 s limit, 128 MB memory limit, network isolation, non-root user apply | ✅ Enforced across all runtimes |
+| **Integration Test** | Integration test for new behavior added in `tests/integration/` | ✅ `tests/integration/test-us14-language-images.sh` |
