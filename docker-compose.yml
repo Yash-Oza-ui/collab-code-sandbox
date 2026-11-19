@@ -42,6 +42,14 @@ services:
     environment:
       SERVER_PORT: ${EXECUTION_SERVICE_PORT:-8082}
       INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-}
+      # US-60: run permission comes from sync-service by default. This stack keeps the
+      # in-memory stub (fake rooms and sessions) because the legacy run scripts use them.
+      # For real enforcement start with an EMPTY value:
+      #   EXECUTION_SPRING_PROFILES= bash tests/integration/up.sh
+      # (no colon in the default on purpose: an empty value stays empty).
+      SPRING_PROFILES_ACTIVE: ${EXECUTION_SPRING_PROFILES-stub-permissions}
+      # Where the permission lookup and the result broadcast reach sync-service (contract section 1).
+      SYNC_SERVICE_INTERNAL_URL: ${SYNC_SERVICE_INTERNAL_URL:-http://sync-service:8081}
       APP_EXECUTION_LIMITS_MAX_QUEUE_LENGTH: ${EXECUTION_MAX_QUEUE_LENGTH:-10}
       # All other NFR4 / DR3 limits (US-16) – override via .env or docker compose env
       APP_EXECUTION_LIMITS_WALL_TIME_SECONDS: ${APP_EXECUTION_LIMITS_WALL_TIME_SECONDS:-5}

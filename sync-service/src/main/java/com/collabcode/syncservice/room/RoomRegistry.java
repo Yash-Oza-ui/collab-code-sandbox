@@ -136,6 +136,40 @@ public class RoomRegistry {
     }
 
     /**
+     * All open sessions (control AND document) in a room with this client
+     * session_id. Used by US-28 removal to close a removed member's sockets with
+     * close code 4403.
+     */
+    public List<WebSocketSession> findAllBySessionId(String roomId, String sessionId) {
+        if (sessionId == null) {
+            return Collections.emptyList();
+        }
+        List<WebSocketSession> raw = rooms.getOrDefault(roomId, Collections.emptyList());
+        List<WebSocketSession> result = new ArrayList<>();
+        for (WebSocketSession s : raw) {
+            if (s.isOpen() && sessionId.equals(s.getAttributes().get("sessionId"))) {
+                result.add(s);
+            }
+        }
+        return result;
+    }
+
+    /**
+     * All open sessions (control AND document) in a room. Used by US-28
+     * regenerate-link to close every socket on the old id with close code 4411.
+     */
+    public List<WebSocketSession> getAllSessionsInRoom(String roomId) {
+        List<WebSocketSession> raw = rooms.getOrDefault(roomId, Collections.emptyList());
+        List<WebSocketSession> result = new ArrayList<>(raw.size());
+        for (WebSocketSession s : raw) {
+            if (s.isOpen()) {
+                result.add(s);
+            }
+        }
+        return result;
+    }
+
+    /**
      * Find the first open session in a room whose {@code sessionId} attribute matches
      * the given client-supplied session id.
      *

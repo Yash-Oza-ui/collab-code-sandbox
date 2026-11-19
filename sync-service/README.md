@@ -48,6 +48,8 @@ Both sockets require `session_id` to be a valid UUID v4 query parameter.
 |--------|------|-------------|
 | `POST` | `/v1/rooms` | Create a room — returns `room_id`, `owner_token`, `mode`, `preset`, `language` |
 | `GET` | `/v1/rooms/{id}/owner` | Validate the owner token (T-10) |
+| `PATCH` | `/v1/rooms/{room_id}/members/{member_id}/run-permission` | Host only: take Run away from a participant or give it back, body `{"can_run": false}` (US-60, V2.20) |
+| `PATCH` | `/v1/rooms/{room_id}/run-policy` | Host only: switch Host-only running on or off, body `{"host_only_run": true}` (US-60, V2.20) |
 | `GET` | `/internal/rooms/{room_id}/sessions/{session_id}` | Session lookup for execution-service (requires `X-Internal-Token`) |
 | `POST` | `/internal/rooms/{room_id}/messages` | Broadcast or deliver targeted JSON messages to control sockets and record `run-result` entries (requires `X-Internal-Token`) |
 | `GET` | `/internal/rooms/{room_id}/runs` | Read stored run records for a room, optionally filtered by `input_hash`, newest first (requires `X-Internal-Token`, FR29 / US-52 / US-68) |
@@ -109,7 +111,7 @@ Host includes `"owner_token"`:
 
 **`joined`** — sent to the joining session on success:
 ```json
-{ "type": "joined", "member_id": "m_...", "role": "host", "mode": "pair", "preset": "teach_interview", "permissions": { "can_edit": true, "can_run": true } }
+{ "type": "joined", "member_id": "m_...", "role": "host", "mode": "pair", "preset": "teach_interview", "permissions": { "can_edit": true, "can_run": true, "run_denied_reason": null } }
 ```
 
 **`join-refused`** — e.g. NAME_TAKEN:
@@ -119,8 +121,9 @@ Host includes `"owner_token"`:
 
 **`roster`** — broadcast to all sessions in the room after every join:
 ```json
-{ "type": "roster", "members": [ { "member_id": "m_...", "display_name": "Alice", "role": "host", "permissions": { "can_edit": true, "can_run": true } } ] }
+{ "type": "roster", "members": [ { "member_id": "m_...", "display_name": "Alice", "role": "host", "permissions": { "can_edit": true, "can_run": true, "run_denied_reason": null } } ], "host_only_run": false }
 ```
+`can_run` is the effective answer (the same one the session lookup gives) and `run_denied_reason` is `observer`, `run_revoked`, `host_only` or `null` (US-60, V2.20). The roster is sent again whenever the Host changes who can run.
 
 **`edit-rejected`** — sent to a session that attempted a document change without write permission:
 ```json
@@ -150,7 +153,10 @@ ws://localhost:8081/ws/rooms/{room_id}/docs/{doc_id}?session_id={uuid-v4}
   - `0 2`: Sync update (incremental update) — carries document changes; dropped if sender cannot edit.
   - `1 ...`: Awareness — forwarded.
   - `3`: Query awareness — forwarded.
-  - If dropped, an `edit-rejected` text message is sent to the sender's control socket.
+  - **Anything else is treated as a possible change** and dropped if the sender cannot edit: an unknown message type, an unknown sync sub-type, or a first byte of `0x80` or more. Yjs reads these numbers as variable-length integers, so a modified client can write a real update as, for example, `80 00 82 00 ...`; receivers apply it, so the relay does not forward it for a member without edit access. Only the three read-only shapes above (`0 0`, `1`, `3`) pass for such a member.
+  - A member with edit access is never limited by this check; its frames are forwarded unchanged.
+  - The decision uses the member's current `can_edit` on the server for every frame, so a role change by the Host (for example to Observer) applies from the next frame.
+  - If dropped, an `edit-rejected` text message is sent to the sender's control socket (never an HTTP error). Frame contents are not logged.
 - In Pair mode: `doc_id` is `"main"`. In Open mode: `doc_id` is the module id.
 
 ---
@@ -215,8 +221,8 @@ mvn test
 ```
 Test classes:
 - `RelayIntegrationTest` — health, binary relay, room isolation, awareness echo, disconnect, internal broadcast, 4400/4404.
-- `SocketsAndEditCheckIntegrationTest` — join/roster flow, NAME_TAKEN, CR13 edit check, contract reasons, 4406 not-joined, doc_id isolation.
-- `DocumentHandlerUnitTest` — first-two-bytes edit-check logic (`0 0`, `0 1`, `0 2`, `1`, `3`) and close-code constants.
+- `SocketsAndEditCheckIntegrationTest` — join/roster flow, NAME_TAKEN, CR13 edit check, contract reasons, 4406 not-joined, doc_id isolation, Pair mode enforcement against disguised update frames, and access changed mid-session.
+- `DocumentHandlerUnitTest` — first-two-bytes edit-check logic (`0 0`, `0 1`, `0 2`, `1`, `3`, and frames written with longer number encodings or unknown types) and close-code constants.
 - `RoomServiceTest` — join/roster logic, roles, NAME_TAKEN (Femina's part, used by control handler).
 - `RoomControllerTest` — POST /v1/rooms validation.
 - `OwnerControllerTest` — GET /v1/rooms/{id}/owner.
@@ -279,6 +285,7 @@ Used by `execution-service` on every run request to authenticate the caller, det
     "ai_enabled": true
   }
   ```
+- **`can_run` / `run_denied_reason` (US-60, V2.20)**: the effective answer, read fresh on every call (execution-service never caches it). `run_denied_reason` is `observer`, `run_revoked` (the Host took Run away) or `host_only` (Host-only running is on), in that order when several apply; the Host can always run. The rule lives in `Room.runDeniedReason`.
 - **Error Codes**:
   - `401 Unauthorized` (`UNAUTHORIZED`): Missing or invalid `X-Internal-Token`.
   - `404 Not Found` (`ROOM_NOT_FOUND`): Room does not exist.
