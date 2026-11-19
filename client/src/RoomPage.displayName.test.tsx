@@ -117,7 +117,15 @@ class T20Relay {
           return
         }
 
-        if (this.refuseNames.has(msg.display_name)) {
+        const room = this.rooms.get(meta.roomId) ?? new Map()
+        this.rooms.set(meta.roomId, room)
+        const currentMember = room.get(meta.sessionId)
+        const normalized = (name: string) => name.trim().normalize('NFKC').toLowerCase()
+        const taken = [...room.values()].some((member) =>
+          member.sessionId !== meta.sessionId &&
+          normalized(member.displayName) === normalized(String(msg.display_name)),
+        )
+        if (this.refuseNames.has(msg.display_name) || taken) {
           ws.receiveText(
             JSON.stringify({
               type: 'join-refused',
@@ -129,12 +137,12 @@ class T20Relay {
           return
         }
 
-        const room = this.rooms.get(meta.roomId) ?? new Map()
-        this.rooms.set(meta.roomId, room)
-        room.set(meta.sessionId, {
-          sessionId: meta.sessionId,
-          displayName: msg.display_name,
-        })
+        if (!currentMember) {
+          room.set(meta.sessionId, {
+            sessionId: meta.sessionId,
+            displayName: msg.display_name,
+          })
+        }
         const roomMode = this.roomModes.get(meta.roomId) ?? 'pair'
         ws.receiveText(
           JSON.stringify({
@@ -145,6 +153,17 @@ class T20Relay {
             permissions: { can_edit: true, can_run: true },
           }),
         )
+        const roster = JSON.stringify({
+          type: 'roster',
+          members: [...room.values()].map((member) => ({
+            member_id: member.sessionId,
+            display_name: member.displayName,
+            role: 'Guest',
+          })),
+        })
+        for (const [socket, memberMeta] of this.controlSockets) {
+          if (memberMeta.roomId === meta.roomId) socket.receiveText(roster)
+        }
       }
     } catch {
       // ignore
@@ -508,6 +527,37 @@ describe('RoomPage display-name and colour presence join lifecycle', () => {
     // Editor is now accessible!
     expect(container.querySelector('[data-testid="mock-monaco-editor"]')).not.toBeNull()
     expect(container.textContent).toContain('You: ValidUniqueName')
+  })
+
+  it('uses the server roster name when a second tab rejoins with different casing', async () => {
+    const room = new Map<string, RelayMember>()
+    const sessionId = '20000000-0000-4000-8000-000000000002'
+    room.set(sessionId, { sessionId, displayName: 'Ada' })
+    relay.rooms.set('room-demo', room)
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    root = createRoot(container)
+
+    await act(async () => {
+      root?.render(<RoomPage wsOptions={{
+        WebSocketClass: createRelaySocketClass(relay),
+        sessionId,
+      }} />)
+    })
+
+    const input = container.querySelector<HTMLInputElement>('#display-name')!
+    const form = container.querySelector<HTMLFormElement>('form')!
+    await act(async () => {
+      input.value = 'ada'
+      form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+    })
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    })
+
+    expect(container.textContent).toContain('You: Ada')
+    expect(container.textContent).not.toContain('You: ada')
   })
 
   it('connection failure: keeps editor hidden and communicates failure if socket drops before join', async () => {
