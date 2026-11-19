@@ -9,6 +9,7 @@ import DisplayNamePrompt from './DisplayNamePrompt'
 import RunPanel from './RunPanel'
 import RunOutputPanel from './RunOutputPanel'
 import {
+  applyRosterNamesToAwareness,
   createAwareness,
   getExistingUserColors,
   setUserAwareness,
@@ -143,6 +144,7 @@ export default function RoomPage(props: RoomPageProps = {}) {
   // request_ids already shown: a result can arrive twice (own HTTP response and the room frame), first one wins
   const shownRunIdsRef = useRef<string[]>([])
   const myMemberIdRef = useRef<string | null>(null)
+  const rosterRef = useRef<RosterMember[]>([])
 
   const showRunResult = useCallback((data: RunResponseData) => {
     const shown = shownRunIdsRef.current
@@ -181,6 +183,9 @@ export default function RoomPage(props: RoomPageProps = {}) {
 
     // Listen to remote awareness changes to automatically avoid color collisions once document socket connects
     const handleAwarenessChange = () => {
+      // Projection is applied again after each incoming remote update.
+      // Do not trust peer-supplied awareness.name for cursor labels.
+      applyRosterNamesToAwareness(awareness, rosterRef.current)
       const localState = awareness.getLocalState() as AwarenessUserState | null
       const myColor = localState?.user?.color
       const myName = localState?.user?.name
@@ -205,7 +210,11 @@ export default function RoomPage(props: RoomPageProps = {}) {
       if (collisionWithLowerClientId) {
         const newColor = pickUserColor(otherColors, awareness.clientID)
         if (newColor !== myColor) {
-          setUserAwareness(awareness, { name: myName, color: newColor })
+          setUserAwareness(awareness, {
+            name: myName,
+            color: newColor,
+            member_id: localState?.user?.member_id,
+          })
           setUserColor(newColor)
         }
       }
@@ -253,7 +262,7 @@ export default function RoomPage(props: RoomPageProps = {}) {
           const fallbackIndex = doc.clientID ?? 0
           const color = pickUserColor(existingColors, fallbackIndex)
 
-          setUserAwareness(awareness, { name, color })
+          setUserAwareness(awareness, { name, color, member_id: joined.member_id })
           setDisplayName(name)
           setUserColor(color)
           setServerError(null)
@@ -265,7 +274,9 @@ export default function RoomPage(props: RoomPageProps = {}) {
           onDisplayNameAcceptedRef.current?.(name, color)
         },
         onRoster: (roster) => {
-          setRoster(roster.members ?? [])
+          rosterRef.current = roster.members ?? []
+          setRoster(rosterRef.current)
+          applyRosterNamesToAwareness(awareness, rosterRef.current)
 
           if (myMemberIdRef.current) {
             const me = roster.members?.find((m) => m.member_id === myMemberIdRef.current)
@@ -279,7 +290,11 @@ export default function RoomPage(props: RoomPageProps = {}) {
               setDisplayName(me.display_name)
               const current = awareness.getLocalState() as AwarenessUserState | null
               if (current?.user?.color) {
-                setUserAwareness(awareness, { name: me.display_name, color: current.user.color })
+                setUserAwareness(awareness, {
+                  ...current.user,
+                  name: me.display_name,
+                  member_id: me.member_id,
+                })
               }
               if (resumeNameKey) {
                 try { sessionStorage.setItem(resumeNameKey, me.display_name) } catch { /* storage disabled */ }
@@ -440,7 +455,11 @@ export default function RoomPage(props: RoomPageProps = {}) {
   useEffect(() => {
     const awareness = awarenessInstanceRef.current
     if (awareness && displayName && userColor && joinStatus === 'joined') {
-      setUserAwareness(awareness, { name: displayName, color: userColor })
+      setUserAwareness(awareness, {
+        name: displayName,
+        color: userColor,
+        member_id: myMemberIdRef.current ?? undefined,
+      })
     }
   }, [displayName, userColor, joinStatus])
 
