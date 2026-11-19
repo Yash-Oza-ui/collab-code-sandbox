@@ -71,7 +71,7 @@ describe('awareness', () => {
         user: { member_id: 'm_not_in_roster', name: 'Fake owner', color: '#22c55e' },
       })
       const updates: number[][] = []
-      awareness.on('change', ({ updated }) => updates.push(updated))
+      awareness.on('change', (changes: { updated: number[] }) => updates.push(changes.updated))
 
       applyRosterNamesToAwareness(awareness, [
         { member_id: 'm_local', display_name: 'Local' },
