@@ -672,15 +672,15 @@ public class DockerRunner implements CodeRunner {
             boolean oomKilled,
             String stderr
     ) {
-        if (oomKilled) {
-            return "oom_killed";
-        }
-
         if (timedOut) {
             return "timeout";
         }
 
-        if (exitCode == 0) {
+        if (exitCode == 0 && !oomKilled) {
+            return null;
+        }
+
+        if (oomKilled) {
             return "non_zero_exit";
         }
 
@@ -737,11 +737,11 @@ public class DockerRunner implements CodeRunner {
         }
 
         if (oomKilled) {
-            return "Container was killed due to out-of-memory.";
+            return "Memory limit exceeded";
         }
 
         if (timedOut) {
-            return "Execution timed out.";
+            return "Time limit exceeded";
         }
 
         if ("compile_error".equals(failureKind)) {
