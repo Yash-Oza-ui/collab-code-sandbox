@@ -6,6 +6,7 @@
   "preset": "teach_interview",
   "permissions": {
     "can_edit": true,
-    "can_run": true
+    "can_run": true,
+    "run_denied_reason": null
   }
 }

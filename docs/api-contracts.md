@@ -740,6 +740,8 @@ Three roles: `host`, `participant`, `observer`. The server sends a `roster` mess
 
 Members are identified by the public `member_id`, **never** by `session_id` (V2.3). The example is a **Pair** room; in Open mode `can_edit` is **omitted** (write access comes from module state, V2.6).
 
+V2.20 (US-60) adds to this message: `permissions.run_denied_reason` on every member (`null` when the member may run) and a top-level `host_only_run` boolean. `permissions.can_run` is the effective answer, the same one the permission lookup (V2.11) gives.
+
 ## V2.5 Sockets (decision 6) — Proposed
 
 Two sockets replace the single v0 socket (section 3.1), keeping all v0 relay rules (awareness echo, query-awareness frame, 1 MiB limit — section 3.5) on the document socket.
@@ -1437,7 +1439,7 @@ A malformed `audience` (V2.10) is also `INVALID_MESSAGE`. The new internal calls
 
 **Not decided in version 2.** These are listed so that nobody assumes they are covered:
 
-- Host controls other than modules, the Observer role (V2.17) and remove / re-admit / regenerate link (V2.18) have no message or endpoint yet: edit access and requests in Pair mode (FR19.1, FR19.3), join approval (FR9.3), restricting Run (FR41.2, FR41.3), the AI switch (FR35.1), transferring the Host role (FR31.1), the audit log (FR34), export (FR33) and deleting a room (FR32). They need a contract entry before the stories that build them.
+- Host controls other than modules, the Observer role (V2.17) and remove / re-admit / regenerate link (V2.18) have no message or endpoint yet: edit access and requests in Pair mode (FR19.1, FR19.3), join approval (FR9.3), the AI switch (FR35.1), transferring the Host role (FR31.1), the audit log (FR34), export (FR33) and deleting a room (FR32). They need a contract entry before the stories that build them.
 - Reassigning the modules a removed member owned, and pruning a retired `member_id` from `writers` (V2.6, V2.18). Deferred to US-42.
 - What a run does with a module that has never been saved (FR24.1, FR25.1).
 - A joiner syncs from a connected writer: a read-only peer's sync step 2 is dropped (V2.12). If no writer is connected, a late joiner receives nothing. To be checked when the relay is built.
@@ -1670,6 +1672,111 @@ Rules:
 
 Errors (V2.12): `404 ROOM_NOT_FOUND`, `404 SESSION_NOT_FOUND` (the caller has not joined), `404 MEMBER_NOT_FOUND` (the target), `403 NOT_OWNER`, `422 INVALID_REQUEST`.
 
+## V2.20 Control who can run (US-60) — Proposed
+
+Added so that US-60 has a contract to build on (FR41.1 to FR41.4). The Observer case is V2.17; this is the general run-permission control: take Run away from a named participant and give it back, and switch the room to Host-only running and back. Both controls are Host-only, so each follows the caller-identity rule of V2.6: the Host's `X-Session-Id` plus a valid `X-Owner-Token`. Without a valid owner token the answer is `403 NOT_OWNER`. The check itself is on the server: execution-service asks the lookup of V2.11 on every run request and never caches the answer (FR41.4), so a change is effective for the member's next run at once.
+
+### Who may run
+
+A member may run unless one of these applies. When more than one applies, the `reason` is the first in this list, because it is the one that lasts longest:
+
+| `run_denied_reason` | When | Message (`RUN_NOT_ALLOWED`, V2.12) |
+|---|---|---|
+| `observer` | The member is an Observer (FR9.4, FR41.1). | `Observers cannot run code.` |
+| `run_revoked` | The Host has taken Run away from this participant (FR41.2). | `The Host has turned off running for you.` |
+| `host_only` | Host-only running is on and the member is not the Host (FR41.3). | `Only the Host can run code in this room right now.` |
+
+The Host can always run. The three reasons and their messages are the ones of V2.12; this section adds no code and no reason.
+
+### Take Run away from a participant, or give it back (FR41.2)
+
+```
+PATCH http://localhost:8081/v1/rooms/{room_id}/members/{member_id}/run-permission
+Content-Type: application/json
+X-Session-Id: <caller-session-id>
+X-Owner-Token: <owner-token>
+```
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `can_run` | boolean | Yes | `false` takes Run away, `true` gives it back. Must be a JSON boolean: `"false"` or `null` is `INVALID_REQUEST`. |
+
+```json
+{
+  "can_run": false
+}
+```
+
+Response `200`: the member as it appears in `roster` (V2.4), the same shape as V2.17 (`docs/examples/v2-run-permission-response.json`).
+
+```json
+{
+  "member_id": "m_4b19d2",
+  "display_name": "Lin",
+  "role": "participant",
+  "permissions": {
+    "can_edit": true,
+    "can_run": false,
+    "run_denied_reason": "run_revoked"
+  }
+}
+```
+
+Rules:
+
+1. Only the Host can call it (`403 NOT_OWNER` otherwise, with the same order of checks as V2.17: `INVALID_REQUEST` for a bad `X-Session-Id`, `ROOM_NOT_FOUND`, `SESSION_NOT_FOUND`, then `NOT_OWNER`).
+2. The target must be a current **participant**. An unknown `member_id` is `404 MEMBER_NOT_FOUND`. The Host (Run cannot be taken from the Host) and an Observer (an Observer cannot run whatever the Host sets; make the member a participant first, V2.17) are `422 INVALID_REQUEST`.
+3. Setting the value a member already has is `200` and changes nothing (no new `roster`).
+4. The change takes effect at once for every connection of that member, because the lookup is read on every run: the next run is refused with `RUN_NOT_ALLOWED` and reason `run_revoked` (V2.12), and giving Run back allows the next run.
+5. On a change the server sends a new `roster` to the whole room (V2.4). The member's `permissions.can_run` becomes `false` and `run_denied_reason` `run_revoked`; the client's Run button follows `can_run`.
+6. A role change (V2.17) and a Host transfer (V2.19) start from the role's default permissions, so they clear a Run restriction. Removing and re-admitting a member (V2.18) gives a new member, who can run. Regenerating the link (V2.18) keeps the restrictions and the Host-only setting with the room.
+7. Errors (V2.12): `404 ROOM_NOT_FOUND`, `404 SESSION_NOT_FOUND` (the caller has not joined), `404 MEMBER_NOT_FOUND`, `403 NOT_OWNER`, `422 INVALID_REQUEST`.
+
+### Switch Host-only running on or off (FR41.3)
+
+```
+PATCH http://localhost:8081/v1/rooms/{room_id}/run-policy
+Content-Type: application/json
+X-Session-Id: <caller-session-id>
+X-Owner-Token: <owner-token>
+```
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `host_only_run` | boolean | Yes | `true` switches Host-only running on, `false` off. Must be a JSON boolean. |
+
+```json
+{
+  "host_only_run": true
+}
+```
+
+Response `200` (`docs/examples/v2-run-policy-response.json`):
+
+```json
+{
+  "host_only_run": true
+}
+```
+
+Rules:
+
+1. Only the Host can call it, with the same order of checks and the same `NOT_OWNER` as above.
+2. While it is on, only the Host can run: every other member's run is refused with `RUN_NOT_ALLOWED` and reason `host_only` (an Observer keeps the reason `observer`, and a participant whose Run the Host took away keeps `run_revoked`). Turning it off allows everyone else again, except those with `observer` or `run_revoked`.
+3. It is off when a room is created and is not changed by a role change, a Host transfer or regenerating the link. After a Host transfer (V2.19) the new Host can run and the previous Host, now a participant, is refused.
+4. On a change the server sends a new `roster` to the whole room: every member's `permissions` are recomputed and the top-level `host_only_run` carries the setting, so the Host client can show the switch and the others can show why Run is off. Setting the value the room already has is `200` and sends nothing.
+5. Errors (V2.12): `404 ROOM_NOT_FOUND`, `404 SESSION_NOT_FOUND`, `403 NOT_OWNER`, `422 INVALID_REQUEST`.
+
+### What a client shows
+
+- The Run button follows `permissions.can_run` of the member's own entry in `joined` and `roster`; the reason is shown in plain words from `run_denied_reason`.
+- A run that is refused anyway (for example the roster has not arrived yet) comes back as `403 RUN_NOT_ALLOWED` with `error.reason` (V2.12); the client shows the text of that reason, not only the HTTP status.
+- Hiding the button is never the enforcement: the server decides on every run (FR41.4, NFR13).
+
+### Audit (US-58)
+
+The audit log (FR34, US-58, Sprint 5) is not built here. The two state changes above are made in one place in sync-service (`RoomService.setMemberRunAllowed` and `RoomService.setHostOnlyRun`), so US-58 records them from there.
+
 ---
 
 ## Changes
@@ -1688,6 +1795,7 @@ Errors (V2.12): `404 ROOM_NOT_FOUND`, `404 SESSION_NOT_FOUND` (the caller has no
 | v2 (remove / re-admit) | 17 Nov 2026 | V2.18 added (US-28): `POST /v1/rooms/{room_id}/members/{member_id}/remove` and `/readmit`, and `POST /v1/rooms/{room_id}/regenerate-link`. Session-keyed block list; re-admit by the removed member's `member_id`; regenerate moves the room to a new NFR16 id, clears the block list and closes old sockets with new code `4411`. |
 | v2 (remove / re-admit, review) | 18 Nov 2026 | Review fixes (#144): `member_id` retired on removal, a re-admit returns a new id while an ordinary reconnect keeps it (V2.3, V2.18); modules a removed member owned deferred to US-42; new `GET /v1/rooms/{room_id}/members/blocked` lists removed members; the block is recorded atomically before the sockets close (CR04); client no-reconnect rule for `USER_BLOCKED`/`4403`/`4404`/`4411` with a `USER_BLOCKED` example; regenerate preserves `member_id`s, module ownership/writers and documents, and the old id answers `404` on every interface and is never reissued; stale "removing a user" item dropped from V2.15 and `MEMBER_NOT_FOUND` widened for the block list (V2.12); 22-char regenerate example id. |
 | v2 (host transfer) | 17 Nov 2026 | V2.19 added (US-54): `POST /v1/rooms/{room_id}/members/{member_id}/make-host` transfers the Host role (FR31.1). The server issues a new owner token to the new Host (old token invalidated), delivered over their control socket as a new `host-granted` message; exactly one Host at all times. (Numbered V2.19 to follow US-28's V2.18; merge that contract first.) |
+| v2 (run permission) | 19 Nov 2026 | V2.20 added (US-60): `PATCH /v1/rooms/{room_id}/members/{member_id}/run-permission` takes Run away from a participant and gives it back (FR41.2), and `PATCH /v1/rooms/{room_id}/run-policy` switches Host-only running (FR41.3), both Host-only (`NOT_OWNER` otherwise). The reasons `observer`, `run_revoked`, `host_only` are those of V2.12 and the lookup (V2.11) is unchanged in shape. `roster` and `joined` gain `permissions.run_denied_reason`, and `roster` gains `host_only_run` (V2.4). Restricting Run removed from the undecided list in V2.15. |
 
 ### Runner infrastructure error (v1 proposal addition)
 
