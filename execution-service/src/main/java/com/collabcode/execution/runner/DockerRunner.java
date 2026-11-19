@@ -1,10 +1,12 @@
 package com.collabcode.execution.runner;
 
+import com.collabcode.execution.config.ExecutionLanguageProperties;
 import com.collabcode.execution.config.ExecutionLimitsProperties;
 import com.collabcode.execution.model.RunFile;
 import com.collabcode.execution.model.RunSpec;
-import org.springframework.stereotype.Component;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Profile;
+import org.springframework.stereotype.Component;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -12,6 +14,7 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
@@ -25,41 +28,60 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Executes Python RunSpecs in a fresh, isolated Docker container.
- * Additional languages require their own repository-built runtime images.
+ * Executes RunSpecs for all supported languages in fresh, isolated Docker containers (DR1, US-14).
+ *
+ * Supported languages:
+ *   1. C++ ("cpp")
+ *   2. Python ("python")
+ *   3. C ("c")
+ *   4. Java ("java")
+ *   5. JavaScript ("javascript")
+ *
+ * Compiled languages (C++, C, Java) compile in a compile stage (NFR4.5) and run in a run stage.
+ * If compilation fails, a compile_error ExecutionResult is returned with compiler output in stderr.
  */
 @Component
 @Profile("!stub-runner")
 public class DockerRunner implements CodeRunner {
 
-    private static final String PYTHON_IMAGE = "collab-sandbox-python:0.1.0";
-    private static final String PYTHON_EXECUTABLE = "python";
-
     private final ExecutionLimitsProperties limits;
+    private final ExecutionLanguageProperties languageProperties;
 
     public DockerRunner(ExecutionLimitsProperties limits) {
+        this(limits, new ExecutionLanguageProperties());
+    }
+
+    @Autowired
+    public DockerRunner(ExecutionLimitsProperties limits, ExecutionLanguageProperties languageProperties) {
         this.limits = limits;
+        this.languageProperties = (languageProperties != null) ? languageProperties : new ExecutionLanguageProperties();
     }
 
     private record CapturedOutput(String text, boolean truncated) {}
 
     protected String createContainerName() {
-    return "run-" + UUID.randomUUID();
+        return "run-" + UUID.randomUUID();
     }
 
+    @Override
     public ExecutionResult execute(RunSpec spec) {
         long start = System.nanoTime();
-       String runId = UUID.randomUUID().toString();
-       String containerName = createContainerName();
+        String runId = UUID.randomUUID().toString();
+        String containerName = createContainerName();
+        String compileContainerName = containerName + "-compile";
 
         Path workspace = null;
+        Path buildDir = null;
         Process process = null;
+        Process compileProcess = null;
         boolean timedOut = false;
         boolean oomKilled = false;
         int exitCode = 1;
 
         AtomicLong outputBytes = new AtomicLong(0);
         AtomicBoolean outputTruncated = new AtomicBoolean(false);
+
+        Double compileTimeMs = null;
 
         try {
             validateLimits();
@@ -71,9 +93,14 @@ public class DockerRunner implements CodeRunner {
                         2,
                         "non_zero_exit",
                         elapsedMillis(start),
+                        null,
                         null
                 );
             }
+
+            String language = spec.getLanguage().toLowerCase(Locale.ROOT);
+            String image = languageProperties.getImageForLanguage(language);
+            boolean isCompiled = ExecutionLanguageProperties.isCompiledLanguage(language);
 
             Path workspaceRoot = Path.of("/tmp/collab-code-workspaces");
             Files.createDirectories(workspaceRoot);
@@ -84,13 +111,117 @@ public class DockerRunner implements CodeRunner {
             );
 
             // Allow non-root runtime user (1001) to access the workspace.
-            if (!workspace.toFile().setReadable(true, false)
-                    || !workspace.toFile().setExecutable(true, false)) {
-                throw new IOException("Unable to set workspace permissions");
-            }
+            setDirectoryPermissions(workspace);
             writeRunFiles(spec, workspace);
 
-            ProcessBuilder builder = new ProcessBuilder(
+            if (isCompiled) {
+                buildDir = workspace.resolve("build");
+                Files.createDirectories(buildDir);
+                setDirectoryPermissions(buildDir);
+
+                // =================================================================
+                // STAGE 1: COMPILE STAGE (NFR4.5)
+                // =================================================================
+                long compileStart = System.nanoTime();
+                List<String> compileCommand = buildCompileCommand(language, spec);
+
+                List<String> compileDockerArgs = new ArrayList<>(List.of(
+                        "docker", "run",
+                        "--interactive",
+                        "--network", "none",
+                        "--name", compileContainerName,
+                        "--user", "1001:1001",
+                        "--memory", limits.getMemoryMb() + "m",
+                        "--memory-swap", limits.getMemoryMb() + "m",
+                        "--pids-limit", String.valueOf(limits.getPidsLimit()),
+                        "--read-only",
+                        "--tmpfs", "/tmp:rw,noexec,nosuid,size=16m",
+                        "--mount", "type=bind,source=" + workspace.toAbsolutePath() + ",target=/sandbox/code,readonly",
+                        "--mount", "type=bind,source=" + buildDir.toAbsolutePath() + ",target=/sandbox/build,readonly=false",
+                        image
+                ));
+                compileDockerArgs.addAll(compileCommand);
+
+                ProcessBuilder compilePb = new ProcessBuilder(compileDockerArgs);
+                compileProcess = compilePb.start();
+                Process runningCompile = compileProcess;
+
+                AtomicLong compileOutputBytes = new AtomicLong(0);
+                AtomicBoolean compileOutputTruncated = new AtomicBoolean(false);
+
+                CompletableFuture<CapturedOutput> compileStdoutFuture =
+                        CompletableFuture.supplyAsync(() -> captureStream(
+                                runningCompile.getInputStream(),
+                                compileOutputBytes,
+                                compileOutputTruncated
+                        ));
+
+                CompletableFuture<CapturedOutput> compileStderrFuture =
+                        CompletableFuture.supplyAsync(() -> captureStream(
+                                runningCompile.getErrorStream(),
+                                compileOutputBytes,
+                                compileOutputTruncated
+                        ));
+
+                boolean compileFinished = compileProcess.waitFor(
+                        limits.getCompileTimeoutSeconds(),
+                        TimeUnit.SECONDS
+                );
+
+                if (!compileFinished) {
+                    stopContainer(compileContainerName);
+                    if (compileProcess.isAlive()) {
+                        compileProcess.destroyForcibly();
+                        compileProcess.waitFor();
+                    }
+                    return failureResult(
+                            "Compile time limit exceeded",
+                            124,
+                            "timeout",
+                            0.0,
+                            elapsedMillis(compileStart),
+                            spec.getEntry()
+                    );
+                }
+
+                int compileExit = compileProcess.exitValue();
+                CapturedOutput compileStdout = compileStdoutFuture.join();
+                CapturedOutput compileStderr = compileStderrFuture.join();
+
+                compileTimeMs = elapsedMillis(compileStart);
+
+                // Cleanup compile container immediately
+                runCleanupDockerCommand(5, TimeUnit.SECONDS, "rm", "-f", compileContainerName);
+
+                if (compileExit != 0) {
+                    String compilerOutput = !compileStderr.text().isEmpty()
+                            ? compileStderr.text()
+                            : compileStdout.text();
+
+                    return new ExecutionResult(
+                            "",
+                            compilerOutput,
+                            compileExit,
+                            0.0,
+                            0.0,
+                            false,
+                            false,
+                            "compile_error",
+                            compileOutputTruncated.get(),
+                            "Compilation failed.",
+                            compileTimeMs,
+                            spec.getEntry()
+                    );
+                }
+            }
+
+            // =================================================================
+            // STAGE 2: RUN STAGE
+            // =================================================================
+            long runStart = System.nanoTime();
+            List<String> runCommand = buildRunCommand(language, spec);
+
+            List<String> runDockerArgs = new ArrayList<>(List.of(
                     "docker", "run",
                     "--interactive",
                     "--network", "none",
@@ -101,14 +232,18 @@ public class DockerRunner implements CodeRunner {
                     "--pids-limit", String.valueOf(limits.getPidsLimit()),
                     "--read-only",
                     "--tmpfs", "/tmp:rw,noexec,nosuid,size=16m",
-                    "--mount",
-                    "type=bind,source=" + workspace.toAbsolutePath()
-                            + ",target=/sandbox/code,readonly",
-                    PYTHON_IMAGE,
-                    PYTHON_EXECUTABLE,
-                    "/sandbox/code/" + spec.getEntry()
-            );
+                    "--mount", "type=bind,source=" + workspace.toAbsolutePath() + ",target=/sandbox/code,readonly"
+            ));
 
+            if (isCompiled && buildDir != null) {
+                runDockerArgs.add("--mount");
+                runDockerArgs.add("type=bind,source=" + buildDir.toAbsolutePath() + ",target=/sandbox/build,readonly");
+            }
+
+            runDockerArgs.add(image);
+            runDockerArgs.addAll(runCommand);
+
+            ProcessBuilder builder = new ProcessBuilder(runDockerArgs);
             process = builder.start();
             Process runningProcess = process;
 
@@ -128,7 +263,6 @@ public class DockerRunner implements CodeRunner {
 
             try (var output = process.getOutputStream()) {
                 String stdin = spec.getStdin();
-
                 if (stdin != null && !stdin.isEmpty()) {
                     output.write(stdin.getBytes(StandardCharsets.UTF_8));
                 }
@@ -177,6 +311,7 @@ public class DockerRunner implements CodeRunner {
                     || stderr.truncated();
 
             String failureKind = classifyFailure(
+                    language,
                     exitCode,
                     timedOut,
                     oomKilled,
@@ -187,11 +322,13 @@ public class DockerRunner implements CodeRunner {
                     ? spec.getEntry()
                     : null;
 
+            double executionTimeMs = elapsedMillis(runStart);
+
             return new ExecutionResult(
                     stdout.text(),
                     stderr.text(),
                     exitCode,
-                    elapsedMillis(start),
+                    executionTimeMs,
                     0.0,
                     timedOut,
                     oomKilled,
@@ -203,7 +340,7 @@ public class DockerRunner implements CodeRunner {
                             oomKilled,
                             failureKind
                     ),
-                    null,
+                    compileTimeMs,
                     failingModule
             );
 
@@ -215,6 +352,7 @@ public class DockerRunner implements CodeRunner {
                     130,
                     "non_zero_exit",
                     elapsedMillis(start),
+                    compileTimeMs,
                     null
             );
 
@@ -228,19 +366,77 @@ public class DockerRunner implements CodeRunner {
                     125,
                     "non_zero_exit",
                     elapsedMillis(start),
+                    compileTimeMs,
                     null
             );
 
         } finally {
+            cleanupAfterExecution(compileProcess, compileContainerName, null);
             cleanupAfterExecution(process, containerName, workspace);
         }
     }
 
-    /**
-     * Performs best-effort cleanup even when the execution thread was
-     * interrupted. Interrupts received during cleanup are remembered and
-     * restored after all cleanup attempts have been made.
-     */
+    private static void setDirectoryPermissions(Path dir) throws IOException {
+        if (!dir.toFile().setReadable(true, false)
+                || !dir.toFile().setExecutable(true, false)) {
+            throw new IOException("Unable to set workspace permissions");
+        }
+        // Best-effort world-writable for Linux/Docker non-root user (ignored on Windows)
+        dir.toFile().setWritable(true, false);
+    }
+
+    private List<String> buildCompileCommand(String language, RunSpec spec) {
+        List<String> cmd = new ArrayList<>();
+        switch (language) {
+            case "cpp" -> {
+                cmd.addAll(List.of("g++", "-O2", "-std=c++20", "-I/sandbox/code"));
+                for (RunFile file : spec.getFiles()) {
+                    String name = file.getName();
+                    String lower = name.toLowerCase(Locale.ROOT);
+                    if (lower.endsWith(".cpp") || lower.endsWith(".cc") || lower.endsWith(".cxx")) {
+                        cmd.add("/sandbox/code/" + name);
+                    }
+                }
+                cmd.addAll(List.of("-o", "/sandbox/build/a.out"));
+            }
+            case "c" -> {
+                cmd.addAll(List.of("gcc", "-O2", "-std=c17", "-I/sandbox/code"));
+                for (RunFile file : spec.getFiles()) {
+                    String name = file.getName();
+                    if (name.toLowerCase(Locale.ROOT).endsWith(".c")) {
+                        cmd.add("/sandbox/code/" + name);
+                    }
+                }
+                cmd.addAll(List.of("-o", "/sandbox/build/a.out", "-lm"));
+            }
+            case "java" -> {
+                cmd.addAll(List.of("javac", "-d", "/sandbox/build"));
+                for (RunFile file : spec.getFiles()) {
+                    String name = file.getName();
+                    if (name.toLowerCase(Locale.ROOT).endsWith(".java")) {
+                        cmd.add("/sandbox/code/" + name);
+                    }
+                }
+            }
+            default -> throw new IllegalArgumentException("Language is not compiled: " + language);
+        }
+        return cmd;
+    }
+
+    private List<String> buildRunCommand(String language, RunSpec spec) {
+        return switch (language) {
+            case "cpp", "c" -> List.of("/sandbox/build/a.out");
+            case "java" -> {
+                String entry = spec.getEntry();
+                String className = entry.replaceAll("(?i)\\.java$", "");
+                yield List.of("java", "-cp", "/sandbox/build", className);
+            }
+            case "python" -> List.of("python", "/sandbox/code/" + spec.getEntry());
+            case "javascript" -> List.of("node", "/sandbox/code/" + spec.getEntry());
+            default -> throw new IllegalArgumentException("Unsupported language: " + language);
+        };
+    }
+
     private void cleanupAfterExecution(
             Process executionProcess,
             String containerName,
@@ -259,26 +455,24 @@ public class DockerRunner implements CodeRunner {
                 );
             }
 
-            // Stop the container by name because the Docker CLI may have
-            // exited while the container is still running.
-            interrupted |= runCleanupDockerCommand(
-                    3,
-                    TimeUnit.SECONDS,
-                    "stop",
-                    "--time",
-                    "1",
-                    containerName
-            );
+            if (containerName != null) {
+                interrupted |= runCleanupDockerCommand(
+                        3,
+                        TimeUnit.SECONDS,
+                        "stop",
+                        "--time",
+                        "1",
+                        containerName
+                );
 
-            // Always attempt removal, including if the container has
-            // already exited or does not exist.
-            interrupted |= runCleanupDockerCommand(
-                    5,
-                    TimeUnit.SECONDS,
-                    "rm",
-                    "-f",
-                    containerName
-            );
+                interrupted |= runCleanupDockerCommand(
+                        5,
+                        TimeUnit.SECONDS,
+                        "rm",
+                        "-f",
+                        containerName
+                );
+            }
 
             if (workspace != null) {
                 try (var paths = Files.walk(workspace)) {
@@ -287,11 +481,9 @@ public class DockerRunner implements CodeRunner {
                                 try {
                                     Files.deleteIfExists(path);
                                 } catch (IOException ignored) {
-                                    // Best-effort workspace cleanup.
                                 }
                             });
                 } catch (IOException ignored) {
-                    // Preserve the original execution result.
                 }
             }
 
@@ -302,10 +494,6 @@ public class DockerRunner implements CodeRunner {
         }
     }
 
-    /**
-     * Runs a Docker cleanup command with a bounded wait.
-     * Returns true if the current thread was interrupted while waiting.
-     */
     private boolean runCleanupDockerCommand(
             long timeout,
             TimeUnit unit,
@@ -350,24 +538,18 @@ public class DockerRunner implements CodeRunner {
             );
 
         } catch (IOException ignored) {
-            // Docker may be unavailable; preserve the original result.
         }
 
         return interrupted;
     }
 
     private List<String> buildDockerCommand(String... arguments) {
-        List<String> command = new java.util.ArrayList<>();
+        List<String> command = new ArrayList<>();
         command.add("docker");
         command.addAll(List.of(arguments));
-
         return command;
     }
 
-    /**
-     * Waits for a process without abandoning cleanup on interruption.
-     * Returns true if an interrupt was observed.
-     */
     private boolean waitForProcessUninterruptibly(
             Process process,
             long timeout,
@@ -398,10 +580,10 @@ public class DockerRunner implements CodeRunner {
             return "Run specification must not be null.";
         }
 
-        if (spec.getLanguage() == null
-                || !PYTHON_EXECUTABLE.equals(
-                        spec.getLanguage().toLowerCase(Locale.ROOT))) {
-            return "Unsupported language. The configured runtime currently supports Python only.";
+        String language = spec.getLanguage();
+        if (language == null || !languageProperties.isSupportedLanguage(language)) {
+            return "Unsupported language. The configured runtime supports: "
+                    + String.join(", ", languageProperties.getImages().keySet());
         }
 
         List<RunFile> files = spec.getFiles();
@@ -456,9 +638,7 @@ public class DockerRunner implements CodeRunner {
                 && name.indexOf('\0') < 0;
     }
 
-    private void writeRunFiles(RunSpec spec, Path workspace)
-            throws IOException {
-
+    private void writeRunFiles(RunSpec spec, Path workspace) throws IOException {
         for (RunFile file : spec.getFiles()) {
             Path filePath = workspace.resolve(file.getName());
 
@@ -477,6 +657,7 @@ public class DockerRunner implements CodeRunner {
     }
 
     private String classifyFailure(
+            String language,
             int exitCode,
             boolean timedOut,
             boolean oomKilled,
@@ -494,12 +675,14 @@ public class DockerRunner implements CodeRunner {
             return "non_zero_exit";
         }
 
-        String lower = stderr == null
-                ? ""
-                : stderr.toLowerCase(Locale.ROOT);
+        String lower = stderr == null ? "" : stderr.toLowerCase(Locale.ROOT);
 
-        if (lower.contains("syntaxerror")
-                || lower.contains("indentationerror")) {
+        if ("python".equals(language)
+                && (lower.contains("syntaxerror") || lower.contains("indentationerror"))) {
+            return "compile_error";
+        }
+
+        if ("javascript".equals(language) && lower.contains("syntaxerror")) {
             return "compile_error";
         }
 
@@ -521,7 +704,7 @@ public class DockerRunner implements CodeRunner {
         }
 
         if ("compile_error".equals(failureKind)) {
-            return "Python reported a syntax or indentation error. Peak memory measurement is unavailable.";
+            return "Compilation or syntax error reported. Peak memory measurement is unavailable.";
         }
 
         if (exitCode != 0) {
@@ -536,6 +719,7 @@ public class DockerRunner implements CodeRunner {
             int exitCode,
             String failureKind,
             double executionTimeMs,
+            Double compileTimeMs,
             String failingModule
     ) {
         return new ExecutionResult(
@@ -549,7 +733,7 @@ public class DockerRunner implements CodeRunner {
                 failureKind,
                 false,
                 message,
-                null,
+                compileTimeMs,
                 failingModule
         );
     }
@@ -581,7 +765,6 @@ public class DockerRunner implements CodeRunner {
             Thread.currentThread().interrupt();
 
         } catch (IOException ignored) {
-            // The container may already have stopped.
         }
     }
 
