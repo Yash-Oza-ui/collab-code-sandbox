@@ -22,6 +22,10 @@ import java.net.URI;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import jakarta.annotation.PreDestroy;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 /**
  * Control-socket handler (T-20, Bhavya part).
  *
@@ -84,6 +88,20 @@ public class ControlHandler extends AbstractWebSocketHandler {
     private final RoomService roomService;
     private final RoomRegistry registry;
     private final ObjectMapper objectMapper;
+
+    private static final long DISCONNECT_GRACE_SECONDS = 5L;
+
+    private final ScheduledExecutorService disconnectScheduler =
+            Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "control-disconnect-grace");
+                t.setDaemon(true);
+                return t;
+            });
+
+    @PreDestroy
+    public void shutdownDisconnectScheduler() {
+        disconnectScheduler.shutdownNow();
+    }
 
     public ControlHandler(RoomStore roomStore,
                           RoomService roomService,
@@ -188,19 +206,33 @@ public class ControlHandler extends AbstractWebSocketHandler {
         String roomId = roomIdObj.toString();
         String clientSessionId = sessionIdObj.toString();
 
-        boolean stillConnectedInAnotherTab = registry
+        if (hasJoinedControlSocket(roomId, clientSessionId)) {
+            return;
+        }
+
+        disconnectScheduler.schedule(() -> {
+            try {
+                if (hasJoinedControlSocket(roomId, clientSessionId)) {
+                    return;
+                }
+                Member left = roomService.leaveBySessionId(roomId, clientSessionId);
+                if (left != null) {
+                    broadcastRoster(roomId);
+                    log.info("Control: member left room={} member={} session={}",
+                            roomId, left.getMemberId(), clientSessionId);
+                }
+            } catch (Exception e) {
+                log.warn("Control: disconnect cleanup failed room={} session={}: {}",
+                        roomId, clientSessionId, e.getMessage());
+            }
+        }, DISCONNECT_GRACE_SECONDS, TimeUnit.SECONDS);
+    }
+
+    private boolean hasJoinedControlSocket(String roomId, String clientSessionId) {
+        return registry
                 .getBySessionIds(roomId, java.util.Collections.singletonList(clientSessionId))
                 .stream()
                 .anyMatch(s -> Boolean.TRUE.equals(s.getAttributes().get(ATTR_JOINED)));
-
-        if (!stillConnectedInAnotherTab) {
-            Member left = roomService.leaveBySessionId(roomId, clientSessionId);
-            if (left != null) {
-                broadcastRoster(roomId);
-                log.info("Control: member left room={} member={} session={}",
-                        roomId, left.getMemberId(), clientSessionId);
-            }
-        }
     }
 
     // -----------------------------------------------------------------------
