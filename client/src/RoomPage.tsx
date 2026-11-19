@@ -272,6 +272,19 @@ export default function RoomPage(props: RoomPageProps = {}) {
             if (me?.role) {
               setRole(me.role)
             }
+            // The roster (V2.4), not the submitted name or awareness, is
+            // authoritative for what teammates see. This also handles a
+            // second tab rejoining a session with a differently cased name.
+            if (me?.display_name && joinStatusRef.current === 'joined') {
+              setDisplayName(me.display_name)
+              const current = awareness.getLocalState() as AwarenessUserState | null
+              if (current?.user?.color) {
+                setUserAwareness(awareness, { name: me.display_name, color: current.user.color })
+              }
+              if (resumeNameKey) {
+                try { sessionStorage.setItem(resumeNameKey, me.display_name) } catch { /* storage disabled */ }
+              }
+            }
             if (me?.permissions && typeof me.permissions.can_run === 'boolean') {
               setMyCanRun(me.permissions.can_run)
               setMyRunDeniedReason(me.permissions.run_denied_reason ?? null)
@@ -554,6 +567,20 @@ export default function RoomPage(props: RoomPageProps = {}) {
     }
   }
 
+  // A run-result frame can carry a stale or untrusted display_name. Only the
+  // server roster's member_id -> display_name mapping may label the runner.
+  const runnerMember = runOutput?.runner?.member_id
+    ? roster.find((member) => member.member_id === runOutput.runner?.member_id)
+    : undefined
+  const displayRunOutput = runOutput
+    ? {
+        ...runOutput,
+        runner: runOutput.runner
+          ? { ...runOutput.runner, display_name: runnerMember?.display_name }
+          : undefined,
+      }
+    : null
+
   if (isInvalidRoomId) {
     return (
       <div className="room-page">
@@ -750,7 +777,7 @@ export default function RoomPage(props: RoomPageProps = {}) {
         disabled={runDisabled}
         disabledReason={runDisabledReason}
       >
-        {runOutput ? <RunOutputPanel result={runOutput} /> : null}
+        {displayRunOutput ? <RunOutputPanel result={displayRunOutput} /> : null}
       </RunPanel>
       <div className="room-editor">
         <Editor
