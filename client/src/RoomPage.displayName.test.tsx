@@ -530,6 +530,7 @@ describe('RoomPage display-name and colour presence join lifecycle', () => {
   })
 
   it('uses the server roster name when a second tab rejoins with different casing', async () => {
+    const awarenessRef: RefObject<Awareness | null> = { current: null }
     const room = new Map<string, RelayMember>()
     const sessionId = '20000000-0000-4000-8000-000000000002'
     room.set(sessionId, { sessionId, displayName: 'Ada' })
@@ -540,7 +541,7 @@ describe('RoomPage display-name and colour presence join lifecycle', () => {
     root = createRoot(container)
 
     await act(async () => {
-      root?.render(<RoomPage wsOptions={{
+      root?.render(<RoomPage awarenessRef={awarenessRef} wsOptions={{
         WebSocketClass: createRelaySocketClass(relay),
         sessionId,
       }} />)
@@ -558,6 +559,8 @@ describe('RoomPage display-name and colour presence join lifecycle', () => {
 
     expect(container.textContent).toContain('You: Ada')
     expect(container.textContent).not.toContain('You: ada')
+    const canonicalUser = awarenessRef.current?.getLocalState() as { user?: { name: string } } | null
+    expect(canonicalUser?.user?.name).toBe('Ada')
   })
 
   it('connection failure: keeps editor hidden and communicates failure if socket drops before join', async () => {
