@@ -1,3 +1,5 @@
 # Shell scripts must keep LF line endings, or bash fails on Windows checkouts (T-08)
 *.sh text eol=lf
 mvnw text eol=lf
+execution-service/runtime-images/python/runner.py text eol=lf
+Dockerfile text eol=lf
