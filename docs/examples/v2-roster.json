@@ -5,13 +5,14 @@
       "member_id": "m_7a3c9f",
       "display_name": "Ada",
       "role": "host",
-      "permissions": { "can_edit": true, "can_run": true }
+      "permissions": { "can_edit": true, "can_run": true, "run_denied_reason": null }
     },
     {
       "member_id": "m_4b19d2",
       "display_name": "Lin",
       "role": "observer",
-      "permissions": { "can_edit": false, "can_run": false }
+      "permissions": { "can_edit": false, "can_run": false, "run_denied_reason": "observer" }
     }
-  ]
+  ],
+  "host_only_run": false
 }

@@ -4,6 +4,7 @@
   "role": "observer",
   "permissions": {
     "can_edit": false,
-    "can_run": false
+    "can_run": false,
+    "run_denied_reason": "observer"
   }
 }
