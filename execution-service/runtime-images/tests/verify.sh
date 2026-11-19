@@ -7,7 +7,7 @@
 #   Runs each acceptance-criterion check against all supported runtime images
 #   in the required testing priority order (DR1):
 #     1. C++        (collab-sandbox-cpp:0.1.0)
-#     2. Python     (collab-sandbox-python:0.1.0)
+#     2. Python     (collab-sandbox-python:0.2.0)
 #     3. C          (collab-sandbox-c:0.1.0)
 #     4. Java       (collab-sandbox-java:0.1.0)
 #     5. JavaScript (collab-sandbox-javascript:0.1.0)
@@ -369,7 +369,7 @@ verify_language() {
 
 # Run in strict priority order (DR1): C++ -> Python -> C -> Java -> JavaScript
 verify_language "cpp"        "collab-sandbox-cpp:0.1.0"        "true"
-verify_language "python"     "collab-sandbox-python:0.1.0"     "false"
+verify_language "python"     "collab-sandbox-python:0.2.0"     "false"
 verify_language "c"          "collab-sandbox-c:0.1.0"          "true"
 verify_language "java"       "collab-sandbox-java:0.1.0"       "true"
 verify_language "javascript" "collab-sandbox-javascript:0.1.0" "false"

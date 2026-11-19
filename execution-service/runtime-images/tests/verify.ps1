@@ -225,7 +225,7 @@ function Verify-Language([string]$Lang, [string]$Image, [bool]$IsCompiled) {
 
 # Run in strict priority order (DR1): C++ -> Python -> C -> Java -> JavaScript
 Verify-Language "cpp"        "collab-sandbox-cpp:0.1.0"        $true
-Verify-Language "python"     "collab-sandbox-python:0.1.0"     $false
+Verify-Language "python"     "collab-sandbox-python:0.2.0"     $false
 Verify-Language "c"          "collab-sandbox-c:0.1.0"          $true
 Verify-Language "java"       "collab-sandbox-java:0.1.0"       $true
 Verify-Language "javascript" "collab-sandbox-javascript:0.1.0" $false

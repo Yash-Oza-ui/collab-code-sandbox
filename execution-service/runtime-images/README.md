@@ -24,7 +24,7 @@ Testing and build priority strictly follows **DR1**:
 | Priority | Language Identifier | Runtime Image Tag | Base Image (Pinned) | Type | File Naming Rule (DR4, T-17 V2.8) |
 |---|---|---|---|---|---|
 | **1** | `cpp` | `collab-sandbox-cpp:0.1.0` | `debian:12.9-slim` | Compiled | `.cpp`, `.cc`, `.cxx` (e.g. `main.cpp`) |
-| **2** | `python` | `collab-sandbox-python:0.1.0` | `python:3.12.9-slim-bookworm` | Interpreted | `.py` (e.g. `main.py`) |
+| **2** | `python` | `collab-sandbox-python:0.2.0` | `python:3.12.9-slim-bookworm` | Interpreted | `.py` (e.g. `main.py`) |
 | **3** | `c` | `collab-sandbox-c:0.1.0` | `debian:12.9-slim` | Compiled | `.c` (e.g. `main.c`) |
 | **4** | `java` | `collab-sandbox-java:0.1.0` | `eclipse-temurin:21.0.6_7-jdk-noble` | Compiled | `.java` (matches public class name, e.g. `Main.java`) |
 | **5** | `javascript` | `collab-sandbox-javascript:0.1.0` | `node:22.14.0-bookworm-slim` | Interpreted | `.js` (e.g. `main.js`) |
@@ -121,7 +121,7 @@ Build the runtime images from the repository root in testing priority order:
 docker build -t collab-sandbox-cpp:0.1.0 execution-service/runtime-images/cpp
 
 # 2. Python
-docker build -t collab-sandbox-python:0.1.0 execution-service/runtime-images/python
+docker build -t collab-sandbox-python:0.2.0 execution-service/runtime-images/python
 
 # 3. C
 docker build -t collab-sandbox-c:0.1.0 execution-service/runtime-images/c

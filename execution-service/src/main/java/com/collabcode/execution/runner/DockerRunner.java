@@ -19,16 +19,17 @@ import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Properties;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Executes RunSpecs for all supported languages in fresh, isolated Docker containers (DR1, US-14).
+ * Supports execution metrics and peak memory tracking (US-10).
  *
  * Supported languages:
  *   1. C++ ("cpp")
@@ -43,6 +44,16 @@ import java.util.concurrent.atomic.AtomicLong;
 @Component
 @Profile("!stub-runner")
 public class DockerRunner implements CodeRunner {
+
+    private static final String PYTHON_EXECUTABLE = "python";
+    private static final String PYTHON_RUNNER_PATH = "/usr/local/bin/collab-sandbox-runner";
+    private static final long CONTAINER_STARTUP_GRACE_SECONDS = 30;
+    private static final int SIGKILL_EXIT_CODE = 137;
+    private static final int OOM_FLAG_RECHECKS = 5;
+    private static final long OOM_FLAG_RECHECK_DELAY_MS = 100;
+    private static final double OOM_PEAK_FRACTION_OF_LIMIT = 0.9;
+
+    record RunMetrics(double executionTimeMs, double peakMemoryMb, boolean timedOut) {}
 
     private final ExecutionLimitsProperties limits;
     private final ExecutionLanguageProperties languageProperties;
@@ -82,17 +93,18 @@ public class DockerRunner implements CodeRunner {
         AtomicBoolean outputTruncated = new AtomicBoolean(false);
 
         Double compileTimeMs = null;
+        RunMetrics metrics = new RunMetrics(0.0, 0.0, false);
 
         try {
             validateLimits();
 
-            String validationError = validateSpec(spec);
+            String validationError = validateRunSpec(spec);
             if (validationError != null) {
                 return failureResult(
                         validationError,
                         2,
                         "non_zero_exit",
-                        elapsedMillis(start),
+                        0.0,
                         null,
                         null
                 );
@@ -113,6 +125,10 @@ public class DockerRunner implements CodeRunner {
             // Allow non-root runtime user (1001) to access the workspace.
             setDirectoryPermissions(workspace);
             writeRunFiles(spec, workspace);
+
+            Path metricsDir = workspace.resolve("metrics");
+            Files.createDirectories(metricsDir);
+            setDirectoryPermissions(metricsDir);
 
             if (isCompiled) {
                 buildDir = workspace.resolve("build");
@@ -174,37 +190,22 @@ public class DockerRunner implements CodeRunner {
                         compileProcess.destroyForcibly();
                         compileProcess.waitFor();
                     }
-                    return failureResult(
-                            "Compile time limit exceeded",
-                            124,
-                            "timeout",
-                            0.0,
-                            elapsedMillis(compileStart),
-                            spec.getEntry()
-                    );
                 }
 
-                int compileExit = compileProcess.exitValue();
-                CapturedOutput compileStdout = compileStdoutFuture.join();
-                CapturedOutput compileStderr = compileStderrFuture.join();
+                int compileExitCode = compileProcess.exitValue();
+                CapturedOutput compileStderr = compileStderrFuture.get();
+                compileStdoutFuture.get(); // Drain stdout
 
                 compileTimeMs = elapsedMillis(compileStart);
 
-                // Cleanup compile container immediately
-                runCleanupDockerCommand(5, TimeUnit.SECONDS, "rm", "-f", compileContainerName);
-
-                if (compileExit != 0) {
-                    String compilerOutput = !compileStderr.text().isEmpty()
-                            ? compileStderr.text()
-                            : compileStdout.text();
-
+                if (!compileFinished || compileExitCode != 0) {
                     return new ExecutionResult(
                             "",
-                            compilerOutput,
-                            compileExit,
+                            compileStderr.text(),
+                            compileFinished ? compileExitCode : 124,
                             0.0,
                             0.0,
-                            false,
+                            !compileFinished,
                             false,
                             "compile_error",
                             compileOutputTruncated.get(),
@@ -225,14 +226,32 @@ public class DockerRunner implements CodeRunner {
                     "docker", "run",
                     "--interactive",
                     "--network", "none",
-                    "--name", containerName,
-                    "--user", "1001:1001",
+                    "--name", containerName
+            ));
+
+            if ("python".equals(language)) {
+                // US-10: Python runner with cgroup metrics requires root container with caps dropped to drop to UID 1001
+                runDockerArgs.addAll(List.of(
+                        "--cap-drop=ALL",
+                        "--cap-add=SETUID",
+                        "--cap-add=SETGID",
+                        "--security-opt=no-new-privileges",
+                        "--user", "0:0"
+                ));
+            } else {
+                runDockerArgs.addAll(List.of(
+                        "--user", "1001:1001"
+                ));
+            }
+
+            runDockerArgs.addAll(List.of(
                     "--memory", limits.getMemoryMb() + "m",
                     "--memory-swap", limits.getMemoryMb() + "m",
                     "--pids-limit", String.valueOf(limits.getPidsLimit()),
                     "--read-only",
                     "--tmpfs", "/tmp:rw,noexec,nosuid,size=16m",
-                    "--mount", "type=bind,source=" + workspace.toAbsolutePath() + ",target=/sandbox/code,readonly"
+                    "--mount", "type=bind,source=" + workspace.toAbsolutePath() + ",target=/sandbox/code,readonly",
+                    "--mount", "type=bind,source=" + metricsDir.toAbsolutePath() + ",target=/sandbox/metrics"
             ));
 
             if (isCompiled && buildDir != null) {
@@ -241,7 +260,14 @@ public class DockerRunner implements CodeRunner {
             }
 
             runDockerArgs.add(image);
-            runDockerArgs.addAll(runCommand);
+            if ("python".equals(language)) {
+                runDockerArgs.add(PYTHON_EXECUTABLE);
+                runDockerArgs.add(PYTHON_RUNNER_PATH);
+                runDockerArgs.add(String.valueOf(limits.getWallTimeSeconds()));
+                runDockerArgs.add("/sandbox/code/" + spec.getEntry());
+            } else {
+                runDockerArgs.addAll(runCommand);
+            }
 
             ProcessBuilder builder = new ProcessBuilder(runDockerArgs);
             process = builder.start();
@@ -261,85 +287,98 @@ public class DockerRunner implements CodeRunner {
                             outputTruncated
                     ));
 
-            try (var output = process.getOutputStream()) {
-                String stdin = spec.getStdin();
-                if (stdin != null && !stdin.isEmpty()) {
-                    output.write(stdin.getBytes(StandardCharsets.UTF_8));
+            if (spec.getStdin() != null) {
+                try {
+                    process.getOutputStream().write(
+                            spec.getStdin().getBytes(StandardCharsets.UTF_8)
+                    );
+                    process.getOutputStream().flush();
+                } catch (IOException ignored) {
+                    // Process may exit before consuming stdin.
+                } finally {
+                    try {
+                        process.getOutputStream().close();
+                    } catch (IOException ignored) {
+                    }
                 }
-            } catch (IOException e) {
-                if (process.isAlive()) {
-                    throw e;
-                }
+            } else {
+                process.getOutputStream().close();
             }
 
             boolean finished = process.waitFor(
-                    limits.getWallTimeSeconds(),
+                    limits.getWallTimeSeconds() + CONTAINER_STARTUP_GRACE_SECONDS,
                     TimeUnit.SECONDS
             );
 
+            boolean infrastructureTimeout = !finished;
+
             if (!finished) {
                 stopContainer(containerName);
-                oomKilled = inspectOomKilled(containerName);
-
-                if (oomKilled) {
-                    timedOut = false;
-                    exitCode = 137;
-                } else {
-                    timedOut = true;
-                    exitCode = 124;
-                }
-
-                if (process.isAlive()) {
+                if (!process.waitFor(5, TimeUnit.SECONDS)) {
                     process.destroyForcibly();
                     process.waitFor();
                 }
-            } else {
-                exitCode = process.exitValue();
-                oomKilled = inspectOomKilled(containerName);
-
-                if (oomKilled) {
-                    timedOut = false;
-                    exitCode = 137;
-                }
             }
 
-            CapturedOutput stdout = stdoutFuture.join();
-            CapturedOutput stderr = stderrFuture.join();
+            exitCode = process.exitValue();
+            metrics = readRunMetrics(workspace);
+
+            // If metrics file did not provide execution time (e.g. non-python run), use elapsed time
+            if (metrics.executionTimeMs() == 0.0 && finished) {
+                metrics = new RunMetrics(elapsedMillis(runStart), metrics.peakMemoryMb(), metrics.timedOut());
+            }
+
+            if (infrastructureTimeout || metrics.timedOut()) {
+                timedOut = true;
+                exitCode = 124;
+            } else if (exitCode == SIGKILL_EXIT_CODE) {
+                oomKilled = confirmOomKill(containerName, metrics);
+            } else {
+                oomKilled = inspectOomKilled(containerName);
+            }
+
+            CapturedOutput stdout = stdoutFuture.get();
+            CapturedOutput stderr = stderrFuture.get();
 
             boolean truncated = outputTruncated.get()
                     || stdout.truncated()
                     || stderr.truncated();
+
+            String resultStderr = infrastructureTimeout
+                    ? stderr.text() + "Docker runner did not finish within the container startup grace period.\n"
+                    : stderr.text();
 
             String failureKind = classifyFailure(
                     language,
                     exitCode,
                     timedOut,
                     oomKilled,
-                    stderr.text()
+                    resultStderr
             );
 
             String failingModule = "compile_error".equals(failureKind)
                     ? spec.getEntry()
                     : null;
 
-            double executionTimeMs = elapsedMillis(runStart);
+            String message = resultMessage(
+                    exitCode,
+                    timedOut,
+                    oomKilled,
+                    failureKind,
+                    outputTruncated.get()
+            );
 
             return new ExecutionResult(
                     stdout.text(),
-                    stderr.text(),
+                    resultStderr,
                     exitCode,
-                    executionTimeMs,
-                    0.0,
+                    metrics.executionTimeMs(),
+                    metrics.peakMemoryMb(),
                     timedOut,
                     oomKilled,
                     failureKind,
                     truncated,
-                    resultMessage(
-                            exitCode,
-                            timedOut,
-                            oomKilled,
-                            failureKind
-                    ),
+                    message,
                     compileTimeMs,
                     failingModule
             );
@@ -351,12 +390,12 @@ public class DockerRunner implements CodeRunner {
                     "Execution was interrupted.",
                     130,
                     "non_zero_exit",
-                    elapsedMillis(start),
+                    0.0,
                     compileTimeMs,
                     null
             );
 
-        } catch (IOException | RuntimeException e) {
+        } catch (Exception e) {
             String detail = e.getMessage() == null
                     ? e.getClass().getSimpleName()
                     : e.getMessage();
@@ -365,7 +404,7 @@ public class DockerRunner implements CodeRunner {
                     "Docker execution failed: " + detail,
                     125,
                     "non_zero_exit",
-                    elapsedMillis(start),
+                    0.0,
                     compileTimeMs,
                     null
             );
@@ -381,7 +420,7 @@ public class DockerRunner implements CodeRunner {
                 || !dir.toFile().setExecutable(true, false)) {
             throw new IOException("Unable to set workspace permissions");
         }
-        // Best-effort world-writable for Linux/Docker non-root user (ignored on Windows)
+        // Best-effort world-writable for Linux non-root containers (no-op/ignored on Windows)
         dir.toFile().setWritable(true, false);
     }
 
@@ -418,79 +457,79 @@ public class DockerRunner implements CodeRunner {
                     }
                 }
             }
-            default -> throw new IllegalArgumentException("Language is not compiled: " + language);
+            default -> {
+            }
         }
         return cmd;
     }
 
     private List<String> buildRunCommand(String language, RunSpec spec) {
-        return switch (language) {
-            case "cpp", "c" -> List.of("/sandbox/build/a.out");
+        List<String> cmd = new ArrayList<>();
+        switch (language) {
+            case "cpp", "c" -> cmd.add("/sandbox/build/a.out");
             case "java" -> {
                 String entry = spec.getEntry();
-                String className = entry.replaceAll("(?i)\\.java$", "");
-                yield List.of("java", "-cp", "/sandbox/build", className);
+                String className = entry.endsWith(".java")
+                        ? entry.substring(0, entry.length() - ".java".length())
+                        : entry;
+                cmd.addAll(List.of("java", "-cp", "/sandbox/build", className));
             }
-            case "python" -> List.of("python", "/sandbox/code/" + spec.getEntry());
-            case "javascript" -> List.of("node", "/sandbox/code/" + spec.getEntry());
-            default -> throw new IllegalArgumentException("Unsupported language: " + language);
-        };
+            case "javascript" -> cmd.addAll(List.of("node", "/sandbox/code/" + spec.getEntry()));
+            case "python" -> cmd.addAll(List.of("python", "/sandbox/code/" + spec.getEntry()));
+            default -> throw new IllegalArgumentException("Unknown language: " + language);
+        }
+        return cmd;
     }
 
-    private void cleanupAfterExecution(
-            Process executionProcess,
-            String containerName,
-            Path workspace
-    ) {
-        boolean interrupted = Thread.interrupted();
+    private void cleanupAfterExecution(Process process, String containerName, Path workspace) {
+        boolean interrupted = false;
 
-        try {
-            if (executionProcess != null && executionProcess.isAlive()) {
-                executionProcess.destroyForcibly();
+        if (process != null) {
+            interrupted |= waitForProcessUninterruptibly(
+                    process,
+                    2,
+                    TimeUnit.SECONDS
+            );
 
+            if (process.isAlive()) {
+                process.destroyForcibly();
                 interrupted |= waitForProcessUninterruptibly(
-                        executionProcess,
-                        5,
+                        process,
+                        2,
                         TimeUnit.SECONDS
                 );
             }
+        }
 
-            if (containerName != null) {
-                interrupted |= runCleanupDockerCommand(
-                        3,
-                        TimeUnit.SECONDS,
-                        "stop",
-                        "--time",
-                        "1",
-                        containerName
-                );
+        if (containerName != null) {
+            interrupted |= runCleanupDockerCommand(
+                    5,
+                    TimeUnit.SECONDS,
+                    "rm",
+                    "-f",
+                    containerName
+            );
+        }
 
-                interrupted |= runCleanupDockerCommand(
-                        5,
-                        TimeUnit.SECONDS,
-                        "rm",
-                        "-f",
-                        containerName
-                );
-            }
-
-            if (workspace != null) {
-                try (var paths = Files.walk(workspace)) {
-                    paths.sorted(Comparator.reverseOrder())
-                            .forEach(path -> {
-                                try {
-                                    Files.deleteIfExists(path);
-                                } catch (IOException ignored) {
-                                }
-                            });
-                } catch (IOException ignored) {
+        if (workspace != null) {
+            try {
+                if (Files.exists(workspace)) {
+                    try (var stream = Files.walk(workspace)) {
+                        stream.sorted(Comparator.reverseOrder())
+                                .forEach(path -> {
+                                    try {
+                                        Files.deleteIfExists(path);
+                                    } catch (IOException ignored) {
+                                    }
+                                });
+                    }
                 }
+            } catch (IOException ignored) {
             }
+        }
 
-        } finally {
-            if (interrupted) {
-                Thread.currentThread().interrupt();
-            }
+        if (interrupted) {
+            Thread.currentThread().interrupt();
         }
     }
 
@@ -499,43 +538,23 @@ public class DockerRunner implements CodeRunner {
             TimeUnit unit,
             String... arguments
     ) {
-        Process cleanup = null;
         boolean interrupted = false;
 
         try {
-            ProcessBuilder builder = new ProcessBuilder();
-            builder.command(buildDockerCommand(arguments));
-            builder.redirectOutput(ProcessBuilder.Redirect.DISCARD);
-            builder.redirectError(ProcessBuilder.Redirect.DISCARD);
+            Process process = new ProcessBuilder(
+                    buildDockerCommand(arguments)
+            ).start();
 
-            cleanup = builder.start();
+            interrupted = waitForProcessUninterruptibly(process, timeout, unit);
 
-            long deadline = System.nanoTime() + unit.toNanos(timeout);
-
-            while (cleanup.isAlive()) {
-                long remaining = deadline - System.nanoTime();
-
-                if (remaining <= 0) {
-                    cleanup.destroyForcibly();
-                    break;
-                }
-
-                try {
-                    cleanup.waitFor(remaining, TimeUnit.NANOSECONDS);
-                } catch (InterruptedException e) {
-                    interrupted = true;
-                }
+            if (process.isAlive()) {
+                process.destroyForcibly();
+                interrupted |= waitForProcessUninterruptibly(
+                        process,
+                        timeout,
+                        unit
+                );
             }
-
-            if (cleanup.isAlive()) {
-                cleanup.destroyForcibly();
-            }
-
-            interrupted |= waitForProcessUninterruptibly(
-                    cleanup,
-                    2,
-                    TimeUnit.SECONDS
-            );
 
         } catch (IOException ignored) {
         }
@@ -556,26 +575,26 @@ public class DockerRunner implements CodeRunner {
             TimeUnit unit
     ) {
         boolean interrupted = false;
-        long deadline = System.nanoTime() + unit.toNanos(timeout);
+        long remainingNanos = unit.toNanos(timeout);
+        long deadline = System.nanoTime() + remainingNanos;
 
-        while (process.isAlive()) {
-            long remaining = deadline - System.nanoTime();
-
-            if (remaining <= 0) {
-                break;
-            }
-
+        while (true) {
             try {
-                process.waitFor(remaining, TimeUnit.NANOSECONDS);
+                process.waitFor(remainingNanos, TimeUnit.NANOSECONDS);
+                return interrupted;
+
             } catch (InterruptedException e) {
                 interrupted = true;
+                remainingNanos = deadline - System.nanoTime();
+
+                if (remainingNanos <= 0) {
+                    return true;
+                }
             }
         }
-
-        return interrupted;
     }
 
-    private String validateSpec(RunSpec spec) {
+    private String validateRunSpec(RunSpec spec) {
         if (spec == null) {
             return "Run specification must not be null.";
         }
@@ -587,54 +606,46 @@ public class DockerRunner implements CodeRunner {
         }
 
         List<RunFile> files = spec.getFiles();
-
         if (files == null || files.isEmpty()) {
-            return "Run specification must contain at least one source file.";
+            return "At least one source file is required.";
         }
 
         Set<String> names = new HashSet<>();
+        boolean entryFound = false;
 
         for (RunFile file : files) {
             if (file == null) {
-                return "Run specification contains a null file.";
+                return "Source file entries must not be null.";
             }
 
             String name = file.getName();
-
-            if (!isSafeFileName(name)) {
-                return "Invalid source filename. Filenames must be plain names without path components.";
+            if (!isValidFileName(name)) {
+                return "Invalid file name: " + name;
             }
 
             if (!names.add(name)) {
-                return "Run specification contains duplicate filename: " + name;
+                return "Duplicate file name: " + name;
             }
 
-            if (file.getContent() == null) {
-                return "Source file content must not be null: " + name;
+            if (name.equals(spec.getEntry())) {
+                entryFound = true;
             }
         }
 
-        String entry = spec.getEntry();
-
-        if (!isSafeFileName(entry)) {
-            return "Run specification must identify a valid entry filename.";
-        }
-
-        if (!names.contains(entry)) {
-            return "Entry file was not included in the run specification: " + entry;
+        if (!entryFound) {
+            return "Entry file was not included in the run specification: "
+                    + spec.getEntry();
         }
 
         return null;
     }
 
-    private boolean isSafeFileName(String name) {
+    private boolean isValidFileName(String name) {
         return name != null
                 && !name.isBlank()
-                && !".".equals(name)
-                && !"..".equals(name)
-                && !name.contains("..")
                 && !name.contains("/")
                 && !name.contains("\\")
+                && !name.contains("..")
                 && name.indexOf('\0') < 0;
     }
 
@@ -642,17 +653,15 @@ public class DockerRunner implements CodeRunner {
         for (RunFile file : spec.getFiles()) {
             Path filePath = workspace.resolve(file.getName());
 
+            if (!filePath.normalize().startsWith(workspace)) {
+                throw new SecurityException("Path traversal attempt: " + file.getName());
+            }
+
             Files.writeString(
                     filePath,
-                    file.getContent(),
+                    file.getContent() == null ? "" : file.getContent(),
                     StandardCharsets.UTF_8
             );
-
-            if (!filePath.toFile().setReadable(true, false)) {
-                throw new IOException(
-                        "Unable to make source file readable: " + file.getName()
-                );
-            }
         }
     }
 
@@ -663,15 +672,15 @@ public class DockerRunner implements CodeRunner {
             boolean oomKilled,
             String stderr
     ) {
+        if (oomKilled) {
+            return "oom_killed";
+        }
+
         if (timedOut) {
             return "timeout";
         }
 
-        if (exitCode == 0 && !oomKilled) {
-            return null;
-        }
-
-        if (oomKilled) {
+        if (exitCode == 0) {
             return "non_zero_exit";
         }
 
@@ -689,26 +698,58 @@ public class DockerRunner implements CodeRunner {
         return "non_zero_exit";
     }
 
+    RunMetrics readRunMetrics(Path workspace) {
+        if (workspace == null) {
+            return new RunMetrics(0.0, 0.0, false);
+        }
+
+        Path metricsFile = workspace.resolve("metrics").resolve("run-metrics.properties");
+
+        Properties properties = new Properties();
+        try (InputStream input = Files.newInputStream(metricsFile)) {
+            properties.load(input);
+            double executionTimeMs = Double.parseDouble(
+                    properties.getProperty("execution_time_ms", "0"));
+            long peakMemoryBytes = Long.parseLong(
+                    properties.getProperty("peak_memory_bytes", "0"));
+            boolean timedOut = Boolean.parseBoolean(
+                    properties.getProperty("timed_out", "false"));
+
+            return new RunMetrics(
+                    Math.max(0.0, executionTimeMs),
+                    Math.max(0.0, peakMemoryBytes / (1024.0 * 1024.0)),
+                    timedOut
+            );
+        } catch (IOException | NumberFormatException ignored) {
+            return new RunMetrics(0.0, 0.0, false);
+        }
+    }
+
     private String resultMessage(
             int exitCode,
             boolean timedOut,
             boolean oomKilled,
-            String failureKind
+            String failureKind,
+            boolean truncated
     ) {
+        if (truncated) {
+            return "Output limit exceeded (1048576 bytes). Output was truncated.";
+        }
+
         if (oomKilled) {
-            return "Memory limit exceeded";
+            return "Container was killed due to out-of-memory.";
         }
 
         if (timedOut) {
-            return "Time limit exceeded";
+            return "Execution timed out.";
         }
 
         if ("compile_error".equals(failureKind)) {
-            return "Compilation or syntax error reported. Peak memory measurement is unavailable.";
+            return "Compilation or syntax error reported.";
         }
 
         if (exitCode != 0) {
-            return "Program exited with a non-zero status. Peak memory measurement is unavailable.";
+            return "Program exited with a non-zero status.";
         }
 
         return null;
@@ -724,11 +765,11 @@ public class DockerRunner implements CodeRunner {
     ) {
         return new ExecutionResult(
                 "",
-                message + System.lineSeparator(),
+                message + "\n",
                 exitCode,
                 executionTimeMs,
                 0.0,
-                "timeout".equals(failureKind),
+                false,
                 false,
                 failureKind,
                 false,
@@ -738,34 +779,40 @@ public class DockerRunner implements CodeRunner {
         );
     }
 
-    private double elapsedMillis(long startNanos) {
-        return (System.nanoTime() - startNanos) / 1_000_000.0;
-    }
-
     private void stopContainer(String containerName) {
         Process stop = null;
 
         try {
             stop = new ProcessBuilder(
                     "docker",
-                    "kill",
+                    "stop",
+                    "--time",
+                    "2",
                     containerName
             ).start();
 
-            if (!stop.waitFor(3, TimeUnit.SECONDS)) {
-                stop.destroyForcibly();
-                stop.waitFor();
-            }
+            stop.waitFor(10, TimeUnit.SECONDS);
 
         } catch (InterruptedException e) {
-            if (stop != null && stop.isAlive()) {
-                stop.destroyForcibly();
-            }
-
             Thread.currentThread().interrupt();
 
         } catch (IOException ignored) {
         }
+    }
+
+    private boolean confirmOomKill(String containerName, RunMetrics metrics) {
+        for (int attempt = 0; attempt < OOM_FLAG_RECHECKS; attempt++) {
+            try {
+                Thread.sleep(OOM_FLAG_RECHECK_DELAY_MS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+            if (inspectOomKilled(containerName)) {
+                return true;
+            }
+        }
+        return metrics.peakMemoryMb() >= limits.getMemoryMb() * OOM_PEAK_FRACTION_OF_LIMIT;
     }
 
     private boolean inspectOomKilled(String containerName) {
@@ -773,110 +820,85 @@ public class DockerRunner implements CodeRunner {
 
         try {
             inspect = new ProcessBuilder(
-                    "docker",
-                    "inspect",
-                    "--format",
-                    "{{.State.OOMKilled}}",
+                    "docker", "inspect",
+                    "--format", "{{.State.OOMKilled}}",
                     containerName
             ).start();
 
-            if (!inspect.waitFor(5, TimeUnit.SECONDS)) {
-                inspect.destroyForcibly();
-                inspect.waitFor();
+            boolean finished = inspect.waitFor(5, TimeUnit.SECONDS);
 
-                return false;
+            if (finished && inspect.exitValue() == 0) {
+                String out = new String(
+                        inspect.getInputStream().readAllBytes(),
+                        StandardCharsets.UTF_8
+                ).trim();
+
+                return Boolean.parseBoolean(out);
             }
-
-            if (inspect.exitValue() != 0) {
-                return false;
-            }
-
-            byte[] output;
-
-            try (InputStream stream = inspect.getInputStream()) {
-                output = stream.readAllBytes();
-            }
-
-            return "true".equalsIgnoreCase(
-                    new String(output, StandardCharsets.UTF_8).trim()
-            );
 
         } catch (InterruptedException e) {
-            if (inspect != null && inspect.isAlive()) {
-                inspect.destroyForcibly();
-            }
-
             Thread.currentThread().interrupt();
 
-            return false;
-
-        } catch (Exception ignored) {
-            if (inspect != null && inspect.isAlive()) {
-                inspect.destroyForcibly();
-            }
-
-            return false;
+        } catch (IOException ignored) {
         }
+
+        return false;
     }
 
     private CapturedOutput captureStream(
             InputStream stream,
-            AtomicLong outputBytes,
-            AtomicBoolean outputTruncated
+            AtomicLong totalBytes,
+            AtomicBoolean truncated
     ) {
-        long maxBytes = limits.getMaxOutputBytes();
-        ByteArrayOutputStream captured = new ByteArrayOutputStream();
+        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+        byte[] chunk = new byte[4096];
 
-        try (stream) {
-            byte[] buffer = new byte[8192];
-            int count;
+        try {
+            int read;
+            while ((read = stream.read(chunk)) != -1) {
+                long current = totalBytes.get();
 
-            while ((count = stream.read(buffer)) != -1) {
-                int allowed;
-
-                while (true) {
-                    long used = outputBytes.get();
-                    long remaining = Math.max(0, maxBytes - used);
-
-                    allowed = (int) Math.min(count, remaining);
-
-                    if (outputBytes.compareAndSet(
-                            used,
-                            used + allowed
-                    )) {
-                        break;
-                    }
+                if (current >= limits.getMaxOutputBytes()) {
+                    truncated.set(true);
+                    continue;
                 }
 
-                if (allowed > 0) {
-                    captured.write(buffer, 0, allowed);
-                }
+                int toWrite = (int) Math.min(
+                        read,
+                        limits.getMaxOutputBytes() - current
+                );
 
-                if (allowed < count) {
-                    outputTruncated.set(true);
+                buffer.write(chunk, 0, toWrite);
+                totalBytes.addAndGet(toWrite);
+
+                if (toWrite < read) {
+                    truncated.set(true);
                 }
             }
 
-        } catch (IOException e) {
-            throw new CompletionException(e);
+        } catch (IOException ignored) {
         }
 
         return new CapturedOutput(
-                captured.toString(StandardCharsets.UTF_8),
-                outputTruncated.get()
+                buffer.toString(StandardCharsets.UTF_8),
+                truncated.get()
         );
     }
 
-    private void validateLimits() {
-        if (limits.getWallTimeSeconds() <= 0
-                || limits.getMemoryMb() <= 0
-                || limits.getPidsLimit() <= 0
-                || limits.getMaxOutputBytes() <= 0
-                || limits.getCompileTimeoutSeconds() <= 0
-                || limits.getMaxRequestBodyBytes() <= 0) {
+    private double elapsedMillis(long startNanos) {
+        return (System.nanoTime() - startNanos) / 1_000_000.0;
+    }
 
-            throw new IllegalStateException(
-                    "Execution limits must all be greater than zero."
+    private void validateLimits() {
+        if (limits.getMemoryMb() < 4) {
+            throw new IllegalArgumentException(
+                    "Configured memory limit too small: " + limits.getMemoryMb() + "MB"
+            );
+        }
+
+        if (limits.getPidsLimit() < 1) {
+            throw new IllegalArgumentException(
+                    "Configured pids limit too small: " + limits.getPidsLimit()
             );
         }
     }

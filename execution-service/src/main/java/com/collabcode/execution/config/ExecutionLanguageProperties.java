@@ -26,7 +26,7 @@ public class ExecutionLanguageProperties {
 
     public static final Map<String, String> DEFAULT_IMAGES = Map.of(
             "cpp", "collab-sandbox-cpp:0.1.0",
-            "python", "collab-sandbox-python:0.1.0",
+            "python", "collab-sandbox-python:0.2.0",
             "c", "collab-sandbox-c:0.1.0",
             "java", "collab-sandbox-java:0.1.0",
             "javascript", "collab-sandbox-javascript:0.1.0"

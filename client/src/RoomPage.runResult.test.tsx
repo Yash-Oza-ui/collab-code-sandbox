@@ -103,6 +103,9 @@ describe('RoomPage run-result delivery (US-08)', () => {
   let originalPathname = '/'
 
   beforeEach(() => {
+    // Prevent a previous test's saved display name from auto-joining this room.
+    sessionStorage.clear()
+
     FakeSocket.instances = []
     FakeSocket.role = 'participant'
     originalPathname = window.location.pathname

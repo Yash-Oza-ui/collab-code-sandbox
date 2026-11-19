@@ -43,7 +43,7 @@ class DockerRunnerLanguagesTest {
         Map<String, String> images = languageProperties.getImages();
 
         assertEquals("collab-sandbox-cpp:0.1.0", images.get("cpp"));
-        assertEquals("collab-sandbox-python:0.1.0", images.get("python"));
+        assertEquals("collab-sandbox-python:0.2.0", images.get("python"));
         assertEquals("collab-sandbox-c:0.1.0", images.get("c"));
         assertEquals("collab-sandbox-java:0.1.0", images.get("java"));
         assertEquals("collab-sandbox-javascript:0.1.0", images.get("javascript"));
@@ -91,7 +91,7 @@ class DockerRunnerLanguagesTest {
         languageProperties.setImages(Map.of("cpp", "custom-registry/cpp:1.0.0"));
 
         assertEquals("custom-registry/cpp:1.0.0", languageProperties.getImageForLanguage("cpp"));
-        assertEquals("collab-sandbox-python:0.1.0", languageProperties.getImageForLanguage("python"));
+        assertEquals("collab-sandbox-python:0.2.0", languageProperties.getImageForLanguage("python"));
     }
 
     @Test

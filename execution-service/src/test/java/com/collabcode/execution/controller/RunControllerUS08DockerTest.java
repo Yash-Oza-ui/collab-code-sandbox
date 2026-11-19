@@ -55,7 +55,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @AutoConfigureMockMvc
 class RunControllerUS08DockerTest {
 
-    private static final String IMAGE = "collab-sandbox-python:0.1.0";
+    private static final String IMAGE = "collab-sandbox-python:0.2.0";
 
     private static final String REQUEST_ID = "0b9d2f3e-7a41-4c58-9e1b-5d3c8a6f2e10";
     private static final String ROOM_ID    = "room-demo-01";
@@ -106,7 +106,8 @@ class RunControllerUS08DockerTest {
                 .andExpect(jsonPath("$.timed_out").value(false))
                 .andExpect(jsonPath("$.oom_killed").value(false))
                 .andExpect(jsonPath("$.output_truncated").value(false))
-                .andExpect(jsonPath("$.execution_time_ms", greaterThanOrEqualTo(0.0)))
+                .andExpect(jsonPath("$.execution_time_ms", greaterThanOrEqualTo(0.1)))
+                .andExpect(jsonPath("$.peak_memory_mb", greaterThanOrEqualTo(0.1)))
                 .andExpect(jsonPath("$.peak_memory_mb").exists());
     }
 
