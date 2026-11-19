@@ -8,8 +8,15 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -108,5 +115,124 @@ class DockerRunnerLanguagesTest {
 
         assertEquals(2, result.getExitCode());
         assertTrue(result.getStderr().contains("Entry file was not included"));
+    }
+
+    @Test
+    @DisplayName("Compilation timeout returns failure_kind 'timeout' and timed_out true")
+    void compileStageTimeoutReportsTimeoutFailureKind() {
+        DockerRunner timeoutRunner = new DockerRunner(limits, languageProperties) {
+            @Override
+            protected Process startCompileProcess(List<String> dockerArgs) {
+                return new FakeProcess(false, 137, "compile timed out");
+            }
+
+            @Override
+            protected void stopContainer(String containerName) {
+                // No-op in test
+            }
+        };
+
+        RunSpec spec = new RunSpec(
+                "cpp",
+                List.of(new RunFile("main.cpp", "int main() { return 0; }")),
+                "main.cpp",
+                ""
+        );
+
+        ExecutionResult result = timeoutRunner.execute(spec);
+
+        assertTrue(result.isTimedOut(), "timed_out must be true on compilation timeout");
+        assertEquals("timeout", result.getFailureKind(), "failure_kind must be 'timeout' when compile stage times out");
+        assertEquals("Time limit exceeded", result.getMessage());
+        assertEquals(124, result.getExitCode(), "exit_code must be 124 on timeout");
+        assertNull(result.getFailingModule(), "failing_module must be null on timeout");
+    }
+
+    @Test
+    @DisplayName("Compiler exiting non-zero returns failure_kind 'compile_error' and timed_out false")
+    void compilerExitsNonZeroReportsCompileErrorFailureKind() {
+        String compilerStderr = "/sandbox/code/main.cpp:1:1: error: expected unqualified-id\n";
+        DockerRunner errorRunner = new DockerRunner(limits, languageProperties) {
+            @Override
+            protected Process startCompileProcess(List<String> dockerArgs) {
+                return new FakeProcess(true, 1, compilerStderr);
+            }
+
+            @Override
+            protected void stopContainer(String containerName) {
+                // No-op in test
+            }
+        };
+
+        RunSpec spec = new RunSpec(
+                "cpp",
+                List.of(new RunFile("main.cpp", "invalid c++ code")),
+                "main.cpp",
+                ""
+        );
+
+        ExecutionResult result = errorRunner.execute(spec);
+
+        assertFalse(result.isTimedOut(), "timed_out must be false on compiler syntax error");
+        assertEquals("compile_error", result.getFailureKind(), "failure_kind must be 'compile_error' when compiler exits non-zero");
+        assertEquals("Compilation failed.", result.getMessage());
+        assertEquals(1, result.getExitCode());
+        assertEquals("main.cpp", result.getFailingModule());
+        assertTrue(result.getStderr().contains("error: expected unqualified-id"));
+    }
+
+    private static class FakeProcess extends Process {
+        private final boolean finishes;
+        private final int exitCode;
+        private final String stderrText;
+
+        FakeProcess(boolean finishes, int exitCode, String stderrText) {
+            this.finishes = finishes;
+            this.exitCode = exitCode;
+            this.stderrText = stderrText;
+        }
+
+        @Override
+        public OutputStream getOutputStream() {
+            return new ByteArrayOutputStream();
+        }
+
+        @Override
+        public InputStream getInputStream() {
+            return new ByteArrayInputStream(new byte[0]);
+        }
+
+        @Override
+        public InputStream getErrorStream() {
+            return new ByteArrayInputStream(stderrText.getBytes(StandardCharsets.UTF_8));
+        }
+
+        @Override
+        public boolean waitFor(long timeout, TimeUnit unit) {
+            return finishes;
+        }
+
+        @Override
+        public int waitFor() {
+            return exitCode;
+        }
+
+        @Override
+        public int exitValue() {
+            return exitCode;
+        }
+
+        @Override
+        public void destroy() {}
+
+        @Override
+        public Process destroyForcibly() {
+            return this;
+        }
+
+        @Override
+        public boolean isAlive() {
+            return !finishes;
+        }
     }
 }

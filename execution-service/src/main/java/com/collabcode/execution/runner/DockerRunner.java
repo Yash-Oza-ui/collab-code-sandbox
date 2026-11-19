@@ -74,6 +74,10 @@ public class DockerRunner implements CodeRunner {
         return "run-" + UUID.randomUUID();
     }
 
+    protected Process startCompileProcess(List<String> dockerArgs) throws IOException {
+        return new ProcessBuilder(dockerArgs).start();
+    }
+
     @Override
     public ExecutionResult execute(RunSpec spec) {
         long start = System.nanoTime();
@@ -158,8 +162,7 @@ public class DockerRunner implements CodeRunner {
                 ));
                 compileDockerArgs.addAll(compileCommand);
 
-                ProcessBuilder compilePb = new ProcessBuilder(compileDockerArgs);
-                compileProcess = compilePb.start();
+                compileProcess = startCompileProcess(compileDockerArgs);
                 Process runningCompile = compileProcess;
 
                 AtomicLong compileOutputBytes = new AtomicLong(0);
@@ -199,19 +202,24 @@ public class DockerRunner implements CodeRunner {
                 compileTimeMs = elapsedMillis(compileStart);
 
                 if (!compileFinished || compileExitCode != 0) {
+                    boolean compileTimedOut = !compileFinished;
+                    String failureKind = compileTimedOut ? "timeout" : "compile_error";
+                    String message = compileTimedOut ? "Time limit exceeded" : "Compilation failed.";
+                    String failingModule = compileTimedOut ? null : spec.getEntry();
+
                     return new ExecutionResult(
                             "",
                             compileStderr.text(),
-                            compileFinished ? compileExitCode : 124,
+                            compileTimedOut ? 124 : compileExitCode,
                             0.0,
                             0.0,
-                            !compileFinished,
+                            compileTimedOut,
                             false,
-                            "compile_error",
+                            failureKind,
                             compileOutputTruncated.get(),
-                            "Compilation failed.",
+                            message,
                             compileTimeMs,
-                            spec.getEntry()
+                            failingModule
                     );
                 }
             }
@@ -779,7 +787,7 @@ public class DockerRunner implements CodeRunner {
         );
     }
 
-    private void stopContainer(String containerName) {
+    protected void stopContainer(String containerName) {
         Process stop = null;
 
         try {
