@@ -220,6 +220,94 @@ describe('validateRunResponse (CHECK 1 — Strict API Response Validation)', () 
     expect(validateRunResponse({ ...validPayload, stdout: 123 }).valid).toBe(false)
     expect(validateRunResponse({ ...validPayload, stderr: null }).valid).toBe(false)
   })
+
+  it('rejects malformed runner attribution objects (US-50 / FR26)', () => {
+    // Non-object runner
+    expect(validateRunResponse({ ...validPayload, runner: null }).valid).toBe(false)
+    expect(validateRunResponse({ ...validPayload, runner: 'Ada' }).valid).toBe(false)
+    expect(validateRunResponse({ ...validPayload, runner: 123 }).valid).toBe(false)
+    expect(validateRunResponse({ ...validPayload, runner: [] }).valid).toBe(false)
+
+    // Missing or invalid display_name
+    expect(validateRunResponse({ ...validPayload, runner: {} }).valid).toBe(false)
+    expect(validateRunResponse({ ...validPayload, runner: { display_name: '' } }).valid).toBe(false)
+    expect(validateRunResponse({ ...validPayload, runner: { display_name: '   ' } }).valid).toBe(false)
+    expect(validateRunResponse({ ...validPayload, runner: { display_name: 123 } }).valid).toBe(false)
+    expect(validateRunResponse({ ...validPayload, runner: { member_id: 'm1' } }).valid).toBe(false)
+
+    // Invalid member_id if present
+    expect(validateRunResponse({ ...validPayload, runner: { display_name: 'Ada', member_id: '' } }).valid).toBe(false)
+    expect(validateRunResponse({ ...validPayload, runner: { display_name: 'Ada', member_id: 123 } }).valid).toBe(false)
+
+    // Valid runner succeeds
+    expect(validateRunResponse({ ...validPayload, runner: { display_name: 'Ada' } }).valid).toBe(true)
+    expect(validateRunResponse({ ...validPayload, runner: { display_name: 'Ada', member_id: 'm1' } }).valid).toBe(true)
+  })
+
+  it('rejects malformed or missing timestamps when attribution is expected (US-50 / FR26)', () => {
+    // Invalid ran_at formats
+    expect(validateRunResponse({ ...validPayload, ran_at: '' }).valid).toBe(false)
+    expect(validateRunResponse({ ...validPayload, ran_at: 'not-a-timestamp' }).valid).toBe(false)
+    expect(validateRunResponse({ ...validPayload, ran_at: '2026-11-01 10:20:05' }).valid).toBe(false)
+    expect(validateRunResponse({ ...validPayload, ran_at: 123456789 }).valid).toBe(false)
+
+    // requireAttribution option enforces runner and ran_at
+    expect(validateRunResponse(validPayload, { requireAttribution: true }).valid).toBe(false)
+    expect(validateRunResponse({ ...validPayload, runner: { display_name: 'Ada' } }, { requireAttribution: true }).valid).toBe(false)
+    expect(validateRunResponse({ ...validPayload, ran_at: '2026-11-01T10:20:05.087Z' }, { requireAttribution: true }).valid).toBe(false)
+    expect(
+      validateRunResponse(
+        {
+          ...validPayload,
+          runner: { display_name: 'Ada' },
+          ran_at: '2026-11-01T10:20:05.087Z',
+        },
+        { requireAttribution: true }
+      ).valid
+    ).toBe(true)
+  })
+
+  it('rejects malformed saved_versions entries in Open mode (US-50 / FR26)', () => {
+    // Non-array
+    expect(validateRunResponse({ ...validPayload, saved_versions: 'not-array' }).valid).toBe(false)
+    expect(validateRunResponse({ ...validPayload, saved_versions: {} }).valid).toBe(false)
+
+    // Non-object entries
+    expect(validateRunResponse({ ...validPayload, saved_versions: [null] }).valid).toBe(false)
+    expect(validateRunResponse({ ...validPayload, saved_versions: ['module1'] }).valid).toBe(false)
+
+    // Missing required fields (name, version, module_id)
+    expect(validateRunResponse({ ...validPayload, saved_versions: [{ name: 'main.py' }] }).valid).toBe(false)
+    expect(validateRunResponse({ ...validPayload, saved_versions: [{ name: 'main.py', version: 1 }] }).valid).toBe(false)
+    expect(validateRunResponse({ ...validPayload, saved_versions: [{ module_id: 'm1', version: 1 }] }).valid).toBe(false)
+    expect(validateRunResponse({ ...validPayload, saved_versions: [{ module_id: 'm1', name: '' }] }).valid).toBe(false)
+
+    // Invalid version (must be non-negative integer)
+    expect(validateRunResponse({ ...validPayload, saved_versions: [{ module_id: 'm1', name: 'main.py', version: '1' }] }).valid).toBe(false)
+    expect(validateRunResponse({ ...validPayload, saved_versions: [{ module_id: 'm1', name: 'main.py', version: 1.5 }] }).valid).toBe(false)
+    expect(validateRunResponse({ ...validPayload, saved_versions: [{ module_id: 'm1', name: 'main.py', version: -1 }] }).valid).toBe(false)
+
+    // Invalid saved_by or saved_at if provided
+    expect(validateRunResponse({ ...validPayload, saved_versions: [{ module_id: 'm1', name: 'main.py', version: 1, saved_by: 'Ada' }] }).valid).toBe(false)
+    expect(validateRunResponse({ ...validPayload, saved_versions: [{ module_id: 'm1', name: 'main.py', version: 1, saved_by: { display_name: '' } }] }).valid).toBe(false)
+    expect(validateRunResponse({ ...validPayload, saved_versions: [{ module_id: 'm1', name: 'main.py', version: 1, saved_at: 'invalid-time' }] }).valid).toBe(false)
+
+    // Valid saved_versions array
+    expect(
+      validateRunResponse({
+        ...validPayload,
+        saved_versions: [
+          {
+            module_id: 'm1',
+            name: 'main.py',
+            version: 1,
+            saved_by: { display_name: 'Ada' },
+            saved_at: '2026-11-01T10:20:05.087Z',
+          },
+        ],
+      }).valid
+    ).toBe(true)
+  })
 })
 
 describe('executeRun API client (Fix 1, 2, 3)', () => {
@@ -510,6 +598,40 @@ describe('parseRunResultFrame (US-08, T-17 section 3.6)', () => {
     if (parsed.valid) {
       expect(parsed.data.stdout).toBe('hello\n')
       expect(parsed.data.runner?.display_name).toBe('Ada')
+      expect(parsed.data.runner?.member_id).toBe('m_7a3c9f')
+      expect(parsed.data.ran_at).toBe('2026-11-01T10:20:05.087Z')
+    }
+  })
+
+  it('preserves saved_versions in V2.9 run-result frames (US-50 / FR26)', () => {
+    const openFrame = {
+      ...frame,
+      saved_versions: [
+        {
+          module_id: 'mod_1',
+          name: 'main.py',
+          version: 4,
+          saved_by: { member_id: 'm_ada', display_name: 'Ada' },
+          saved_at: '2026-11-01T10:12:04.118Z',
+        },
+        {
+          module_id: 'mod_2',
+          name: 'helper.py',
+          version: 2,
+          saved_by: { member_id: 'm_lin', display_name: 'Lin' },
+          saved_at: '2026-11-01T10:14:51.733Z',
+        },
+      ],
+    }
+
+    const parsed = parseRunResultFrame(openFrame, 'room-demo-01')
+    expect(parsed.valid).toBe(true)
+    if (parsed.valid) {
+      expect(parsed.data.saved_versions).toHaveLength(2)
+      expect(parsed.data.saved_versions?.[0].name).toBe('main.py')
+      expect(parsed.data.saved_versions?.[0].version).toBe(4)
+      expect(parsed.data.saved_versions?.[1].name).toBe('helper.py')
+      expect(parsed.data.saved_versions?.[1].version).toBe(2)
     }
   })
 
