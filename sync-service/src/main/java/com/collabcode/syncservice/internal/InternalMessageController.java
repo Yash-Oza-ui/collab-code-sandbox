@@ -1,7 +1,6 @@
 package com.collabcode.syncservice.internal;
 
 import com.collabcode.syncservice.room.Member;
-import com.collabcode.syncservice.room.Role;
 import com.collabcode.syncservice.room.Room;
 import com.collabcode.syncservice.room.RoomRegistry;
 import com.collabcode.syncservice.room.RoomService;
@@ -140,12 +139,10 @@ public class InternalMessageController {
         resp.put("role", member.getRole().name().toLowerCase());
         resp.put("mode", room.getMode().name().toLowerCase());
         resp.put("language", room.getLanguage()); // null in Pair mode, language string in Open mode
-        resp.put("can_run", member.isCanRun());
-
-        String runDeniedReason = null;
-        if (!member.isCanRun()) {
-            runDeniedReason = member.getRole() == Role.OBSERVER ? "observer" : "run_revoked";
-        }
+        // US-60 (V2.20): the effective answer, including a Run restriction and Host-only
+        // running. Asked fresh on every call; execution-service never caches it (FR41.4).
+        String runDeniedReason = room.runDeniedReason(member);
+        resp.put("can_run", runDeniedReason == null);
         resp.put("run_denied_reason", runDeniedReason);
         resp.put("ai_enabled", room.isAiEnabled());
 

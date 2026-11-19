@@ -4,11 +4,9 @@ server:
 spring:
   application:
     name: execution-service
-  # Until sync-service implements real session lookup (T-20), activate the
-  # in-memory stub that returns can_run: true for every session.
-  # Remove this profile once the real PermissionLookupService is wired.
-  profiles:
-    active: stub-permissions
+  # US-60: permissions come from sync-service (HttpPermissionLookupService) unless the
+  # in-memory stub is selected on purpose, e.g. SPRING_PROFILES_ACTIVE=stub-permissions
+  # (the integration stack in docker-compose.yml does that for the legacy run scripts).
   # Enforce the 1 MiB run-request body cap (T-06 section 2).
   # Overridden by app.execution.limits.max-request-body-bytes at runtime.
   servlet:

@@ -20,11 +20,12 @@ import {
   type AwarenessWsConnection,
   type JoinedMessage,
   type RosterMember,
+  type RunDeniedReason,
 } from './awarenessWs'
 import { ownerTokenKey } from './createRoom'
 import { getRoomIdFromPath } from './roomId'
 import { useRoomDoc } from './roomDoc'
-import { parseRunResultFrame } from './runCode'
+import { parseRunResultFrame, runNotAllowedMessage } from './runCode'
 import type { RunResponseData, SupportedLanguage } from './runCode'
 import { pickUserColor } from './userColor'
 import { config } from './config'
@@ -110,6 +111,21 @@ export default function RoomPage(props: RoomPageProps = {}) {
   const [roleChangeError, setRoleChangeError] = useState<string | null>(null)
   const [changingRoleFor, setChangingRoleFor] = useState<string | null>(null)
   const isObserver = role?.toLowerCase() === 'observer'
+  // Run permission (US-60, V2.20): the server's answer for this member, from joined / roster.
+  // Unknown (older server) is treated as allowed; the server still checks every run (FR41.4).
+  const [myCanRun, setMyCanRun] = useState<boolean | null>(null)
+  const [myRunDeniedReason, setMyRunDeniedReason] = useState<RunDeniedReason | null>(null)
+  const [hostOnlyRun, setHostOnlyRun] = useState(false)
+  const [runControlError, setRunControlError] = useState<string | null>(null)
+  const [changingRunFor, setChangingRunFor] = useState<string | null>(null)
+  const [changingHostOnly, setChangingHostOnly] = useState(false)
+  const isHost = role?.toLowerCase() === 'host'
+  const runDisabled = isObserver || myCanRun === false
+  const runDisabledReason = runDisabled
+    ? isObserver
+      ? 'Observers cannot run code' // unchanged US-27 wording
+      : runNotAllowedMessage(myRunDeniedReason ?? undefined)
+    : undefined
 
   // One Y.Doc is created inside effect setup and destroyed in its cleanup (T-01).
   const { docRef } = useRoomDoc(roomId, { docRef: externalDocRef })
@@ -222,6 +238,8 @@ export default function RoomPage(props: RoomPageProps = {}) {
           myMemberIdRef.current = joined.member_id ?? null
           setMyMemberId(joined.member_id ?? null)
           setRole(joined.role)
+          setMyCanRun(typeof joined.permissions?.can_run === 'boolean' ? joined.permissions.can_run : null)
+          setMyRunDeniedReason(joined.permissions?.run_denied_reason ?? null)
           // V2.3 joined carries mode and preset, but no Open workspace language.
           // Do not infer it from creation state or the shared URL.
           setRoomMode({
@@ -254,7 +272,12 @@ export default function RoomPage(props: RoomPageProps = {}) {
             if (me?.role) {
               setRole(me.role)
             }
+            if (me?.permissions && typeof me.permissions.can_run === 'boolean') {
+              setMyCanRun(me.permissions.can_run)
+              setMyRunDeniedReason(me.permissions.run_denied_reason ?? null)
+            }
           }
+          setHostOnlyRun(roster.host_only_run === true)
         },
         onJoinRefused: (msg) => {
           let message = msg.message
@@ -470,6 +493,67 @@ export default function RoomPage(props: RoomPageProps = {}) {
     }
   }
 
+  /**
+   * A Host-only run-permission request (US-60, V2.20). Returns an error text, or null on
+   * success; the change itself comes back to every client as a new `roster`.
+   */
+  async function sendRunPermissionRequest(path: string, body: Record<string, boolean>): Promise<string | null> {
+    if (!roomId || !isHost) return 'Only the Host can change who can run.'
+    try {
+      const ownerToken = localStorage.getItem(ownerTokenKey(roomId))
+      const sessionId = sessionIdRef.current
+      if (!ownerToken || !sessionId) {
+        return 'Missing Host credentials. Please rejoin the room.'
+      }
+      const fetchFn = wsOptions?.fetchFn ?? fetch
+      const response = await fetchFn(`${config.platformApiUrl}/v1/rooms/${encodeURIComponent(roomId)}${path}`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Session-Id': sessionId,
+          'X-Owner-Token': ownerToken,
+        },
+        body: JSON.stringify(body),
+      })
+      if (response.ok) return null
+      let message = `Could not change run permission (HTTP ${response.status}).`
+      try {
+        const errorBody = (await response.json()) as { error?: { message?: string; code?: string } }
+        message = errorBody.error?.message || errorBody.error?.code || message
+      } catch {
+        // Keep the HTTP status message when the response has no JSON body.
+      }
+      return message
+    } catch {
+      return 'Could not connect to the room server. Please try again.'
+    }
+  }
+
+  async function handleToggleMemberRun(member: RosterMember, allow: boolean) {
+    setRunControlError(null)
+    setChangingRunFor(member.member_id)
+    try {
+      const error = await sendRunPermissionRequest(
+        `/members/${encodeURIComponent(member.member_id)}/run-permission`,
+        { can_run: allow },
+      )
+      if (error) setRunControlError(error)
+    } finally {
+      setChangingRunFor(null)
+    }
+  }
+
+  async function handleToggleHostOnly(next: boolean) {
+    setRunControlError(null)
+    setChangingHostOnly(true)
+    try {
+      const error = await sendRunPermissionRequest('/run-policy', { host_only_run: next })
+      if (error) setRunControlError(error)
+    } finally {
+      setChangingHostOnly(false)
+    }
+  }
+
   if (isInvalidRoomId) {
     return (
       <div className="room-page">
@@ -592,6 +676,28 @@ export default function RoomPage(props: RoomPageProps = {}) {
                   )}
 
                   {isMemberObserver && <span>Read-only</span>}
+
+                  {isHost && !isSelf && !isMemberObserver && member.role.toLowerCase() !== 'host' && (
+                    member.permissions?.run_denied_reason === 'run_revoked' ? (
+                      <button
+                        type="button"
+                        data-testid={`run-on-${member.member_id}`}
+                        onClick={() => void handleToggleMemberRun(member, true)}
+                        disabled={changingRunFor === member.member_id}
+                      >
+                        {changingRunFor === member.member_id ? 'Changing...' : 'Turn on Run'}
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        data-testid={`run-off-${member.member_id}`}
+                        onClick={() => void handleToggleMemberRun(member, false)}
+                        disabled={changingRunFor === member.member_id}
+                      >
+                        {changingRunFor === member.member_id ? 'Changing...' : 'Turn off Run'}
+                      </button>
+                    )
+                  )}
                 </li>
               )
             })}
@@ -603,7 +709,34 @@ export default function RoomPage(props: RoomPageProps = {}) {
             {roleChangeError}
           </p>
         )}
+
+        {isHost && (
+          <label data-testid="host-only-run-label">
+            <input
+              type="checkbox"
+              data-testid="host-only-run-toggle"
+              checked={hostOnlyRun}
+              disabled={changingHostOnly}
+              onChange={(e) => void handleToggleHostOnly(e.target.checked)}
+            />{' '}
+            Only the Host can run code
+          </label>
+        )}
+        {!isHost && hostOnlyRun && (
+          <p data-testid="host-only-run-notice">Only the Host can run code in this room right now.</p>
+        )}
+
+        {runControlError && (
+          <p role="alert" data-testid="run-control-error">
+            {runControlError}
+          </p>
+        )}
       </section>
+      {runDisabledReason && (
+        <p data-testid="run-disabled-reason" role="status">
+          {runDisabledReason}
+        </p>
+      )}
       <RunPanel
         roomId={roomId || ''}
         onRunComplete={(result) => {
@@ -614,8 +747,8 @@ export default function RoomPage(props: RoomPageProps = {}) {
         onLanguageChange={(lang) => setCurrentLanguage(lang)}
         executionApiUrl={wsOptions?.executionApiUrl}
         fetchFn={wsOptions?.fetchFn}
-        disabled={isObserver}
-        disabledReason={isObserver ? 'Observers cannot run code' : undefined}
+        disabled={runDisabled}
+        disabledReason={runDisabledReason}
       >
         {runOutput ? <RunOutputPanel result={runOutput} /> : null}
       </RunPanel>

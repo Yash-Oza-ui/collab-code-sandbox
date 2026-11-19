@@ -45,6 +45,13 @@ public class Room {
     private volatile boolean requiresApproval = false;
 
     /**
+     * Host-only running (US-60, V2.20, FR41.3). While true, only the Host can run
+     * code in this room; every other member is refused with {@code host_only}.
+     * Off by default (FR41.1: any Participant can run unless the Host restricts Run).
+     */
+    private volatile boolean hostOnlyRun = false;
+
+    /**
      * Per-room block list (US-28, V2.18, FR9.6/CR04), keyed by the private
      * {@code session_id}. A removed member is kept here so the Host can list and
      * re-admit them; the {@code session_id} is the key and is never exposed, while
@@ -82,6 +89,42 @@ public class Room {
     public boolean isRequiresApproval() { return requiresApproval; }
     public void setRequiresApproval(boolean v) { this.requiresApproval = v; }
 
+    // ----- Run permission (US-60, V2.20) -----
+
+    public boolean isHostOnlyRun() { return hostOnlyRun; }
+    public void setHostOnlyRun(boolean hostOnlyRun) { this.hostOnlyRun = hostOnlyRun; }
+
+    /**
+     * Why this member may not run, or {@code null} if they may (FR41.1 to FR41.4).
+     * The one place the rule lives: the permission lookup, {@code joined} and
+     * {@code roster} all ask here, so they can never disagree.
+     *
+     * <p>Order, most lasting first: the Host always runs; an Observer never runs
+     * ({@code observer}); a participant the Host took Run from ({@code run_revoked},
+     * kept in {@link Member#isCanRun()}); everyone but the Host while Host-only
+     * running is on ({@code host_only}).
+     */
+    public String runDeniedReason(Member member) {
+        if (member.getRole() == Role.HOST) {
+            return null;
+        }
+        if (member.getRole() == Role.OBSERVER) {
+            return "observer";
+        }
+        if (!member.isCanRun()) {
+            return "run_revoked";
+        }
+        if (hostOnlyRun) {
+            return "host_only";
+        }
+        return null;
+    }
+
+    /** True if this member may run right now (see {@link #runDeniedReason}). */
+    public boolean canRun(Member member) {
+        return runDeniedReason(member) == null;
+    }
+
     /**
      * A copy of this room under a new id (US-28 regenerate-link, V2.18). Carries
      * every carried-over field — members, the closed and approval flags, the owner
@@ -92,6 +135,7 @@ public class Room {
         Room copy = new Room(newId, mode, preset, language, ownerTokenHash);
         copy.closed = this.closed;
         copy.requiresApproval = this.requiresApproval;
+        copy.hostOnlyRun = this.hostOnlyRun;
         copy.members.putAll(this.members);
         return copy;
     }

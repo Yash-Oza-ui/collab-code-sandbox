@@ -17,6 +17,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  *   <li>Byte 0 = 1 (awareness) → not a change → false</li>
  *   <li>Byte 0 = 3 (query awareness) → not a change → false</li>
  *   <li>Short frames (< 2 bytes) → false (safe guard)</li>
+ *   <li>Anything else (unknown type or sub-type, or a first byte of 0x80 or more that Yjs reads
+ *       as a longer encoding of a number) → true, so a modified client cannot hide an update
+ *       behind a non-canonical encoding (US-35)</li>
  * </ul>
  */
 class DocumentHandlerUnitTest {
@@ -64,6 +67,46 @@ class DocumentHandlerUnitTest {
     @Test
     void singleByteFrame_isNotDocumentChange() {
         assertThat(DocumentHandler.isDocumentChange(new byte[]{0x00})).isFalse();
+    }
+
+    // --- US-35: a modified client must not hide a change behind another encoding ---
+
+    @Test
+    void nonCanonicalSyncType_isDocumentChange() {
+        // 0x80 0x00 is a valid Yjs encoding of the number 0 (sync); then 0x82 0x00 encodes 2 (update).
+        byte[] frame = {(byte) 0x80, 0x00, (byte) 0x82, 0x00, 0x10, 0x20};
+        assertThat(DocumentHandler.isDocumentChange(frame)).isTrue();
+    }
+
+    @Test
+    void nonCanonicalSyncSubtype_isDocumentChange() {
+        assertThat(DocumentHandler.isDocumentChange(new byte[]{0x00, (byte) 0x82, 0x00, 0x10})).isTrue();
+        assertThat(DocumentHandler.isDocumentChange(new byte[]{0x00, (byte) 0x81, 0x00, 0x10})).isTrue();
+    }
+
+    @Test
+    void nonCanonicalAwarenessType_isTreatedAsPossibleChange() {
+        // Real awareness frames use the single byte 1; a longer encoding is not on the allow-list.
+        assertThat(DocumentHandler.isDocumentChange(new byte[]{(byte) 0x81, 0x00, 0x05})).isTrue();
+    }
+
+    @Test
+    void unknownMessageType_isTreatedAsPossibleChange() {
+        assertThat(DocumentHandler.isDocumentChange(new byte[]{0x02, 0x00})).isTrue();
+        assertThat(DocumentHandler.isDocumentChange(new byte[]{0x05, 0x00, 0x01})).isTrue();
+        assertThat(DocumentHandler.isDocumentChange(new byte[]{(byte) 0xFF, (byte) 0xFF})).isTrue();
+    }
+
+    @Test
+    void unknownSyncSubtype_isTreatedAsPossibleChange() {
+        assertThat(DocumentHandler.isDocumentChange(new byte[]{0x00, 0x03, 0x10})).isTrue();
+    }
+
+    @Test
+    void readOnlyFramesWithPayload_stayNotDocumentChange() {
+        assertThat(DocumentHandler.isDocumentChange(new byte[]{0x01, 0x01, 0x02, 0x03})).isFalse();
+        assertThat(DocumentHandler.isDocumentChange(new byte[]{0x03, 0x09})).isFalse();
+        assertThat(DocumentHandler.isDocumentChange(new byte[]{0x00, 0x00, 0x7F, 0x7F})).isFalse();
     }
 
     @Test
