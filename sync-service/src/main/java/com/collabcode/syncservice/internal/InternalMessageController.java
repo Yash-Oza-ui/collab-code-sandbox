@@ -1,17 +1,21 @@
 package com.collabcode.syncservice.internal;
 
 import com.collabcode.syncservice.room.Member;
-import com.collabcode.syncservice.room.Role;
 import com.collabcode.syncservice.room.Room;
 import com.collabcode.syncservice.room.RoomRegistry;
 import com.collabcode.syncservice.room.RoomService;
 import com.collabcode.syncservice.room.RoomStore;
+import com.collabcode.syncservice.run.InputHasher;
+import com.collabcode.syncservice.run.RunRecord;
+import com.collabcode.syncservice.run.RunRecordStore;
+import com.collabcode.syncservice.run.SavedVersionSummary;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.servlet.http.HttpServletRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -26,6 +30,9 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -68,16 +75,28 @@ public class InternalMessageController {
     private final ObjectMapper objectMapper;
     private final RoomStore roomStore;
     private final RoomService roomService;
+    private final RunRecordStore runRecordStore;
 
     public InternalMessageController(
             RoomRegistry registry,
             ObjectMapper objectMapper,
             RoomStore roomStore,
             RoomService roomService) {
+        this(registry, objectMapper, roomStore, roomService, null);
+    }
+
+    @Autowired
+    public InternalMessageController(
+            RoomRegistry registry,
+            ObjectMapper objectMapper,
+            RoomStore roomStore,
+            RoomService roomService,
+            @Autowired(required = false) RunRecordStore runRecordStore) {
         this.registry = registry;
         this.objectMapper = objectMapper;
         this.roomStore = roomStore;
         this.roomService = roomService;
+        this.runRecordStore = runRecordStore;
     }
 
     /**
@@ -120,12 +139,10 @@ public class InternalMessageController {
         resp.put("role", member.getRole().name().toLowerCase());
         resp.put("mode", room.getMode().name().toLowerCase());
         resp.put("language", room.getLanguage()); // null in Pair mode, language string in Open mode
-        resp.put("can_run", member.isCanRun());
-
-        String runDeniedReason = null;
-        if (!member.isCanRun()) {
-            runDeniedReason = member.getRole() == Role.OBSERVER ? "observer" : "run_revoked";
-        }
+        // US-60 (V2.20): the effective answer, including a Run restriction and Host-only
+        // running. Asked fresh on every call; execution-service never caches it (FR41.4).
+        String runDeniedReason = room.runDeniedReason(member);
+        resp.put("can_run", runDeniedReason == null);
         resp.put("run_denied_reason", runDeniedReason);
         resp.put("ai_enabled", room.isAiEnabled());
 
@@ -294,9 +311,19 @@ public class InternalMessageController {
                     "Room not found: " + roomId, requestId);
         }
 
-        // --- 9. Strip audience before forwarding and verify serialized size (T-17 V2.10) ---
+        // --- 9. Extract run-record metadata (FR29, US-52), then strip internal-only fields before forwarding (T-17 V2.10) ---
+        String messageType = typeNode.asText().trim();
+        RunRecord pendingRunRecord = "run-result".equalsIgnoreCase(messageType)
+                ? extractRunRecord(roomId, parsedNode)
+                : null;
+
         if (parsedNode instanceof ObjectNode objNode) {
             objNode.remove("audience");
+            if ("run-result".equalsIgnoreCase(messageType)) {
+                objNode.remove("input_hash");
+                objNode.remove("files");
+                objNode.remove("stdin");
+            }
         }
         byte[] payloadToSendBytes;
         try {
@@ -311,7 +338,12 @@ public class InternalMessageController {
                     "Message body is not valid: larger than 4 MiB.", requestId);
         }
 
-        // --- 10. Deliver to targeted control-socket connections ---
+        // --- 10. Persist run record with the result delivery call (FR29, US-52, T-18 Decision 9) ---
+        if (pendingRunRecord != null && runRecordStore != null) {
+            runRecordStore.record(pendingRunRecord);
+        }
+
+        // --- 11. Deliver to targeted control-socket connections ---
         List<WebSocketSession> sessions = roomAudience
                 ? registry.getAll(roomId)
                 : registry.getBySessionIds(roomId, targetSessions);
@@ -340,6 +372,186 @@ public class InternalMessageController {
         response.put("room_id", roomId);
         response.put("delivered", delivered);
         return ResponseEntity.ok(response);
+    }
+
+    /**
+     * Reads stored run records for a room (FR29, US-52, US-68).
+     *
+     * <p>When {@code input_hash} is supplied, returns only runs for that room with the
+     * matching input hash, ordered newest first (slowdown baseline query, US-68).
+     * When omitted, returns all runs for the room, ordered newest first.
+     */
+    @GetMapping(value = "/rooms/{roomId}/runs",
+                produces = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<Map<String, Object>> getRuns(
+            @PathVariable String roomId,
+            @RequestParam(name = "input_hash", required = false) String inputHash,
+            @RequestHeader(value = "X-Internal-Token", required = false) String token) {
+
+        if (internalApiToken == null || internalApiToken.isBlank() || !internalApiToken.equals(token)) {
+            log.warn("Internal endpoint: unauthorized run history lookup for room={}", roomId);
+            return error(HttpStatus.UNAUTHORIZED, "UNAUTHORIZED",
+                    "Missing or invalid internal token.", null);
+        }
+
+        Room room = roomStore != null ? roomStore.get(roomId) : null;
+        if (room == null || room.isClosed()) {
+            return error(HttpStatus.NOT_FOUND, "ROOM_NOT_FOUND",
+                    "Room not found: " + roomId, null);
+        }
+
+        List<RunRecord> runs = Collections.emptyList();
+        if (runRecordStore != null) {
+            runs = (inputHash != null && !inputHash.isBlank())
+                    ? runRecordStore.findByRoomAndInputHash(roomId, inputHash)
+                    : runRecordStore.findByRoom(roomId);
+        }
+
+        Map<String, Object> resp = new LinkedHashMap<>();
+        resp.put("room_id", roomId);
+        resp.put("runs", runs);
+        return ResponseEntity.ok(resp);
+    }
+
+    /**
+     * Deletes all run records for a room (FR32, US-52, US-56).
+     * Idempotent so room teardown can purge records even if the room is already closed.
+     */
+    @DeleteMapping(value = "/rooms/{roomId}/runs",
+                   produces = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<Map<String, Object>> deleteRuns(
+            @PathVariable String roomId,
+            @RequestHeader(value = "X-Internal-Token", required = false) String token) {
+
+        if (internalApiToken == null || internalApiToken.isBlank() || !internalApiToken.equals(token)) {
+            log.warn("Internal endpoint: unauthorized run record delete for room={}", roomId);
+            return error(HttpStatus.UNAUTHORIZED, "UNAUTHORIZED",
+                    "Missing or invalid internal token.", null);
+        }
+
+        int deleted = runRecordStore != null ? runRecordStore.deleteByRoom(roomId) : 0;
+        log.info("Internal run-record delete: room={} deleted={}", roomId, deleted);
+
+        Map<String, Object> resp = new LinkedHashMap<>();
+        resp.put("room_id", roomId);
+        resp.put("deleted", deleted);
+        return ResponseEntity.ok(resp);
+    }
+
+    /**
+     * Extracts a privacy-safe {@link RunRecord} from a delivered {@code run-result} JSON payload.
+     * Persists only FR29 / V2.9 fields; never persists {@code owner_token}, {@code session_id},
+     * raw {@code stdin}, or source code text.
+     */
+    private static RunRecord extractRunRecord(String roomId, JsonNode node) {
+        if (node == null) {
+            return null;
+        }
+
+        // Runner display name: read ONLY runner.display_name; never persist session_id
+        String runnerDisplayName = "";
+        JsonNode runnerNode = node.get("runner");
+        if (runnerNode != null) {
+            if (runnerNode.isObject() && runnerNode.hasNonNull("display_name")
+                    && runnerNode.get("display_name").isTextual()) {
+                runnerDisplayName = runnerNode.get("display_name").asText();
+            } else if (runnerNode.isTextual()) {
+                runnerDisplayName = runnerNode.asText();
+            }
+        }
+
+        // Time of run (ISO 8601 UTC from V2.9 ran_at)
+        String ranAt = (node.hasNonNull("ran_at") && node.get("ran_at").isTextual()
+                && !node.get("ran_at").asText().isBlank())
+                ? node.get("ran_at").asText()
+                : Instant.now().toString();
+
+        // Execution language
+        String language = (node.hasNonNull("language") && node.get("language").isTextual())
+                ? node.get("language").asText()
+                : "";
+
+        // Executed filenames only (NEVER source code content)
+        List<String> files = new ArrayList<>();
+        JsonNode filesNode = node.get("files");
+        if (filesNode != null && filesNode.isArray()) {
+            for (JsonNode entry : filesNode) {
+                if (entry.isTextual() && !entry.asText().isBlank()) {
+                    files.add(entry.asText());
+                } else if (entry.isObject() && entry.hasNonNull("name") && entry.get("name").isTextual()) {
+                    String name = entry.get("name").asText();
+                    if (!name.isBlank()) {
+                        files.add(name);
+                    }
+                }
+            }
+        }
+
+        // Open-mode saved versions metadata (safe V2.9 fields only; no code or session_id)
+        List<SavedVersionSummary> savedVersions = new ArrayList<>();
+        JsonNode savedVersionsNode = node.get("saved_versions");
+        if (savedVersionsNode != null && savedVersionsNode.isArray()) {
+            boolean deriveFiles = files.isEmpty();
+            for (JsonNode sv : savedVersionsNode) {
+                if (!sv.isObject()) {
+                    continue;
+                }
+                String modId = sv.hasNonNull("module_id") && sv.get("module_id").isTextual()
+                        ? sv.get("module_id").asText() : "";
+                String modName = sv.hasNonNull("name") && sv.get("name").isTextual()
+                        ? sv.get("name").asText() : "";
+                int version = sv.hasNonNull("version") && sv.get("version").isNumber()
+                        ? sv.get("version").asInt() : 0;
+                String savedAt = sv.hasNonNull("saved_at") && sv.get("saved_at").isTextual()
+                        ? sv.get("saved_at").asText() : "";
+
+                SavedVersionSummary.SavedBySummary savedBy = null;
+                JsonNode savedByNode = sv.get("saved_by");
+                if (savedByNode != null && savedByNode.isObject()) {
+                    String memberId = savedByNode.hasNonNull("member_id") && savedByNode.get("member_id").isTextual()
+                            ? savedByNode.get("member_id").asText() : "";
+                    String displayName = savedByNode.hasNonNull("display_name") && savedByNode.get("display_name").isTextual()
+                            ? savedByNode.get("display_name").asText() : "";
+                    savedBy = new SavedVersionSummary.SavedBySummary(memberId, displayName);
+                }
+
+                savedVersions.add(new SavedVersionSummary(modId, modName, version, savedBy, savedAt));
+                if (deriveFiles && !modName.isBlank()) {
+                    files.add(modName);
+                }
+            }
+        }
+
+        // Input hash: SHA-256 digest only (never store raw stdin)
+        String inputHash;
+        if (node.hasNonNull("input_hash") && node.get("input_hash").isTextual()
+                && !node.get("input_hash").asText().isBlank()) {
+            inputHash = node.get("input_hash").asText();
+        } else if (node.hasNonNull("stdin") && node.get("stdin").isTextual()) {
+            inputHash = InputHasher.hash(node.get("stdin").asText());
+        } else {
+            inputHash = InputHasher.EMPTY_SHA256;
+        }
+
+        double executionTimeMs = (node.hasNonNull("execution_time_ms") && node.get("execution_time_ms").isNumber())
+                ? node.get("execution_time_ms").asDouble()
+                : 0.0;
+
+        double peakMemoryMb = (node.hasNonNull("peak_memory_mb") && node.get("peak_memory_mb").isNumber())
+                ? node.get("peak_memory_mb").asDouble()
+                : 0.0;
+
+        return new RunRecord(
+                roomId,
+                runnerDisplayName,
+                ranAt,
+                language,
+                files,
+                savedVersions,
+                inputHash,
+                executionTimeMs,
+                peakMemoryMb
+        );
     }
 
     // -----------------------------------------------------------------------

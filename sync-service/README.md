@@ -48,8 +48,12 @@ Both sockets require `session_id` to be a valid UUID v4 query parameter.
 |--------|------|-------------|
 | `POST` | `/v1/rooms` | Create a room — returns `room_id`, `owner_token`, `mode`, `preset`, `language` |
 | `GET` | `/v1/rooms/{id}/owner` | Validate the owner token (T-10) |
+| `PATCH` | `/v1/rooms/{room_id}/members/{member_id}/run-permission` | Host only: take Run away from a participant or give it back, body `{"can_run": false}` (US-60, V2.20) |
+| `PATCH` | `/v1/rooms/{room_id}/run-policy` | Host only: switch Host-only running on or off, body `{"host_only_run": true}` (US-60, V2.20) |
 | `GET` | `/internal/rooms/{room_id}/sessions/{session_id}` | Session lookup for execution-service (requires `X-Internal-Token`) |
-| `POST` | `/internal/rooms/{room_id}/messages` | Broadcast or deliver targeted JSON messages to control sockets (requires `X-Internal-Token`) |
+| `POST` | `/internal/rooms/{room_id}/messages` | Broadcast or deliver targeted JSON messages to control sockets and record `run-result` entries (requires `X-Internal-Token`) |
+| `GET` | `/internal/rooms/{room_id}/runs` | Read stored run records for a room, optionally filtered by `input_hash`, newest first (requires `X-Internal-Token`, FR29 / US-52 / US-68) |
+| `DELETE` | `/internal/rooms/{room_id}/runs` | Delete all stored run records for a room (requires `X-Internal-Token`, FR32 / US-52 / US-56) |
 | `GET` | `/v1/rooms/{id}/owner` | Validate the owner token sent in `X-Owner-Token` (T-10, FR9.5) |
 | `POST` | `/internal/rooms/{id}/messages` | Broadcast a JSON message to all control-socket sessions in a room (requires `X-Internal-Token`) |
 
@@ -61,6 +65,28 @@ Both sockets require `session_id` to be a valid UUID v4 query parameter.
 | 400 | `INVALID_MESSAGE` | Non-JSON body, missing or blank `type`, payload > 4 MiB, or malformed `audience` |
 | 404 | `ROOM_NOT_FOUND` | Room does not exist or is closed |
 | 404 | `SESSION_NOT_FOUND` | Session has not joined the room (session lookup) |
+
+### 1.5 Room IDs (NFR16, US-62)
+
+Room ids are the only secret in a join link (`/room/{room_id}`), so they must
+be unguessable. `RoomIds.generate()` draws **16 bytes (128 bits) from
+`java.security.SecureRandom`** and encodes them as base64url without padding,
+giving a **22-character id from `[A-Za-z0-9_-]`** (well inside the §3.2 1–64
+character rule).
+
+- The **client cannot choose the id**: `POST /v1/rooms` has no `room_id` field
+  (`CreateRoomRequest` is `mode`/`preset`/`language` only), so any `room_id`
+  sent in the body is ignored and the server-generated id is returned.
+- A **guessed or unknown id opens nothing**: the control and document sockets
+  close an unknown room with **4404** (`ControlHandler.CLOSE_UNKNOWN_ROOM`), and
+  an unknown id never creates a room.
+- **No endpoint enumerates room ids**, and the unknown-room error
+  (`ROOM_NOT_FOUND`) does not reveal whether a similar id exists.
+- Room ids are never logged next to owner tokens or session ids.
+
+This satisfies **NFR16**. See `RoomIdsTest` (length, charset, 128-bit decode,
+no repeats in a 10 000-id batch), `RoomControllerTest.clientSuppliedRoomId_isIgnored`,
+and `RelayIntegrationTest` (unknown room → 4404).
 
 ---
 
@@ -85,7 +111,7 @@ Host includes `"owner_token"`:
 
 **`joined`** — sent to the joining session on success:
 ```json
-{ "type": "joined", "member_id": "m_...", "role": "host", "mode": "pair", "preset": "teach_interview", "permissions": { "can_edit": true, "can_run": true } }
+{ "type": "joined", "member_id": "m_...", "role": "host", "mode": "pair", "preset": "teach_interview", "permissions": { "can_edit": true, "can_run": true, "run_denied_reason": null } }
 ```
 
 **`join-refused`** — e.g. NAME_TAKEN:
@@ -95,8 +121,9 @@ Host includes `"owner_token"`:
 
 **`roster`** — broadcast to all sessions in the room after every join:
 ```json
-{ "type": "roster", "members": [ { "member_id": "m_...", "display_name": "Alice", "role": "host", "permissions": { "can_edit": true, "can_run": true } } ] }
+{ "type": "roster", "members": [ { "member_id": "m_...", "display_name": "Alice", "role": "host", "permissions": { "can_edit": true, "can_run": true, "run_denied_reason": null } } ], "host_only_run": false }
 ```
+`can_run` is the effective answer (the same one the session lookup gives) and `run_denied_reason` is `observer`, `run_revoked`, `host_only` or `null` (US-60, V2.20). The roster is sent again whenever the Host changes who can run.
 
 **`edit-rejected`** — sent to a session that attempted a document change without write permission:
 ```json
@@ -126,7 +153,10 @@ ws://localhost:8081/ws/rooms/{room_id}/docs/{doc_id}?session_id={uuid-v4}
   - `0 2`: Sync update (incremental update) — carries document changes; dropped if sender cannot edit.
   - `1 ...`: Awareness — forwarded.
   - `3`: Query awareness — forwarded.
-  - If dropped, an `edit-rejected` text message is sent to the sender's control socket.
+  - **Anything else is treated as a possible change** and dropped if the sender cannot edit: an unknown message type, an unknown sync sub-type, or a first byte of `0x80` or more. Yjs reads these numbers as variable-length integers, so a modified client can write a real update as, for example, `80 00 82 00 ...`; receivers apply it, so the relay does not forward it for a member without edit access. Only the three read-only shapes above (`0 0`, `1`, `3`) pass for such a member.
+  - A member with edit access is never limited by this check; its frames are forwarded unchanged.
+  - The decision uses the member's current `can_edit` on the server for every frame, so a role change by the Host (for example to Observer) applies from the next frame.
+  - If dropped, an `edit-rejected` text message is sent to the sender's control socket (never an HTTP error). Frame contents are not logged.
 - In Pair mode: `doc_id` is `"main"`. In Open mode: `doc_id` is the module id.
 
 ---
@@ -191,8 +221,8 @@ mvn test
 ```
 Test classes:
 - `RelayIntegrationTest` — health, binary relay, room isolation, awareness echo, disconnect, internal broadcast, 4400/4404.
-- `SocketsAndEditCheckIntegrationTest` — join/roster flow, NAME_TAKEN, CR13 edit check, contract reasons, 4406 not-joined, doc_id isolation.
-- `DocumentHandlerUnitTest` — first-two-bytes edit-check logic (`0 0`, `0 1`, `0 2`, `1`, `3`) and close-code constants.
+- `SocketsAndEditCheckIntegrationTest` — join/roster flow, NAME_TAKEN, CR13 edit check, contract reasons, 4406 not-joined, doc_id isolation, Pair mode enforcement against disguised update frames, and access changed mid-session.
+- `DocumentHandlerUnitTest` — first-two-bytes edit-check logic (`0 0`, `0 1`, `0 2`, `1`, `3`, and frames written with longer number encodings or unknown types) and close-code constants.
 - `RoomServiceTest` — join/roster logic, roles, NAME_TAKEN (Femina's part, used by control handler).
 - `RoomControllerTest` — POST /v1/rooms validation.
 - `OwnerControllerTest` — GET /v1/rooms/{id}/owner.
@@ -255,6 +285,7 @@ Used by `execution-service` on every run request to authenticate the caller, det
     "ai_enabled": true
   }
   ```
+- **`can_run` / `run_denied_reason` (US-60, V2.20)**: the effective answer, read fresh on every call (execution-service never caches it). `run_denied_reason` is `observer`, `run_revoked` (the Host took Run away) or `host_only` (Host-only running is on), in that order when several apply; the Host can always run. The rule lives in `Room.runDeniedReason`.
 - **Error Codes**:
   - `401 Unauthorized` (`UNAUTHORIZED`): Missing or invalid `X-Internal-Token`.
   - `404 Not Found` (`ROOM_NOT_FOUND`): Room does not exist.
@@ -274,6 +305,34 @@ Transmits control messages and run execution results from backend services to ac
   - `400 Bad Request` (`INVALID_MESSAGE`): Non-JSON body, missing `type`, payload > 4 MiB, or malformed `audience`.
   - `401 Unauthorized` (`UNAUTHORIZED`): Missing or invalid `X-Internal-Token`.
   - `404 Not Found` (`ROOM_NOT_FOUND`): Target room does not exist.
+
+### 6.3 Run Record Store (FR29, FR32, US-52, US-56, US-68, T-18 Decision 9)
+`sync-service` owns the canonical in-memory run history (`RunRecordStore`, alongside `RoomStore`) and writes a `RunRecord` automatically whenever a `type: "run-result"` message is delivered through `POST /internal/rooms/{room_id}/messages`. Runs that fail to start never reach delivery and are never recorded. Internal-only delivery fields (`audience`, `input_hash`, `files`, `stdin`) are stripped before forwarding the V2.9 `run-result` frame to WebSocket clients.
+
+- **Fields stored per `RunRecord`**:
+  | Field | Type | Source / Notes |
+  |-------|------|----------------|
+  | `room_id` | `string` | Room key used for room-scoped queries and room deletion (FR32 / US-56) |
+  | `runner_display_name` | `string` | Read from V2.9 `runner.display_name` only |
+  | `ran_at` | `string` | ISO 8601 UTC start timestamp from V2.9 `ran_at` |
+  | `language` | `string` | Execution language (`cpp`, `python`, `c`, `java`, `javascript`) |
+  | `files` | `string[]` | Executed file names only (derived from `files` or `saved_versions[].name`) |
+  | `saved_versions` | `object[]` | Open-mode snapshot version summaries (`module_id`, `name`, `version`, `saved_by` `{member_id, display_name}`, `saved_at`); `[]` in Pair mode |
+  | `input_hash` | `string` | 64-character lowercase hex SHA-256 digest of execution input |
+  | `execution_time_ms` | `number` | Measured run-stage wall time in milliseconds (V2.9) |
+  | `peak_memory_mb` | `number` | Measured peak memory in megabytes (V2.9) |
+
+- **Explicitly excluded (Privacy / AC2 / NFR8.2)**:
+  - No `owner_token`, no `session_id` (including any `runner.session_id` or `audience.session_ids`), no raw `stdin`, and no source code text are ever persisted or logged.
+
+- **Exact Input Hashing Specification (`InputHasher`)**:
+  - `input_hash` is the 64-character lowercase hexadecimal SHA-256 digest of the exact UTF-8 bytes of `stdin` (absent or `null` `stdin` is treated as `""`, whose SHA-256 is `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`).
+  - Where separate input data files are supplied to `InputHasher.hash(stdin, inputFiles)`, files are sorted lexicographically by filename and each file's `\0<name_utf8>\0<content_bytes>` is appended after the `stdin` bytes before finalizing SHA-256.
+  - Program source code files are intentionally excluded from `input_hash` so different code versions executed against the same input share the same `input_hash` for slowdown baseline detection (US-68, `docs/ai-ml-contract.md` §16.2).
+
+- **Query & Lifecycle Endpoints (requires `X-Internal-Token`)**:
+  - `GET /internal/rooms/{room_id}/runs[?input_hash=<sha256>]` — returns `{"room_id": "...", "runs": [...]}` ordered **newest first** (filtered by `input_hash` when supplied, for US-68 slowdown baselines). Returns `401 UNAUTHORIZED` on invalid token and `404 ROOM_NOT_FOUND` on unknown/closed rooms.
+  - `DELETE /internal/rooms/{room_id}/runs` — deletes all run records for `room_id` (`RunRecordStore.deleteByRoom`) and returns `{"room_id": "...", "deleted": <count>}`. Closing or deleting a room via `RoomService.closeRoom` / `RoomService.deleteRoom` also purges its run records automatically (FR32 / US-56).
 
 ---
 

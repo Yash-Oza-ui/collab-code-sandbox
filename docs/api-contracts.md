@@ -697,7 +697,7 @@ Replaces the v0 rule (section 3.4) that the client sends no text frames. After c
 }
 ```
 
-- **Public `member_id`, private `session_id`.** The server assigns a **`member_id`** on join: a public, per-room id used in `roster`, module data and REST targets (V2.4, V2.6). The client's own **`session_id`** (v0 §3.3) stays **private to its browser** — it is the credential in the socket URL and in the `X-Session-Id` header (V2.6), and is **never** placed in `roster`, module data or any broadcast, so one member can never learn another's `session_id` and impersonate them. `joined` is sent only to that one connection. A session keeps the **same `member_id` for the life of the room**: a refresh, a reconnect or a second tab gets the same id back, so module ownership and write access follow the person.
+- **Public `member_id`, private `session_id`.** The server assigns a **`member_id`** on join: a public, per-room id used in `roster`, module data and REST targets (V2.4, V2.6). The client's own **`session_id`** (v0 §3.3) stays **private to its browser** — it is the credential in the socket URL and in the `X-Session-Id` header (V2.6), and is **never** placed in `roster`, module data or any broadcast, so one member can never learn another's `session_id` and impersonate them. `joined` is sent only to that one connection. A session keeps the **same `member_id` until it is removed from the room**: while it is a member, a refresh, a reconnect or a second tab gets the same id back, so module ownership and write access follow the person. When the Host **removes** that member (V2.18) the `member_id` is **retired** — kept only so the Host can name that person to re-admit, and **never reissued**; a re-admitted person rejoins with a **new** `member_id`.
 - **`permissions.can_edit` applies to Pair mode's single shared file.** In Open mode `can_edit` is **omitted** from `joined` and `roster`: edit rights are per module (FR22.2, Requirements v2 §7.4), so the client takes write access from module state (V2.6). `can_run` applies in both modes.
 - **Reconnect is not `NAME_TAKEN`.** A session rejoining with the **same `session_id`** and the same `display_name` (a refresh or a second tab) is accepted — FR42 identifies a person by session id. `NAME_TAKEN` is only for a **different** session claiming a name already in use.
 
@@ -705,6 +705,12 @@ Otherwise the server sends `join-refused` with a `reason` of `NAME_TAKEN` (FR42)
 
 ```json
 { "type": "join-refused", "reason": "NAME_TAKEN", "message": "That display name is already in use in this room." }
+```
+
+A removed user (US-28) is refused the same way, with `reason` `USER_BLOCKED`:
+
+```json
+{ "type": "join-refused", "reason": "USER_BLOCKED", "message": "The Host has removed you from this room." }
 ```
 
 - **Socket after `join-refused`.** The server **closes** the control socket immediately after a `join-refused`, **except** for `APPROVAL_PENDING`: there the socket stays open until the server sends `join-approved` (then the normal `joined`) or `join-declined` (after which it closes).
@@ -734,13 +740,15 @@ Three roles: `host`, `participant`, `observer`. The server sends a `roster` mess
 
 Members are identified by the public `member_id`, **never** by `session_id` (V2.3). The example is a **Pair** room; in Open mode `can_edit` is **omitted** (write access comes from module state, V2.6).
 
+V2.20 (US-60) adds to this message: `permissions.run_denied_reason` on every member (`null` when the member may run) and a top-level `host_only_run` boolean. `permissions.can_run` is the effective answer, the same one the permission lookup (V2.11) gives.
+
 ## V2.5 Sockets (decision 6) — Proposed
 
 Two sockets replace the single v0 socket (section 3.1), keeping all v0 relay rules (awareness echo, query-awareness frame, 1 MiB limit — section 3.5) on the document socket.
 
 | Socket | URL | Carries |
 |---|---|---|
-| Control | `ws://localhost:8081/ws/rooms/{room_id}?session_id=...` | text messages only (`join`, `joined`, `join-refused`, `join-approved`, `join-declined`, `roster`, `run-result`, `analysis-result`, `edit-rejected`, `module-updated`) |
+| Control | `ws://localhost:8081/ws/rooms/{room_id}?session_id=...` | text messages only (`join`, `joined`, `join-refused`, `join-approved`, `join-declined`, `roster`, `run-result`, `analysis-result`, `edit-rejected`, `module-updated`, `host-granted`) |
 | Document | `ws://localhost:8081/ws/rooms/{room_id}/docs/{doc_id}?session_id=...` | Yjs binary frames only |
 
 Pair mode has one document, `main`. Open mode has one document per module, and its `doc_id` **is** the `module_id`. A session must `join` on the control socket **before** opening a document socket; a document socket opened without a prior join is closed with **`4406`** (not joined).
@@ -1262,7 +1270,7 @@ All use the error envelope of section 7. For module calls on sync-service, `requ
 | `LIMIT_REACHED` | 409 | sync-service | A limit on the number of modules or the size of a module (NFR15). The message names the limit and the value comes from configuration (DR3). The limit on people is `join-refused` with `ROOM_FULL`. |
 | `RUN_NOT_FOUND` | 404 | execution-service | Share of a run that is unknown or no longer held (V2.10). Added, difference 3. |
 | `SESSION_NOT_FOUND` | 404 | sync-service | The session has not joined this room or was removed. Used by the lookup (V2.11) and by module calls (V2.6). Added, difference 3. |
-| `MEMBER_NOT_FOUND` | 404 | sync-service | The `member_id` in the path is not a member of this room (V2.17). Added, difference 3. |
+| `MEMBER_NOT_FOUND` | 404 | sync-service | The `member_id` in the path is not a member of this room (V2.17), or — for re-admit (V2.18) — not in the room's block list. Added, difference 3. |
 | `ROOM_SERVICE_UNAVAILABLE` | 503 | execution-service | Lookup or snapshot read could not be answered (V2.8, V2.11). Added, difference 3. |
 
 ### `error.reason`
@@ -1354,6 +1362,7 @@ The relay decides from the **first two bytes** of a binary frame and never parse
 | `4405` | Unknown `doc_id` or `module_id` | V2.5 |
 | `4406` | Document socket opened before `join` | V2.5 |
 | `4410` | Room closed (FR31.2, FR32) | V2.5 |
+| `4411` | Room link regenerated — reconnect with the new link (US-28) | V2.18 |
 | `1009` | Binary frame larger than 1 MiB | v0 §3.6 |
 
 ### All HTTP error codes in one place
@@ -1379,7 +1388,7 @@ The relay decides from the **first two bytes** of a binary frame and never parse
 | `NAME_TAKEN` | 409 | sync-service | V2.6 |
 | `LIMIT_REACHED` | 409 | sync-service | V2.6 |
 | `SESSION_NOT_FOUND` | 404 | sync-service | V2.6, V2.11 |
-| `MEMBER_NOT_FOUND` | 404 | sync-service | V2.17 |
+| `MEMBER_NOT_FOUND` | 404 | sync-service | V2.17, V2.18 |
 | `INVALID_MESSAGE` | 400 | sync-service, internal | §7.2, V2.14 |
 | `UNAUTHORIZED` | 401 | sync-service, internal | §7.2, V2.11 |
 
@@ -1430,7 +1439,8 @@ A malformed `audience` (V2.10) is also `INVALID_MESSAGE`. The new internal calls
 
 **Not decided in version 2.** These are listed so that nobody assumes they are covered:
 
-- Host controls other than modules and the Observer role (V2.17) have no message or endpoint yet: edit access and requests in Pair mode (FR19.1, FR19.3), removing a user (FR9.2), join approval (FR9.3), restricting Run (FR41.2, FR41.3), the AI switch (FR35.1), transferring the Host role (FR31.1), the audit log (FR34), export (FR33) and deleting a room (FR32). They need a contract entry before the stories that build them.
+- Host controls other than modules, the Observer role (V2.17) and remove / re-admit / regenerate link (V2.18) have no message or endpoint yet: edit access and requests in Pair mode (FR19.1, FR19.3), join approval (FR9.3), the AI switch (FR35.1), transferring the Host role (FR31.1), the audit log (FR34), export (FR33) and deleting a room (FR32). They need a contract entry before the stories that build them.
+- Reassigning the modules a removed member owned, and pruning a retired `member_id` from `writers` (V2.6, V2.18). Deferred to US-42.
 - What a run does with a module that has never been saved (FR24.1, FR25.1).
 - A joiner syncs from a connected writer: a read-only peer's sync step 2 is dropped (V2.12). If no writer is connected, a late joiner receives nothing. To be checked when the relay is built.
 - More than one file in a Pair mode `inline` source. Version 2 allows exactly one (FR18).
@@ -1496,6 +1506,279 @@ Rules:
 
 ---
 
+## V2.18 Remove, re-admit and regenerate link (US-28) — Proposed
+
+Added so that US-28 has the three Host controls to build on. The join refusal (`USER_BLOCKED`) and the close code `4403` for a removed user are already defined in V2.3; this section adds the Host actions that drive them. The block list is **per room, keyed by the private `session_id`** (never shown in `roster` or any broadcast, V2.3) and is deleted with the room (US-56). Per CR04, automatic reconnection (FR11) never gets around the block.
+
+All three are Host-only actions and follow the caller-identity rule of V2.6: the caller's `X-Session-Id` plus a valid `X-Owner-Token`. Without a valid owner token the answer is `403 NOT_OWNER`. The Host **removes and re-admits by `member_id`**; the private `session_id` is never put in a URL, body, log or broadcast.
+
+### Remove a member
+
+```
+POST http://localhost:8081/v1/rooms/{room_id}/members/{member_id}/remove
+X-Session-Id: <caller-session-id>
+X-Owner-Token: <owner-token>
+```
+
+The server, in **one atomic step** (the order matters — the block is in place before the sockets close):
+1. **records the block first** — adds the member's `session_id` to the room's block list, together with the `member_id` the member had, their `display_name` and the removal time, so the person is addressable for re-admit and for the list below, and any reconnect from this instant is refused;
+2. closes that member's control and document sockets with close code `4403` (V2.3, V2.5);
+3. drops them from the roster and sends a new `roster` to the room (V2.4).
+
+The block is recorded **before** the sockets are closed and remains in place throughout, so an FR11 auto-reconnect that races the close cannot slip through the gap and get back in (CR04).
+
+A later connection from the same `session_id` — a reconnect (FR11), a refresh, a new tab, or a different display name — is refused at `join` with `join-refused` reason `USER_BLOCKED` (V2.3). The block is on the session, not the name, so renaming does not bypass it.
+
+Response `200` (`docs/examples/v2-member-remove-response.json`):
+
+```json
+{ "member_id": "m_4b19d2", "status": "removed" }
+```
+
+Rules:
+
+1. The Host cannot remove themselves and cannot remove another Host — either is `422 INVALID_REQUEST`.
+2. An unknown `member_id` is `404 MEMBER_NOT_FOUND`.
+3. The block holds until the Host re-admits that member (below) or regenerates the link.
+4. **Modules the removed member owned or could write are left as they are.** Their retired `member_id` stays in a module's `owner_member_id` or `writers` (V2.6); the data is not rewritten, and because the person is blocked they cannot act on it, while existing writers keep their access. Reassigning an orphaned module, and pruning a retired id from `writers`, is **not decided here — deferred to US-42** (V2.15).
+
+### List removed members
+
+```
+GET http://localhost:8081/v1/rooms/{room_id}/members/blocked
+X-Session-Id: <caller-session-id>
+X-Owner-Token: <owner-token>
+```
+
+A Host-only read (the caller-identity rule of V2.6: `X-Session-Id` plus a valid `X-Owner-Token`; without it, `403 NOT_OWNER`). It lists the members the Host has removed and not yet re-admitted, so the Host client can offer "re-admit" from the participant list even after a refresh, without keeping the names in memory. The private `session_id` is **never** returned.
+
+Response `200` (`docs/examples/v2-members-blocked-response.json`):
+
+```json
+{
+  "blocked": [
+    { "member_id": "m_4b19d2", "display_name": "Lin", "removed_at": "2026-11-18T06:12:40.512Z" }
+  ]
+}
+```
+
+- `removed_at` is when the member was removed (RFC 3339 UTC, as elsewhere in this contract).
+- The array is empty (`{ "blocked": [] }`) when no one is blocked, and is cleared when the link is regenerated (below).
+- Errors (V2.12): `404 ROOM_NOT_FOUND`, `404 SESSION_NOT_FOUND` (the caller has not joined), `403 NOT_OWNER`.
+
+### Re-admit a member
+
+```
+POST http://localhost:8081/v1/rooms/{room_id}/members/{member_id}/readmit
+X-Session-Id: <caller-session-id>
+X-Owner-Token: <owner-token>
+```
+
+`member_id` is the id the member had when they were removed; the block list keeps it addressable. The server removes **only that one session** from the block list. The person can then open the same link again and `join`. Because their old `member_id` was **retired** when they were removed (V2.3), they come back as a new `participant` with a **fresh `member_id`** — re-admit is the one case where the same session returns under a new id. Re-admit opens no socket by itself — the person reconnects.
+
+Response `200` (`docs/examples/v2-member-readmit-response.json`):
+
+```json
+{ "member_id": "m_4b19d2", "status": "readmitted" }
+```
+
+Rules:
+
+1. `member_id` must be one currently in the block list; otherwise `404 MEMBER_NOT_FOUND`.
+2. Other blocked sessions stay blocked.
+
+### Regenerate the room link
+
+```
+POST http://localhost:8081/v1/rooms/{room_id}/regenerate-link
+X-Session-Id: <caller-session-id>
+X-Owner-Token: <owner-token>
+```
+
+Burns the current link. The server:
+
+1. generates a **new `room_id`** under the NFR16 rules (V2.1: at least 128 bits from a secure random generator, base64url, 22 characters) and moves the room's state to it — **`member_id`s, module ownership and `writers` (V2.6), and document contents are all preserved**; only the room id changes, so a session that reconnects on the new link gets the **same `member_id` back** (V2.3);
+2. closes every socket on the old id with close code **`4411`** (link regenerated), so each client knows to reconnect with the new link;
+3. the old id stops resolving on **every** interface and is **never reissued**: a socket connect is closed `4404` (V2.2); a module or member REST call, the owner check `GET /v1/rooms/{old}/owner` (§8) and the execution-service permission lookup (V2.11) all answer `404 ROOM_NOT_FOUND`; the old id creates nothing;
+4. **clears the block list** — a new link is a fresh start.
+
+Response `200` (`docs/examples/v2-regenerate-link-response.json`):
+
+```json
+{ "room_id": "T4vAWVm_BI_DgmSxSGmr8w", "status": "regenerated" }
+```
+
+Rules:
+
+1. The Host keeps the same `owner_token`; only the room id — the link secret — changes. The owner token is never in the link (T-10, §8).
+2. Members on the old id are closed with `4411` and rejoin with the new link, which the Host shares out of band — the `4411` close carries **no** new link. Only the old link is burned; the room, its modules, ownership and each member's `member_id` carry over.
+3. Because the old link no longer opens the room, a leaked link is neutralised — this is the owner's answer to a link that got out (FR9.6).
+
+### Client reconnect (FR11.1)
+
+Reconnect with backoff is the client's job (§3.6). The client must **not** auto-reconnect on these signals, because a retry on the old id can never succeed:
+
+| Signal | Meaning | Client |
+|---|---|---|
+| `join-refused` reason `USER_BLOCKED` | The Host removed this session (V2.3). | Stop; show the message `The Host has removed you from this room.` and do not retry. |
+| close `4403` | A removed session that was already connected (V2.3). | Stop; the session is now blocked, so do not retry. |
+| close `4404` | The room id no longer resolves (V2.2). | Stop retrying the old id. |
+| close `4411` | The link was regenerated (above). | Stop retrying the old id; reconnect **only** with the new link, which the Host shares out of band (the close carries no link). |
+
+Re-admit (above) lets a previously removed person back: they reconnect by opening the link again, not by an automatic retry of the blocked socket.
+
+Errors for all three (V2.12): `404 ROOM_NOT_FOUND`, `404 SESSION_NOT_FOUND` (the caller has not joined), `404 MEMBER_NOT_FOUND` (the remove / re-admit target), `403 NOT_OWNER`, `422 INVALID_REQUEST`.
+
+---
+
+## V2.19 Transfer the Host role (US-54) — Proposed
+
+Added so that US-54 has a contract to build on: the Host hands the Host role to another participant (FR31.1). The role change of V2.17 refuses `"host"` for exactly this reason; this is the dedicated transfer. A room has **exactly one Host at all times**.
+
+Host-only, so it follows the caller-identity rule of V2.6: the current Host's `X-Session-Id` plus a valid `X-Owner-Token`. Without a valid owner token the answer is `403 NOT_OWNER`. The `member_id` in the path is the participant who becomes the new Host.
+
+```
+POST http://localhost:8081/v1/rooms/{room_id}/members/{member_id}/make-host
+X-Session-Id: <caller-session-id>
+X-Owner-Token: <owner-token>
+```
+
+On success the server, atomically:
+
+1. makes `member_id` the Host and the previous Host a `participant` — exactly one Host before and after;
+2. issues a **new owner token** to the new Host and replaces the room's stored hash, so the **previous owner token stops granting Host rights at once** (T-10, `OwnerTokens`);
+3. sends the new owner token **only to the new Host**, over their control socket, in a `host-granted` message — never in this HTTP response, never in `roster`, never logged (the same confidentiality as room creation, V2.1, V2.3);
+4. sends a new `roster` to the whole room (V2.4): the new Host shows `role: "host"`, the previous Host `role: "participant"`.
+
+Response `200` to the caller — a confirmation only, with no token (`docs/examples/v2-make-host-response.json`):
+
+```json
+{ "host_member_id": "m_7c22a1", "status": "transferred" }
+```
+
+`host-granted` — control socket, to the new Host only (`docs/examples/v2-host-granted-message.json`):
+
+```json
+{ "type": "host-granted", "member_id": "m_7c22a1", "owner_token": "<new-owner-token>" }
+```
+
+Rules:
+
+1. Only the current Host (owner token) can transfer; anyone else is `403 NOT_OWNER`.
+2. `member_id` must be a current **participant**. An unknown or already-removed member is `404 MEMBER_NOT_FOUND` (US-28); transferring to oneself, or to an Observer, is `422 INVALID_REQUEST` — make an Observer a participant first (V2.17).
+3. FR9.5 still holds: the new Host keeps the role across a refresh or reconnect (they hold the new token); the previous Host, after a refresh, reconnects as a participant (the old token no longer matches).
+4. The previous Host's client learns it is no longer Host from the new `roster` (its `role` is now `participant`); the Host controls follow the role.
+5. "Host leaves without transferring" is a separate event (US-55, Sprint 4); this section covers only the deliberate transfer, and the Host-left handling is kept in one place for US-55.
+
+Errors (V2.12): `404 ROOM_NOT_FOUND`, `404 SESSION_NOT_FOUND` (the caller has not joined), `404 MEMBER_NOT_FOUND` (the target), `403 NOT_OWNER`, `422 INVALID_REQUEST`.
+
+## V2.20 Control who can run (US-60) — Proposed
+
+Added so that US-60 has a contract to build on (FR41.1 to FR41.4). The Observer case is V2.17; this is the general run-permission control: take Run away from a named participant and give it back, and switch the room to Host-only running and back. Both controls are Host-only, so each follows the caller-identity rule of V2.6: the Host's `X-Session-Id` plus a valid `X-Owner-Token`. Without a valid owner token the answer is `403 NOT_OWNER`. The check itself is on the server: execution-service asks the lookup of V2.11 on every run request and never caches the answer (FR41.4), so a change is effective for the member's next run at once.
+
+### Who may run
+
+A member may run unless one of these applies. When more than one applies, the `reason` is the first in this list, because it is the one that lasts longest:
+
+| `run_denied_reason` | When | Message (`RUN_NOT_ALLOWED`, V2.12) |
+|---|---|---|
+| `observer` | The member is an Observer (FR9.4, FR41.1). | `Observers cannot run code.` |
+| `run_revoked` | The Host has taken Run away from this participant (FR41.2). | `The Host has turned off running for you.` |
+| `host_only` | Host-only running is on and the member is not the Host (FR41.3). | `Only the Host can run code in this room right now.` |
+
+The Host can always run. The three reasons and their messages are the ones of V2.12; this section adds no code and no reason.
+
+### Take Run away from a participant, or give it back (FR41.2)
+
+```
+PATCH http://localhost:8081/v1/rooms/{room_id}/members/{member_id}/run-permission
+Content-Type: application/json
+X-Session-Id: <caller-session-id>
+X-Owner-Token: <owner-token>
+```
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `can_run` | boolean | Yes | `false` takes Run away, `true` gives it back. Must be a JSON boolean: `"false"` or `null` is `INVALID_REQUEST`. |
+
+```json
+{
+  "can_run": false
+}
+```
+
+Response `200`: the member as it appears in `roster` (V2.4), the same shape as V2.17 (`docs/examples/v2-run-permission-response.json`).
+
+```json
+{
+  "member_id": "m_4b19d2",
+  "display_name": "Lin",
+  "role": "participant",
+  "permissions": {
+    "can_edit": true,
+    "can_run": false,
+    "run_denied_reason": "run_revoked"
+  }
+}
+```
+
+Rules:
+
+1. Only the Host can call it (`403 NOT_OWNER` otherwise, with the same order of checks as V2.17: `INVALID_REQUEST` for a bad `X-Session-Id`, `ROOM_NOT_FOUND`, `SESSION_NOT_FOUND`, then `NOT_OWNER`).
+2. The target must be a current **participant**. An unknown `member_id` is `404 MEMBER_NOT_FOUND`. The Host (Run cannot be taken from the Host) and an Observer (an Observer cannot run whatever the Host sets; make the member a participant first, V2.17) are `422 INVALID_REQUEST`.
+3. Setting the value a member already has is `200` and changes nothing (no new `roster`).
+4. The change takes effect at once for every connection of that member, because the lookup is read on every run: the next run is refused with `RUN_NOT_ALLOWED` and reason `run_revoked` (V2.12), and giving Run back allows the next run.
+5. On a change the server sends a new `roster` to the whole room (V2.4). The member's `permissions.can_run` becomes `false` and `run_denied_reason` `run_revoked`; the client's Run button follows `can_run`.
+6. A role change (V2.17) and a Host transfer (V2.19) start from the role's default permissions, so they clear a Run restriction. Removing and re-admitting a member (V2.18) gives a new member, who can run. Regenerating the link (V2.18) keeps the restrictions and the Host-only setting with the room.
+7. Errors (V2.12): `404 ROOM_NOT_FOUND`, `404 SESSION_NOT_FOUND` (the caller has not joined), `404 MEMBER_NOT_FOUND`, `403 NOT_OWNER`, `422 INVALID_REQUEST`.
+
+### Switch Host-only running on or off (FR41.3)
+
+```
+PATCH http://localhost:8081/v1/rooms/{room_id}/run-policy
+Content-Type: application/json
+X-Session-Id: <caller-session-id>
+X-Owner-Token: <owner-token>
+```
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `host_only_run` | boolean | Yes | `true` switches Host-only running on, `false` off. Must be a JSON boolean. |
+
+```json
+{
+  "host_only_run": true
+}
+```
+
+Response `200` (`docs/examples/v2-run-policy-response.json`):
+
+```json
+{
+  "host_only_run": true
+}
+```
+
+Rules:
+
+1. Only the Host can call it, with the same order of checks and the same `NOT_OWNER` as above.
+2. While it is on, only the Host can run: every other member's run is refused with `RUN_NOT_ALLOWED` and reason `host_only` (an Observer keeps the reason `observer`, and a participant whose Run the Host took away keeps `run_revoked`). Turning it off allows everyone else again, except those with `observer` or `run_revoked`.
+3. It is off when a room is created and is not changed by a role change, a Host transfer or regenerating the link. After a Host transfer (V2.19) the new Host can run and the previous Host, now a participant, is refused.
+4. On a change the server sends a new `roster` to the whole room: every member's `permissions` are recomputed and the top-level `host_only_run` carries the setting, so the Host client can show the switch and the others can show why Run is off. Setting the value the room already has is `200` and sends nothing.
+5. Errors (V2.12): `404 ROOM_NOT_FOUND`, `404 SESSION_NOT_FOUND`, `403 NOT_OWNER`, `422 INVALID_REQUEST`.
+
+### What a client shows
+
+- The Run button follows `permissions.can_run` of the member's own entry in `joined` and `roster`; the reason is shown in plain words from `run_denied_reason`.
+- A run that is refused anyway (for example the roster has not arrived yet) comes back as `403 RUN_NOT_ALLOWED` with `error.reason` (V2.12); the client shows the text of that reason, not only the HTTP status.
+- Hiding the button is never the enforcement: the server decides on every run (FR41.4, NFR13).
+
+### Audit (US-58)
+
+The audit log (FR34, US-58, Sprint 5) is not built here. The two state changes above are made in one place in sync-service (`RoomService.setMemberRunAllowed` and `RoomService.setHostOnlyRun`), so US-58 records them from there.
+
+---
+
 ## Changes
 
 | Version | Date | Change |
@@ -1509,6 +1792,10 @@ Rules:
 | v2 (1–7, review 2) | 1 Nov 2026 | Second review pass (#79): public **`member_id`** added for `roster`, module `owner_member_id`/`writers` and all REST targets, with `session_id` kept **private to the browser** (closes the impersonation hole); module permissions corrected to Requirements v2 — rename/delete/transfer **owner only** (FR21.4), grant/revoke write **owner or Host** (FR22.1), set entry file **Host only** (FR20.3), `approve` sets the owner (FR21.2), create is always a pending request (FR21.1); REST **caller identity** via `X-Session-Id` (+ `X-Owner-Token` for Host) and **CORS** for `CLIENT_ORIGIN`; `PATCH` single-field rule; socket closed after `join-refused` (except `APPROVAL_PENDING`); full control-socket message list; `4406` not-joined close code; `can_edit` omitted in Open mode. |
 | v2 (decisions 8–15) | 1 Nov 2026 | Decisions 8–15 added (T-17, #61, `docs/T-17-contracts-v2-runs-errors`): run `source` object and snapshot read (V2.8), run result fields (V2.9), visibility, `audience` and share (V2.10), permission lookup (V2.11), permission errors, `edit-rejected` and every error and close code in one table (V2.12), `analysis-result` replacing `anomaly-warning` and `ai-explanation` (V2.13), internal endpoint codes (V2.14), carried T-06 items (V2.15). Differences from Backlog v2 §6.1 are listed before V2.8. Corrections in decisions 1–7: example tokens match the example files; caller identity limited to module operations; `pending` added to the `module-updated` example; stable `member_id` stated; owner optional on approve; `analysis-result` added to the control-socket list; owner check answers an unknown room with 404. No v0/v1 text edited. |
 | v2 (member role) | 1 Nov 2026 | V2.17 added: `PATCH /v1/rooms/{room_id}/members/{member_id}` makes a guest an Observer and back (US-27), new code `MEMBER_NOT_FOUND`. CORS methods added to V2.6. Observer role removed from the undecided list in V2.15. |
+| v2 (remove / re-admit) | 17 Nov 2026 | V2.18 added (US-28): `POST /v1/rooms/{room_id}/members/{member_id}/remove` and `/readmit`, and `POST /v1/rooms/{room_id}/regenerate-link`. Session-keyed block list; re-admit by the removed member's `member_id`; regenerate moves the room to a new NFR16 id, clears the block list and closes old sockets with new code `4411`. |
+| v2 (remove / re-admit, review) | 18 Nov 2026 | Review fixes (#144): `member_id` retired on removal, a re-admit returns a new id while an ordinary reconnect keeps it (V2.3, V2.18); modules a removed member owned deferred to US-42; new `GET /v1/rooms/{room_id}/members/blocked` lists removed members; the block is recorded atomically before the sockets close (CR04); client no-reconnect rule for `USER_BLOCKED`/`4403`/`4404`/`4411` with a `USER_BLOCKED` example; regenerate preserves `member_id`s, module ownership/writers and documents, and the old id answers `404` on every interface and is never reissued; stale "removing a user" item dropped from V2.15 and `MEMBER_NOT_FOUND` widened for the block list (V2.12); 22-char regenerate example id. |
+| v2 (host transfer) | 17 Nov 2026 | V2.19 added (US-54): `POST /v1/rooms/{room_id}/members/{member_id}/make-host` transfers the Host role (FR31.1). The server issues a new owner token to the new Host (old token invalidated), delivered over their control socket as a new `host-granted` message; exactly one Host at all times. (Numbered V2.19 to follow US-28's V2.18; merge that contract first.) |
+| v2 (run permission) | 19 Nov 2026 | V2.20 added (US-60): `PATCH /v1/rooms/{room_id}/members/{member_id}/run-permission` takes Run away from a participant and gives it back (FR41.2), and `PATCH /v1/rooms/{room_id}/run-policy` switches Host-only running (FR41.3), both Host-only (`NOT_OWNER` otherwise). The reasons `observer`, `run_revoked`, `host_only` are those of V2.12 and the lookup (V2.11) is unchanged in shape. `roster` and `joined` gain `permissions.run_denied_reason`, and `roster` gains `host_only_run` (V2.4). Restricting Run removed from the undecided list in V2.15. |
 
 ### Runner infrastructure error (v1 proposal addition)
 

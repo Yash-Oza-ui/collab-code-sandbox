@@ -1,7 +1,7 @@
 import * as decoding from 'lib0/decoding'
 import * as encoding from 'lib0/encoding'
 import * as syncProtocol from 'y-protocols/sync'
-import type * as Y from 'yjs'
+import * as Y from 'yjs'
 import {
   applyAwarenessUpdate,
   encodeAwarenessUpdate,
@@ -279,16 +279,23 @@ export function handleIncomingAwarenessFrame(
   }
 }
 
+/** Why a member may not run (V2.20). `null` or absent when they may. */
+export type RunDeniedReason = 'observer' | 'run_revoked' | 'host_only'
+
+export interface MemberPermissions {
+  /** Pair mode only; Open mode takes write access from module state. */
+  can_edit?: boolean
+  can_run: boolean
+  run_denied_reason?: RunDeniedReason | null
+}
+
 export interface JoinedMessage {
   type: 'joined'
   member_id: string
   role: string
   mode: string
   preset?: string
-  permissions?: {
-    can_edit: boolean
-    can_run: boolean
-  }
+  permissions?: MemberPermissions
   [key: string]: unknown
 }
 
@@ -303,15 +310,14 @@ export interface RosterMember {
   member_id: string
   display_name: string
   role: string
-  permissions?: {
-    can_edit: boolean
-    can_run: boolean
-  }
+  permissions?: MemberPermissions
 }
 
 export interface RosterMessage {
   type: 'roster'
   members: RosterMember[]
+  /** Host-only running is on (V2.20): only the Host can run. Absent from older servers. */
+  host_only_run?: boolean
   [key: string]: unknown
 }
 
@@ -340,6 +346,8 @@ export interface ConnectAwarenessWsOptions {
    * Optional active Y.Doc instance to synchronize over the Document Socket (US-02 / FR2).
    */
   doc?: Y.Doc
+  /** Registered Open-mode module documents retained across transport reconnects. */
+  moduleDocs?: ReadonlyMap<string, Y.Doc>
   syncWsUrl?: string
   sessionId?: string
   WebSocketClass?: typeof WebSocket
@@ -355,11 +363,15 @@ export interface ConnectAwarenessWsOptions {
   onDocError?: (event: Event) => void
   onDocClose?: (event: CloseEvent) => void
   onJoinTimeout?: () => void
+  onReconnecting?: (attempt: number) => void
+  onReconnected?: () => void
 }
 
 export interface AwarenessWsConnection {
   controlWs: WebSocket | null
   docWs: WebSocket | null
+  /** Additional Open-mode module transports, indexed by opaque module ID. */
+  moduleSockets: ReadonlyMap<string, WebSocket>
   join: (displayName: string, ownerToken?: string) => void
   destroy: () => void
 }
@@ -382,6 +394,7 @@ export function connectAwarenessWs(
     resolveDocId,
     awareness,
     doc,
+    moduleDocs,
     syncWsUrl = getClientConfig().syncWsUrl,
     sessionId = getCollabSessionId(),
     WebSocketClass = typeof WebSocket !== 'undefined' ? WebSocket : undefined,
@@ -396,12 +409,15 @@ export function connectAwarenessWs(
     onDocError,
     onDocClose,
     onJoinTimeout,
+    onReconnecting,
+    onReconnected,
   } = options
 
   if (!WebSocketClass) {
     return {
       controlWs: null,
       docWs: null,
+      moduleSockets: new Map(),
       join: () => {},
       destroy: () => {},
     }
@@ -409,11 +425,102 @@ export function connectAwarenessWs(
 
   let controlWs: WebSocket | null = null
   let docWs: WebSocket | null = null
+  const moduleSockets = new Map<string, WebSocket>()
+  // Production RoomPage does not supply moduleDocs. Own inactive module docs here
+  // so every approved Open-mode module can participate in Yjs resynchronization.
+  const managedModuleDocs = new Map<string, Y.Doc>()
+  const getModuleDoc = (id: string) => moduleDocs?.get(id) ?? managedModuleDocs.get(id)
+  const allModuleDocs = () => new Map([...managedModuleDocs, ...(moduleDocs ?? new Map<string, Y.Doc>())])
+  const moduleUpdateHandlers = new Map<string, (update: Uint8Array, origin: unknown) => void>()
+  const closeModuleSocket = (id: string) => {
+    const socket = moduleSockets.get(id)
+    if (!socket) return
+    const moduleDoc = getModuleDoc(id)
+    const handler = moduleUpdateHandlers.get(id)
+    if (moduleDoc && handler) moduleDoc.off('update', handler)
+    moduleUpdateHandlers.delete(id)
+    moduleSockets.delete(id)
+    socket.onopen = null
+    socket.onmessage = null
+    socket.onclose = null
+    socket.onerror = null
+    if (socket.readyState === WS_OPEN || socket.readyState === WS_CONNECTING) socket.close()
+  }
+  const closeModuleSockets = () => {
+    for (const id of [...moduleSockets.keys()]) closeModuleSocket(id)
+  }
+
+  /** Open every explicitly registered local Y.Doc, not just the editor's active module. */
+  const openModuleSockets = (activeId: string) => {
+    if (isDestroyed) return
+    for (const [id, moduleDoc] of allModuleDocs()) {
+      if (!id || id === 'main' || id === activeId || moduleSockets.has(id)) continue
+      const socket = new WebSocketClass!(buildDocumentWebSocketUrl(syncWsUrl, roomId, id, sessionId))
+      socket.binaryType = 'arraybuffer'
+      moduleSockets.set(id, socket)
+      let reverseSyncSent = false
+      const handler = (update: Uint8Array, origin: unknown) => {
+        if (origin !== socket && socket.readyState === WS_OPEN) {
+          sendBinary(socket, encodeDocUpdateMessage(update))
+        }
+      }
+      moduleUpdateHandlers.set(id, handler)
+      moduleDoc.on('update', handler)
+      socket.onopen = () => {
+        if (isDestroyed || moduleSockets.get(id) !== socket) return
+        sendBinary(socket, encodeSyncStep1Message(moduleDoc))
+        sendBinary(socket, encodeSyncStep2Message(moduleDoc))
+      }
+      socket.onmessage = (event: MessageEvent) => {
+        if (moduleSockets.get(id) !== socket) return
+        if (!(event.data instanceof ArrayBuffer || event.data instanceof Uint8Array)) return
+        const bytes = event.data instanceof ArrayBuffer ? new Uint8Array(event.data) : event.data
+        if (!bytes.length || decoding.readVarUint(decoding.createDecoder(bytes)) !== MESSAGE_SYNC) return
+        const replies = handleIncomingSyncFrame(moduleDoc, bytes, socket, {
+          replyWithReverseSyncStep1: !reverseSyncSent,
+        })
+        if (replies.length > 1) reverseSyncSent = true
+        for (const reply of replies) if (socket.readyState === WS_OPEN) sendBinary(socket, reply)
+      }
+      socket.onerror = (event: Event) => onDocError?.(event)
+      socket.onclose = (event: CloseEvent) => {
+        if (moduleSockets.get(id) !== socket || isDestroyed) return
+        moduleDoc.off('update', handler)
+        moduleUpdateHandlers.delete(id)
+        moduleSockets.delete(id)
+        onDocClose?.(event)
+        if (terminalCodes.has(event.code)) {
+          terminal = true
+          reconnecting = false
+          clearReconnectTimer()
+        } else {
+          scheduleReconnect()
+        }
+      }
+    }
+  }
   let isDestroyed = false
   let activeGeneration = 0
+  let joinedGeneration = -1
   let pendingJoin: { name: string; token?: string } | null = null
   let activeHandshake: { name: string; token?: string } | null = null
   let joinTimer: ReturnType<typeof setTimeout> | null = null
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  let reconnectAttempts = 0
+  let hasJoined = false
+  let reconnecting = false
+  let waitingForDoc = false
+  let terminal = false
+  let lastJoin: { name: string; token?: string } | null =
+    displayName ? { name: displayName, token: ownerToken } : null
+  const terminalCodes = new Set([4403, CLOSE_UNKNOWN_ROOM, CLOSE_ROOM_CLOSED])
+
+  const clearReconnectTimer = () => {
+    if (reconnectTimer !== null) {
+      clearTimeout(reconnectTimer)
+      reconnectTimer = null
+    }
+  }
 
   const clearJoinTimer = () => {
     if (joinTimer) {
@@ -450,8 +557,34 @@ export function connectAwarenessWs(
       }
     }
 
-    // 4. Notify timeout callback
-    onJoinTimeout?.()
+    // 4. A reconnect handshake timeout must retry rather than stall forever.
+    if (hasJoined && !terminal) scheduleReconnect()
+    else onJoinTimeout?.()
+  }
+
+  function scheduleReconnect() {
+    if (isDestroyed || terminal || !hasJoined || !lastJoin || reconnectTimer !== null) return
+    reconnecting = true
+    waitingForDoc = false
+    reconnectAttempts += 1
+    onReconnecting?.(reconnectAttempts)
+    const delay = Math.min(1000 * 2 ** Math.min(reconnectAttempts - 1, 5), 30000)
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null
+      if (isDestroyed || terminal) return
+      closeDocumentSocket()
+      if (controlWs) {
+        const old = controlWs
+        controlWs = null
+        old.onopen = null
+        old.onmessage = null
+        old.onerror = null
+        old.onclose = null
+        if (old.readyState === WS_OPEN || old.readyState === WS_CONNECTING) old.close()
+      }
+      controlWs = initControlSocket()
+      startJoinTimer(activeGeneration)
+    }, delay)
   }
 
   const startJoinTimer = (gen: number) => {
@@ -468,6 +601,7 @@ export function connectAwarenessWs(
     if (isDestroyed || gen !== activeGeneration) return
     if (ws.readyState === WS_OPEN) {
       activeHandshake = { name, token }
+      lastJoin = { name, token }
       const payload: Record<string, string> = {
         type: 'join',
         display_name: name,
@@ -493,6 +627,29 @@ export function connectAwarenessWs(
     | null = null
   let onDocUpdate: ((update: Uint8Array, origin: unknown) => void) | null = null
 
+  const closeDocumentSocket = () => {
+    closeModuleSockets()
+    if (onDocAwarenessUpdate) {
+      awareness.off('update', onDocAwarenessUpdate)
+      onDocAwarenessUpdate = null
+    }
+    if (doc && onDocUpdate) {
+      doc.off('update', onDocUpdate)
+      onDocUpdate = null
+    }
+    const old = docWs
+    docWs = null
+    if (old) {
+      old.onopen = null
+      old.onmessage = null
+      old.onerror = null
+      old.onclose = null
+      if (old.readyState === WS_OPEN || old.readyState === WS_CONNECTING) {
+        old.close()
+      }
+    }
+  }
+
   // 2. Open Document Socket upon receiving 'joined'
   const openDocumentSocket = async (joinedMsg?: JoinedMessage) => {
     if (isDestroyed || docWs) return
@@ -501,50 +658,67 @@ export function connectAwarenessWs(
     const roomMode = joinedMsg?.mode ? String(joinedMsg.mode).toLowerCase() : undefined
 
     if (roomMode === 'pair') {
-      // Pair mode strictly requires 'main' (T-17 V2.5 / DocumentHandler)
       resolvedDocId = 'main'
     } else if (roomMode === 'open') {
-      // Open mode requires a valid registered module_id
+      let approvedIds: Set<string> | null = null
+      // Refresh the approved module list after every successful control join.
+      // Never open document sockets before the server confirms membership.
+      try {
+        const httpBase = syncWsUrl.replace(/^ws/, 'http').replace(/\/ws\/rooms.*$/, '')
+        const res = await fetch(`${httpBase}/v1/rooms/${encodeURIComponent(roomId)}/modules`, {
+          headers: { 'X-Session-Id': sessionId },
+        })
+        if (!res.ok) throw new Error('Could not retrieve approved modules')
+        const modules = (await res.json()) as Array<{
+          module_id: string
+          is_entry?: boolean
+          pending?: boolean
+        }>
+        if (!Array.isArray(modules)) throw new Error('Invalid module response')
+        const approved = modules.filter((m) => m.module_id && !m.pending)
+        approvedIds = new Set(approved.map((m) => m.module_id))
+        // Close revoked sockets and detach listeners before destroying their docs.
+        for (const id of [...moduleSockets.keys()]) {
+          if (!approvedIds.has(id)) closeModuleSocket(id)
+        }
+        for (const [id, existing] of managedModuleDocs) {
+          if (!approvedIds.has(id)) {
+            managedModuleDocs.delete(id)
+            existing.destroy()
+          }
+        }
+        for (const module of approved) {
+          if (!moduleDocs?.has(module.module_id) && !managedModuleDocs.has(module.module_id)) {
+            managedModuleDocs.set(module.module_id, new Y.Doc())
+          }
+        }
+        if (!approvedIds.has(resolvedDocId)) {
+          resolvedDocId = approved.find((m) => m.is_entry)?.module_id ??
+            approved[0]?.module_id ?? 'main'
+        }
+      } catch {
+        // Do not guess additional module IDs when the approved list is unavailable.
+        // A known explicitly selected module may still reconnect.
+      }
       if (resolveDocId && joinedMsg) {
         try {
           const customId = await resolveDocId(joinedMsg)
-          if (customId) {
-            resolvedDocId = customId
-          }
+          if (customId && approvedIds?.has(customId)) resolvedDocId = customId
         } catch {
-          // fallback
-        }
-      } else if (!resolvedDocId || resolvedDocId === 'main') {
-        try {
-          const httpBase = syncWsUrl.replace(/^ws/, 'http').replace(/\/ws\/rooms.*$/, '')
-          const res = await fetch(`${httpBase}/v1/rooms/${encodeURIComponent(roomId)}/modules`, {
-            headers: sessionId ? { 'X-Session-Id': sessionId } : {},
-          })
-          if (res.ok) {
-            const modules = (await res.json()) as Array<{
-              module_id: string
-              is_entry?: boolean
-              pending?: boolean
-            }>
-            if (Array.isArray(modules) && modules.length > 0) {
-              const active =
-                modules.find((m) => m.is_entry && !m.pending) ??
-                modules.find((m) => !m.pending) ??
-                modules[0]
-              if (active?.module_id) {
-                resolvedDocId = active.module_id
-              }
-            }
-          }
-        } catch {
-          // ignore fetch error
+          // Keep the server-approved entry module.
         }
       }
+      // Never connect an Open-mode document that the server did not approve.
+      if (approvedIds && !approvedIds.has(resolvedDocId)) resolvedDocId = ''
     } else if (!resolvedDocId) {
       resolvedDocId = 'main'
     }
 
-    if (!resolvedDocId) {
+    if (
+      !resolvedDocId ||
+      (roomMode === 'open' && resolvedDocId === 'main')
+    ) {
+      waitingForDoc = false
       onDocClose?.(
         new SafeCloseEvent('close', {
           code: CLOSE_UNKNOWN_DOC,
@@ -559,13 +733,24 @@ export function connectAwarenessWs(
     const docUrl = buildDocumentWebSocketUrl(syncWsUrl, roomId, resolvedDocId, sessionId)
     docWs = new WebSocketClass(docUrl)
     docWs.binaryType = 'arraybuffer'
+    if (roomMode === 'open') openModuleSockets(resolvedDocId)
 
     docWs.onerror = (event: Event) => {
       onDocError?.(event)
     }
 
+    const openedSocket = docWs
     docWs.onclose = (event: CloseEvent) => {
+      if (docWs !== openedSocket || isDestroyed) return
+      closeDocumentSocket()
       onDocClose?.(event)
+      if (terminalCodes.has(event.code)) {
+        terminal = true
+        reconnecting = false
+        clearReconnectTimer()
+      } else {
+        scheduleReconnect()
+      }
     }
 
     onDocAwarenessUpdate = (
@@ -598,6 +783,8 @@ export function connectAwarenessWs(
     let hasSentReverseSync = false
 
     docWs.onopen = () => {
+      if (isDestroyed || docWs !== openedSocket) return
+      waitingForDoc = false
       // 1. Send sync step 1 and step 2 to exchange initial state bidirectionally (US-02 / FR2)
       if (doc) {
         sendBinary(docWs!, encodeSyncStep1Message(doc))
@@ -610,6 +797,13 @@ export function connectAwarenessWs(
       // 3. Advertise local state if already present
       if (awareness.getLocalState() !== null) {
         sendBinary(docWs!, encodeAwarenessMessage(awareness, [awareness.clientID]))
+      }
+      // The transport has reopened and the initial sync frames were sent.
+      // This does not guarantee that the remote state has already converged.
+      if (reconnecting) {
+        reconnecting = false
+        reconnectAttempts = 0
+        onReconnected?.()
       }
     }
 
@@ -659,8 +853,8 @@ export function connectAwarenessWs(
         const { name, token } = pendingJoin
         pendingJoin = null
         sendJoin(ws, name, gen, token)
-      } else if (displayName) {
-        sendJoin(ws, displayName, gen, ownerToken)
+      } else if (lastJoin) {
+        sendJoin(ws, lastJoin.name, gen, lastJoin.token)
       }
     }
 
@@ -670,12 +864,25 @@ export function connectAwarenessWs(
         try {
           const msg = JSON.parse(event.data) as { type?: string }
           if (msg.type === 'joined') {
+            // Only one document handshake per control-socket generation, even
+            // if the relay repeats 'joined' before the async module fetch ends.
+            if (joinedGeneration === gen) return
+            joinedGeneration = gen
+            hasJoined = true
+            clearReconnectTimer()
             clearJoinTimer()
             pendingJoin = null
             activeHandshake = null
             onJoined?.(msg as JoinedMessage)
-            void openDocumentSocket(msg as JoinedMessage)
+            waitingForDoc = true
+            void openDocumentSocket(msg as JoinedMessage).catch(() => {
+              if (!isDestroyed && waitingForDoc) scheduleReconnect()
+            })
           } else if (msg.type === 'join-refused') {
+            // A definitive refusal must not cause an automatic join loop.
+            terminal = true
+            reconnecting = false
+            clearReconnectTimer()
             clearJoinTimer()
             pendingJoin = null
             activeHandshake = null
@@ -709,7 +916,15 @@ export function connectAwarenessWs(
       if (controlWs === ws) {
         controlWs = null
       }
+      closeDocumentSocket()
       onClose?.(event)
+      if (terminalCodes.has(event.code)) {
+        terminal = true
+        reconnecting = false
+        clearReconnectTimer()
+      } else {
+        scheduleReconnect()
+      }
     }
 
     return ws
@@ -724,12 +939,31 @@ export function connectAwarenessWs(
   const join = (name: string, token?: string) => {
     if (isDestroyed) return
 
-    // Prevent duplicate join attempts while a request is already queued or active
-    if (activeHandshake) {
-      return
-    }
-    activeHandshake = { name, token }
+    // Prevent duplicate join attempts while a request is already queued or active.
+    if (activeHandshake) return
 
+    // V2.3 closes the control socket after join-refused. A retry must never
+    // send another join on that refused socket, even if its close event is
+    // still in flight. Reset terminal state only for an explicit user retry.
+    if (terminal) {
+      terminal = false
+      reconnecting = false
+      clearReconnectTimer()
+      closeDocumentSocket()
+      const refusedSocket = controlWs
+      controlWs = null
+      if (refusedSocket) {
+        refusedSocket.onopen = null
+        refusedSocket.onmessage = null
+        refusedSocket.onerror = null
+        refusedSocket.onclose = null
+        if (refusedSocket.readyState === WS_OPEN || refusedSocket.readyState === WS_CONNECTING) {
+          refusedSocket.close()
+        }
+      }
+    }
+
+    activeHandshake = { name, token }
     const activeControlWs = controlWs
     if (!activeControlWs || activeControlWs.readyState === WS_CLOSED || activeControlWs.readyState === WS_CLOSING) {
       // Reconnect with a fresh WebSocket attempt
@@ -755,19 +989,12 @@ export function connectAwarenessWs(
 
   const destroy = () => {
     isDestroyed = true
+    reconnecting = false
+    clearReconnectTimer()
     activeGeneration += 1
     pendingJoin = null
     activeHandshake = null
     clearJoinTimer()
-    if (onDocAwarenessUpdate) {
-      awareness.off('update', onDocAwarenessUpdate)
-      onDocAwarenessUpdate = null
-    }
-    if (doc && onDocUpdate) {
-      doc.off('update', onDocUpdate)
-      onDocUpdate = null
-    }
-
     if (docWs) {
       const activeDocWs = docWs
       docWs = null
@@ -783,6 +1010,10 @@ export function connectAwarenessWs(
         activeDocWs.close()
       }
     }
+
+    closeDocumentSocket()
+    for (const moduleDoc of managedModuleDocs.values()) moduleDoc.destroy()
+    managedModuleDocs.clear()
 
     if (controlWs) {
       const activeControlWs = controlWs
@@ -808,6 +1039,7 @@ export function connectAwarenessWs(
     get docWs() {
       return docWs
     },
+    moduleSockets,
     join,
     destroy,
   }

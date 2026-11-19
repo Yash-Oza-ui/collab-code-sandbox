@@ -226,6 +226,9 @@ jobs:
       - name: Start services
         run: bash tests/integration/up.sh
 
+      - name: Install client dependencies for US-04 Node integration scripts
+        run: npm --prefix client ci
+
       - name: Smoke test and integration tests
         run: bash tests/integration/run-all.sh
 

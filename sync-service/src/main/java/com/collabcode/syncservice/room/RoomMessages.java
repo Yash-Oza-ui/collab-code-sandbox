@@ -39,6 +39,19 @@ public final class RoomMessages {
         return m;
     }
 
+    /**
+     * {@code host-granted} (US-54, V2.19): the new owner token, delivered to the new
+     * Host only, on their control socket. Never put in an HTTP response, in
+     * {@code roster}, or in a log (same confidentiality as room creation, V2.1).
+     */
+    public static Map<String, Object> hostGranted(String memberId, String ownerToken) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("type", "host-granted");
+        m.put("member_id", memberId);
+        m.put("owner_token", ownerToken);
+        return m;
+    }
+
     /** {@code roster} (sent to the whole room after a join, leave or role change). */
     public static Map<String, Object> roster(Room room) {
         List<Map<String, Object>> members = new ArrayList<>();
@@ -48,6 +61,8 @@ public final class RoomMessages {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("type", "roster");
         m.put("members", members);
+        // Room-wide Run setting (US-60, V2.20): lets the Host client show the switch.
+        m.put("host_only_run", room.isHostOnlyRun());
         return m;
     }
 
@@ -65,15 +80,19 @@ public final class RoomMessages {
     }
 
     /**
-     * {@code can_run} is always present; {@code can_edit} is present only in
-     * Pair mode (Open mode uses per-module write access, V2.6).
+     * {@code can_run} and {@code run_denied_reason} are always present; {@code can_edit}
+     * is present only in Pair mode (Open mode uses per-module write access, V2.6).
+     * {@code can_run} is the effective answer (US-60, V2.20), the same one the
+     * permission lookup gives execution-service: it includes Host-only running.
+     * {@code run_denied_reason} is {@code null} when the member may run.
      */
     private static Map<String, Object> permissions(Room room, Member member) {
         Map<String, Object> p = new LinkedHashMap<>();
         if (room.getMode() == RoomMode.PAIR) {
             p.put("can_edit", member.isCanEdit());
         }
-        p.put("can_run", member.isCanRun());
+        p.put("can_run", room.canRun(member));
+        p.put("run_denied_reason", room.runDeniedReason(member));
         return p;
     }
 }

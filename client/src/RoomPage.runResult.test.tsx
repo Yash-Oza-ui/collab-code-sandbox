@@ -59,6 +59,13 @@ class FakeSocket {
         mode: 'pair',
         permissions: { can_edit: FakeSocket.role !== 'observer', can_run: FakeSocket.role !== 'observer' },
       })
+      this.receive({
+        type: 'roster',
+        members: [
+          { member_id: 'm_self', display_name: String(msg.display_name), role: FakeSocket.role },
+          { member_id: 'm_ada', display_name: 'Ada', role: 'participant' },
+        ],
+      })
     }, 0)
   }
 
@@ -103,6 +110,9 @@ describe('RoomPage run-result delivery (US-08)', () => {
   let originalPathname = '/'
 
   beforeEach(() => {
+    // Prevent a previous test's saved display name from auto-joining this room.
+    sessionStorage.clear()
+
     FakeSocket.instances = []
     FakeSocket.role = 'participant'
     originalPathname = window.location.pathname
@@ -157,6 +167,22 @@ describe('RoomPage run-result delivery (US-08)', () => {
 
     expect(q('run-stdout')?.textContent).toBe('hello from Ada\n')
     expect(q('run-output-runner')?.textContent).toContain('Run by Ada')
+  })
+
+  it('uses the roster name rather than a forged name in a run-result frame', async () => {
+    await joinAs('Bob')
+
+    await act(async () => controlSocket()?.receive(runResultFrame({
+      runner: { member_id: 'm_ada', display_name: 'Impersonator' },
+    })))
+    expect(q('run-output-runner')?.textContent).toContain('Run by Ada')
+    expect(q('run-output-runner')?.textContent).not.toContain('Impersonator')
+
+    await act(async () => controlSocket()?.receive(runResultFrame({
+      request_id: '22222222-2222-4222-8222-222222222222',
+      runner: { member_id: 'm_unknown', display_name: 'Unverified' },
+    })))
+    expect(q('run-output-runner')).toBeNull()
   })
 
   it('shows the run output to an observer too', async () => {

@@ -28,7 +28,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class DockerRunnerResourceLimitsTest {
 
-    private static final String IMAGE = "collab-sandbox-python:0.1.0";
+    private static final String IMAGE = "collab-sandbox-python:0.2.0";
 
     @BeforeAll
     static void requireDockerAndImage() throws Exception {
@@ -89,6 +89,8 @@ class DockerRunnerResourceLimitsTest {
         assertEquals("timeout", result.getFailureKind());
         assertEquals("Time limit exceeded", result.getMessage());
         assertNotEquals(0, result.getExitCode());
+        assertTrue(result.getExecutionTimeMs() > 0.0);
+        assertTrue(result.getPeakMemoryMb() > 0.0);
     }
 
     @Test
@@ -112,6 +114,8 @@ class DockerRunnerResourceLimitsTest {
         assertEquals("non_zero_exit", result.getFailureKind());
         assertEquals("Memory limit exceeded", result.getMessage());
         assertEquals(137, result.getExitCode());
+        assertTrue(result.getExecutionTimeMs() > 0.0);
+        assertTrue(result.getPeakMemoryMb() > 0.0);
     }
 
     @Test
@@ -134,7 +138,8 @@ class DockerRunnerResourceLimitsTest {
         ExecutionResult result = runner.execute(spec);
 
         // It either catches the BlockingIOError / OSError when pids limit is reached, or is terminated
-        assertNotEquals(0, result.getExitCode() == 0 && !result.getStdout().contains("FORK_BLOCKED") ? 1 : 0,
+        assertTrue(
+                result.getExitCode() != 0 || result.getStdout().contains("FORK_BLOCKED"),
                 "Fork bomb should be contained and not run indefinitely");
     }
 

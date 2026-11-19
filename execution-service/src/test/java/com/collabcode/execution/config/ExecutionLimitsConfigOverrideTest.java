@@ -25,7 +25,10 @@ import static org.assertj.core.api.Assertions.assertThat;
         "app.execution.limits.compile-timeout-seconds=3",
         "app.execution.limits.max-request-body-bytes=256",
         "app.execution.limits.max-queue-length=2",
-        "app.execution.limits.queue-retry-after-seconds=1"
+        "app.execution.limits.queue-retry-after-seconds=1",
+        "app.execution.limits.aggregate-time-budget-ms=4500",
+        "app.execution.limits.max-runs-per-request=4",
+        "app.execution.limits.budget-retry-after-seconds=12"
 })
 class ExecutionLimitsConfigOverrideTest {
 
@@ -78,5 +81,23 @@ class ExecutionLimitsConfigOverrideTest {
     @DisplayName("queue-retry-after-seconds can be overridden at deploy time (FR16, US-16)")
     void queueRetryAfterSeconds_isOverridable() {
         assertThat(limits.getQueueRetryAfterSeconds()).isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("aggregate-time-budget-ms can be overridden at deploy time (NFR14, US-64)")
+    void aggregateTimeBudgetMs_isOverridable() {
+        assertThat(limits.getAggregateTimeBudgetMs()).isEqualTo(4500L);
+    }
+
+    @Test
+    @DisplayName("max-runs-per-request can be overridden at deploy time (NFR14, US-64)")
+    void maxRunsPerRequest_isOverridable() {
+        assertThat(limits.getMaxRunsPerRequest()).isEqualTo(4);
+    }
+
+    @Test
+    @DisplayName("budget-retry-after-seconds can be overridden at deploy time (NFR14, US-64)")
+    void budgetRetryAfterSeconds_isOverridable() {
+        assertThat(limits.getBudgetRetryAfterSeconds()).isEqualTo(12);
     }
 }

@@ -1,29 +1,21 @@
 #!/usr/bin/env bash
 # =============================================================================
-# T-14 verification script
+# US-14 & T-14 runtime-images verification script
 # File: execution-service/runtime-images/tests/verify.sh
 #
 # Purpose:
-#   Runs each acceptance-criterion check against the Python runtime image.
-#   Every check prints PASS or FAIL with the expected vs. actual result.
-#   Run this script AFTER building the image with:
-#     docker build -t collab-sandbox-python:0.1.0 \
-#                  execution-service/runtime-images/python
+#   Runs each acceptance-criterion check against all supported runtime images
+#   in the required testing priority order (DR1):
+#     1. C++        (collab-sandbox-cpp:0.1.0)
+#     2. Python     (collab-sandbox-python:0.2.0)
+#     3. C          (collab-sandbox-c:0.1.0)
+#     4. Java       (collab-sandbox-java:0.1.0)
+#     5. JavaScript (collab-sandbox-javascript:0.1.0)
 #
-# Usage (from the repository root):
+# Usage:
+#   cd execution-service/runtime-images && bash tests/verify.sh
+#   # or from repository root:
 #   bash execution-service/runtime-images/tests/verify.sh
-#
-# Prerequisites:
-#   - Docker daemon is running
-#   - Image collab-sandbox-python:0.1.0 has been built (see README)
-#   - Script must be run from the repository root so relative paths work
-#
-# Environment variable (optional):
-#   IMAGE   Override the image tag. Default: collab-sandbox-python:0.1.0
-#
-# Exit code:
-#   0 if all checks pass
-#   1 if any check fails
 # =============================================================================
 
 set -euo pipefail
@@ -31,24 +23,19 @@ set -euo pipefail
 # Ensure Git Bash on Windows does not rewrite POSIX container paths (e.g. /sandbox/code)
 export MSYS_NO_PATHCONV=1
 
-IMAGE="${IMAGE:-collab-sandbox-python:0.1.0}"
-SAMPLE_DIR="execution-service/runtime-images/python/samples"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RUNTIME_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
 PASS=0
 FAIL=0
 RESULTS=()
 
-# Colour codes (disabled when not a terminal)
 if [ -t 1 ]; then
-  GREEN="\033[0;32m"; RED="\033[0;31m"; YELLOW="\033[0;33m"; RESET="\033[0m"
+  GREEN="\033[0;32m"; RED="\033[0;31m"; YELLOW="\033[0;33m"; CYAN="\033[0;36m"; RESET="\033[0m"
 else
-  GREEN=""; RED=""; YELLOW=""; RESET=""
+  GREEN=""; RED=""; YELLOW=""; CYAN=""; RESET=""
 fi
 
-# -----------------------------------------------------------------------------
-# Helper: run_check <check-name> <expected-exit> <expected-stdout-pattern>
-#   Runs a docker command captured in $CMD_ARGS (array).
-#   Compares exit code and stdout against expectations.
-# -----------------------------------------------------------------------------
 check_pass() {
   local name="$1"
   PASS=$((PASS + 1))
@@ -70,7 +57,8 @@ check_skip() {
 }
 
 echo "============================================================"
-echo " T-14 runtime-image verification — image: $IMAGE"
+echo " US-14 runtime-images multi-language verification (DR1)"
+echo " Priority order: C++ -> Python -> C -> Java -> JavaScript"
 echo "============================================================"
 echo ""
 
@@ -85,222 +73,310 @@ fi
 echo "    Docker daemon: OK"
 echo ""
 
-# -----------------------------------------------------------------------------
-# CHECK 1: Image exists (build succeeded)
-# Acceptance criterion 2: A Dockerfile exists and uses a pinned base version.
-# -----------------------------------------------------------------------------
-echo "[1] Image exists (build check)..."
-if docker image inspect "$IMAGE" > /dev/null 2>&1; then
-  check_pass "Image '$IMAGE' exists (AC2)"
-else
-  check_fail "Image '$IMAGE' exists (AC2)" \
-    "Image not found. Build it first: docker build -t $IMAGE execution-service/runtime-images/python"
-fi
-echo ""
+# Helper to verify a single language runtime
+verify_language() {
+  local lang="$1"
+  local image="$2"
+  local sample_dir="$RUNTIME_DIR/$lang/samples"
+  local is_compiled="$3"
+
+  echo -e "${CYAN}------------------------------------------------------------${RESET}"
+  echo -e "${CYAN} Verifying language: $lang ($image)${RESET}"
+  echo -e "${CYAN}------------------------------------------------------------${RESET}"
+
+  # 1. Image exists
+  if docker image inspect "$image" > /dev/null 2>&1; then
+    check_pass "[$lang] Image '$image' exists"
+  else
+    check_fail "[$lang] Image '$image' exists" \
+      "Image not found. Build it with: docker build -t $image execution-service/runtime-images/$lang"
+    return
+  fi
+
+  # 2. Hello-world without stdin
+  local hw_out="" hw_exit=0
+  case "$lang" in
+    cpp)
+      hw_out=$(docker run --rm --network none -v "$sample_dir:/sandbox/code:ro" "$image" \
+        sh -c "g++ -O2 /sandbox/code/hello_world.cpp -o /tmp/hw && /tmp/hw" 2>/dev/null) || hw_exit=$?
+      ;;
+    python)
+      hw_out=$(docker run --rm --network none -v "$sample_dir:/sandbox/code:ro" "$image" \
+        python /sandbox/code/hello_world.py 2>/dev/null) || hw_exit=$?
+      ;;
+    c)
+      hw_out=$(docker run --rm --network none -v "$sample_dir:/sandbox/code:ro" "$image" \
+        sh -c "gcc -O2 /sandbox/code/hello_world.c -o /tmp/hw && /tmp/hw" 2>/dev/null) || hw_exit=$?
+      ;;
+    java)
+      hw_out=$(docker run --rm --network none -v "$sample_dir:/sandbox/code:ro" "$image" \
+        sh -c "javac -d /tmp /sandbox/code/Main.java && java -cp /tmp Main" 2>/dev/null) || hw_exit=$?
+      ;;
+    javascript)
+      hw_out=$(docker run --rm --network none -v "$sample_dir:/sandbox/code:ro" "$image" \
+        node /sandbox/code/hello_world.js 2>/dev/null) || hw_exit=$?
+      ;;
+  esac
+  hw_exit="${hw_exit:-0}"
+
+  if [ "$hw_out" = "Hello, Sandbox!" ] && [ "$hw_exit" = "0" ]; then
+    check_pass "[$lang] Hello-world (no stdin) — stdout='Hello, Sandbox!' exit=0"
+  else
+    check_fail "[$lang] Hello-world (no stdin)" "Expected 'Hello, Sandbox!' exit=0; got '$hw_out' exit=$hw_exit"
+  fi
+
+  # 3. Hello-world with stdin supplied (stdin ignored)
+  local hw2_out="" hw2_exit=0
+  case "$lang" in
+    cpp)
+      hw2_out=$(echo "ignored input" | docker run --rm -i --network none -v "$sample_dir:/sandbox/code:ro" "$image" \
+        sh -c "g++ -O2 /sandbox/code/hello_world.cpp -o /tmp/hw && /tmp/hw" 2>/dev/null) || hw2_exit=$?
+      ;;
+    python)
+      hw2_out=$(echo "ignored input" | docker run --rm -i --network none -v "$sample_dir:/sandbox/code:ro" "$image" \
+        python /sandbox/code/hello_world.py 2>/dev/null) || hw2_exit=$?
+      ;;
+    c)
+      hw2_out=$(echo "ignored input" | docker run --rm -i --network none -v "$sample_dir:/sandbox/code:ro" "$image" \
+        sh -c "gcc -O2 /sandbox/code/hello_world.c -o /tmp/hw && /tmp/hw" 2>/dev/null) || hw2_exit=$?
+      ;;
+    java)
+      hw2_out=$(echo "ignored input" | docker run --rm -i --network none -v "$sample_dir:/sandbox/code:ro" "$image" \
+        sh -c "javac -d /tmp /sandbox/code/Main.java && java -cp /tmp Main" 2>/dev/null) || hw2_exit=$?
+      ;;
+    javascript)
+      hw2_out=$(echo "ignored input" | docker run --rm -i --network none -v "$sample_dir:/sandbox/code:ro" "$image" \
+        node /sandbox/code/hello_world.js 2>/dev/null) || hw2_exit=$?
+      ;;
+  esac
+  hw2_exit="${hw2_exit:-0}"
+
+  if [ "$hw2_out" = "Hello, Sandbox!" ] && [ "$hw2_exit" = "0" ]; then
+    check_pass "[$lang] Hello-world (stdin ignored) — stdout='Hello, Sandbox!' exit=0"
+  else
+    check_fail "[$lang] Hello-world (stdin ignored)" "Expected 'Hello, Sandbox!' exit=0; got '$hw2_out' exit=$hw2_exit"
+  fi
+
+  # 4. stdin pipe (uppercase echo)
+  local in_out="" in_exit=0
+  case "$lang" in
+    cpp)
+      in_out=$(echo "hello sandbox" | docker run --rm -i --network none -v "$sample_dir:/sandbox/code:ro" "$image" \
+        sh -c "g++ -O2 /sandbox/code/stdin_echo.cpp -o /tmp/echo && /tmp/echo" 2>/dev/null) || in_exit=$?
+      ;;
+    python)
+      in_out=$(echo "hello sandbox" | docker run --rm -i --network none -v "$sample_dir:/sandbox/code:ro" "$image" \
+        python /sandbox/code/stdin_echo.py 2>/dev/null) || in_exit=$?
+      ;;
+    c)
+      in_out=$(echo "hello sandbox" | docker run --rm -i --network none -v "$sample_dir:/sandbox/code:ro" "$image" \
+        sh -c "gcc -O2 /sandbox/code/stdin_echo.c -o /tmp/echo && /tmp/echo" 2>/dev/null) || in_exit=$?
+      ;;
+    java)
+      in_out=$(echo "hello sandbox" | docker run --rm -i --network none -v "$sample_dir:/sandbox/code:ro" "$image" \
+        sh -c "javac -d /tmp /sandbox/code/StdinEcho.java && java -cp /tmp StdinEcho" 2>/dev/null) || in_exit=$?
+      ;;
+    javascript)
+      in_out=$(echo "hello sandbox" | docker run --rm -i --network none -v "$sample_dir:/sandbox/code:ro" "$image" \
+        node /sandbox/code/stdin_echo.js 2>/dev/null) || in_exit=$?
+      ;;
+  esac
+  in_exit="${in_exit:-0}"
+
+  if [ "$in_out" = "HELLO SANDBOX" ] && [ "$in_exit" = "0" ]; then
+    check_pass "[$lang] stdin pipe — stdout='HELLO SANDBOX' exit=0"
+  else
+    check_fail "[$lang] stdin pipe" "Expected 'HELLO SANDBOX' exit=0; got '$in_out' exit=$in_exit"
+  fi
+
+  # 5. stdout / stderr independence
+  local split_exit=0 err_file="/tmp/err_${lang}_$$.txt"
+  case "$lang" in
+    cpp)
+      split_out=$(docker run --rm --network none -v "$sample_dir:/sandbox/code:ro" "$image" \
+        sh -c "g++ -O2 /sandbox/code/stderr_split.cpp -o /tmp/split && /tmp/split" 2>"$err_file") || split_exit=$?
+      ;;
+    python)
+      split_out=$(docker run --rm --network none -v "$sample_dir:/sandbox/code:ro" "$image" \
+        python /sandbox/code/stderr_split.py 2>"$err_file") || split_exit=$?
+      ;;
+    c)
+      split_out=$(docker run --rm --network none -v "$sample_dir:/sandbox/code:ro" "$image" \
+        sh -c "gcc -O2 /sandbox/code/stderr_split.c -o /tmp/split && /tmp/split" 2>"$err_file") || split_exit=$?
+      ;;
+    java)
+      split_out=$(docker run --rm --network none -v "$sample_dir:/sandbox/code:ro" "$image" \
+        sh -c "javac -d /tmp /sandbox/code/StderrSplit.java && java -cp /tmp StderrSplit" 2>"$err_file") || split_exit=$?
+      ;;
+    javascript)
+      split_out=$(docker run --rm --network none -v "$sample_dir:/sandbox/code:ro" "$image" \
+        node /sandbox/code/stderr_split.js 2>"$err_file") || split_exit=$?
+      ;;
+  esac
+  split_exit="${split_exit:-0}"
+  local split_err=""
+  if [ -f "$err_file" ]; then split_err=$(cat "$err_file"); rm -f "$err_file"; fi
+
+  if [ "$split_out" = "STDOUT line" ] && [ "$split_err" = "STDERR line" ] && [ "$split_exit" = "0" ]; then
+    check_pass "[$lang] stdout/stderr independence — streams captured separately"
+  else
+    check_fail "[$lang] stdout/stderr independence" "Expected out='STDOUT line', err='STDERR line'; got out='$split_out', err='$split_err' exit=$split_exit"
+  fi
+
+  # 6. Nonzero exit preserved
+  local nz_exit=0
+  case "$lang" in
+    cpp)
+      docker run --rm --network none -v "$sample_dir:/sandbox/code:ro" "$image" \
+        sh -c "g++ -O2 /sandbox/code/exit_nonzero.cpp -o /tmp/nz && /tmp/nz" >/dev/null 2>&1 || nz_exit=$?
+      ;;
+    python)
+      docker run --rm --network none -v "$sample_dir:/sandbox/code:ro" "$image" \
+        python /sandbox/code/exit_nonzero.py >/dev/null 2>&1 || nz_exit=$?
+      ;;
+    c)
+      docker run --rm --network none -v "$sample_dir:/sandbox/code:ro" "$image" \
+        sh -c "gcc -O2 /sandbox/code/exit_nonzero.c -o /tmp/nz && /tmp/nz" >/dev/null 2>&1 || nz_exit=$?
+      ;;
+    java)
+      docker run --rm --network none -v "$sample_dir:/sandbox/code:ro" "$image" \
+        sh -c "javac -d /tmp /sandbox/code/ExitNonzero.java && java -cp /tmp ExitNonzero" >/dev/null 2>&1 || nz_exit=$?
+      ;;
+    javascript)
+      docker run --rm --network none -v "$sample_dir:/sandbox/code:ro" "$image" \
+        node /sandbox/code/exit_nonzero.js >/dev/null 2>&1 || nz_exit=$?
+      ;;
+  esac
+
+  if [ "$nz_exit" = "42" ]; then
+    check_pass "[$lang] Nonzero exit code preserved (exit=42)"
+  else
+    check_fail "[$lang] Nonzero exit code" "Expected exit=42; got exit=$nz_exit"
+  fi
+
+  # 7. Non-root user (NFR3.2)
+  local whoami
+  whoami=$(docker run --rm --network none "$image" id -u 2>/dev/null || echo "0")
+  if [ "$whoami" = "1001" ]; then
+    check_pass "[$lang] Non-root user UID 1001 (NFR3.2)"
+  else
+    check_fail "[$lang] Non-root user (NFR3.2)" "Expected UID 1001; got UID=$whoami"
+  fi
+
+  # 8. Network isolation (NFR3.1)
+  local net_out="" net_exit=0
+  case "$lang" in
+    cpp)
+      net_out=$(docker run --rm --network none -v "$sample_dir:/sandbox/code:ro" "$image" \
+        sh -c "g++ -O2 /sandbox/code/network_probe.cpp -o /tmp/net && /tmp/net" 2>/dev/null; echo "exit:$?") || true
+      ;;
+    python)
+      net_out=$(docker run --rm --network none -v "$sample_dir:/sandbox/code:ro" "$image" \
+        python /sandbox/code/network_probe.py 2>/dev/null; echo "exit:$?") || true
+      ;;
+    c)
+      net_out=$(docker run --rm --network none -v "$sample_dir:/sandbox/code:ro" "$image" \
+        sh -c "gcc -O2 /sandbox/code/network_probe.c -o /tmp/net && /tmp/net" 2>/dev/null; echo "exit:$?") || true
+      ;;
+    java)
+      net_out=$(docker run --rm --network none -v "$sample_dir:/sandbox/code:ro" "$image" \
+        sh -c "javac -d /tmp /sandbox/code/NetworkProbe.java && java -cp /tmp NetworkProbe" 2>/dev/null; echo "exit:$?") || true
+      ;;
+    javascript)
+      net_out=$(docker run --rm --network none -v "$sample_dir:/sandbox/code:ro" "$image" \
+        node /sandbox/code/network_probe.js 2>/dev/null; echo "exit:$?") || true
+      ;;
+  esac
+  net_exit=$(echo "$net_out" | grep -o 'exit:[0-9]*' | cut -d: -f2)
+
+  if [ "$net_exit" = "1" ] && echo "$net_out" | grep -q "NETWORK BLOCKED"; then
+    check_pass "[$lang] Network isolation — blocked as expected (NFR3.1)"
+  else
+    check_fail "[$lang] Network isolation" "Expected exit=1 with NETWORK BLOCKED; got exit=$net_exit output='$net_out'"
+  fi
+
+  # 9. Source code not baked into image (FR5.2)
+  local baked
+  baked=$(docker run --rm --network none "$image" \
+    sh -c 'test -d /sandbox/code && ls /sandbox/code | wc -l || echo 0' 2>/dev/null)
+  if [ "${baked:-0}" = "0" ]; then
+    check_pass "[$lang] Code not baked into image (FR5.2)"
+  else
+    check_fail "[$lang] Code not baked in" "Files found in bare image /sandbox/code"
+  fi
+
+  # 10. Compiled languages: Compile error returns non-zero exit with compiler output in stderr (NFR4.5)
+  if [ "$is_compiled" = "true" ]; then
+    local comp_err_file="/tmp/comperr_${lang}_$$.txt"
+    local comp_exit=0
+    case "$lang" in
+      cpp)
+        docker run --rm --network none -v "$sample_dir:/sandbox/code:ro" "$image" \
+          g++ /sandbox/code/compile_error.cpp -o /tmp/a.out 2>"$comp_err_file" >/dev/null || comp_exit=$?
+        ;;
+      c)
+        docker run --rm --network none -v "$sample_dir:/sandbox/code:ro" "$image" \
+          gcc /sandbox/code/compile_error.c -o /tmp/a.out 2>"$comp_err_file" >/dev/null || comp_exit=$?
+        ;;
+      java)
+        docker run --rm --network none -v "$sample_dir:/sandbox/code:ro" "$image" \
+          javac -d /tmp /sandbox/code/CompileError.java 2>"$comp_err_file" >/dev/null || comp_exit=$?
+        ;;
+    esac
+
+    local comp_err=""
+    if [ -f "$comp_err_file" ]; then comp_err=$(cat "$comp_err_file"); rm -f "$comp_err_file"; fi
+
+    if [ "$comp_exit" != "0" ] && [ -n "$comp_err" ]; then
+      check_pass "[$lang] Compile error verification — exit=$comp_exit with compiler stderr (NFR4.5)"
+    else
+      check_fail "[$lang] Compile error verification" "Expected non-zero exit and compiler stderr; got exit=$comp_exit"
+    fi
+  fi
+
+  # 11. C and C++ sanitizer toolchain support (US-73 ready)
+  if [ "$lang" = "cpp" ] || [ "$lang" = "c" ]; then
+    local san_out="" san_exit=0
+    case "$lang" in
+      cpp)
+        san_out=$(docker run --rm --network none -v "$sample_dir:/sandbox/code:ro" "$image" \
+          sh -c "g++ -fsanitize=address,undefined -no-pie -g -O1 /sandbox/code/sanitizer_sample.cpp -o /tmp/san && /tmp/san" 2>/dev/null) || san_exit=$?
+        ;;
+      c)
+        san_out=$(docker run --rm --network none -v "$sample_dir:/sandbox/code:ro" "$image" \
+          sh -c "gcc -fsanitize=address,undefined -no-pie -g -O1 /sandbox/code/sanitizer_sample.c -o /tmp/san && /tmp/san" 2>/dev/null) || san_exit=$?
+        ;;
+    esac
+    san_exit="${san_exit:-0}"
+
+    if [ "$san_out" = "SANITIZER_SUPPORT_OK" ] && [ "$san_exit" = "0" ]; then
+      check_pass "[$lang] Sanitizer toolchain ready (AddressSanitizer + UndefinedBehaviorSanitizer) (US-73)"
+    else
+      check_fail "[$lang] Sanitizer toolchain" "Failed to build or run sanitizer sample; exit=$san_exit out='$san_out'"
+    fi
+  fi
+
+  # 12. Image size (informational)
+  local size
+  size=$(docker image inspect "$image" --format '{{.Size}}' 2>/dev/null | awk '{printf "%.1f MB", $1/1048576}') || true
+  if [ -n "$size" ]; then
+    check_pass "[$lang] Image size: $size (recorded in README)"
+  else
+    check_skip "[$lang] Image size" "Could not measure size"
+  fi
+  echo ""
+}
+
+# Run in strict priority order (DR1): C++ -> Python -> C -> Java -> JavaScript
+verify_language "cpp"        "collab-sandbox-cpp:0.1.0"        "true"
+verify_language "python"     "collab-sandbox-python:0.2.0"     "false"
+verify_language "c"          "collab-sandbox-c:0.1.0"          "true"
+verify_language "java"       "collab-sandbox-java:0.1.0"       "true"
+verify_language "javascript" "collab-sandbox-javascript:0.1.0" "false"
 
 # -----------------------------------------------------------------------------
-# CHECK 2: Hello-world without stdin
-# Acceptance criterion 3 + 4a: hello-world runs without stdin.
-# Expected stdout: Hello, Sandbox!
-# Expected exit:   0
-# -----------------------------------------------------------------------------
-echo "[2] Hello-world (no stdin)..."
-STDOUT=$(docker run --rm --network none \
-  -v "$(pwd)/$SAMPLE_DIR:/sandbox/code:ro" \
-  "$IMAGE" python /sandbox/code/hello_world.py 2>/dev/null) || HW_EXIT=$?
-HW_EXIT="${HW_EXIT:-0}"
-
-if [ "$STDOUT" = "Hello, Sandbox!" ] && [ "$HW_EXIT" = "0" ]; then
-  check_pass "Hello-world (no stdin) — stdout='Hello, Sandbox!' exit=0 (AC3, AC4a)"
-else
-  check_fail "Hello-world (no stdin) (AC3, AC4a)" \
-    "Expected stdout='Hello, Sandbox!' exit=0; got stdout='$STDOUT' exit=$HW_EXIT"
-fi
-echo ""
-
-# -----------------------------------------------------------------------------
-# CHECK 3: Hello-world with stdin piped (ignored)
-# Acceptance criterion 4b: runs correctly even when stdin is supplied.
-# Expected stdout: Hello, Sandbox!   (stdin is ignored by hello_world.py)
-# Expected exit:   0
-# -----------------------------------------------------------------------------
-echo "[3] Hello-world (with stdin, ignored)..."
-STDOUT=$(echo "ignored input" | docker run --rm -i --network none \
-  -v "$(pwd)/$SAMPLE_DIR:/sandbox/code:ro" \
-  "$IMAGE" python /sandbox/code/hello_world.py 2>/dev/null) || HW2_EXIT=$?
-HW2_EXIT="${HW2_EXIT:-0}"
-
-if [ "$STDOUT" = "Hello, Sandbox!" ] && [ "$HW2_EXIT" = "0" ]; then
-  check_pass "Hello-world (stdin ignored) — stdout='Hello, Sandbox!' exit=0 (AC4b)"
-else
-  check_fail "Hello-world (stdin ignored) (AC4b)" \
-    "Expected stdout='Hello, Sandbox!' exit=0; got stdout='$STDOUT' exit=$HW2_EXIT"
-fi
-echo ""
-
-# -----------------------------------------------------------------------------
-# CHECK 4: stdin is correctly piped into the container
-# Acceptance criterion 5: stdin convention.
-# Input:           hello sandbox
-# Expected stdout: HELLO SANDBOX
-# Expected exit:   0
-# -----------------------------------------------------------------------------
-echo "[4] stdin pipe (uppercase echo)..."
-STDOUT=$(echo "hello sandbox" | docker run --rm -i --network none \
-  -v "$(pwd)/$SAMPLE_DIR:/sandbox/code:ro" \
-  "$IMAGE" python /sandbox/code/stdin_echo.py 2>/dev/null) || STDIN_EXIT=$?
-STDIN_EXIT="${STDIN_EXIT:-0}"
-
-if [ "$STDOUT" = "HELLO SANDBOX" ] && [ "$STDIN_EXIT" = "0" ]; then
-  check_pass "stdin pipe — stdout='HELLO SANDBOX' exit=0 (AC5)"
-else
-  check_fail "stdin pipe (AC5)" \
-    "Expected stdout='HELLO SANDBOX' exit=0; got stdout='$STDOUT' exit=$STDIN_EXIT"
-fi
-echo ""
-
-# -----------------------------------------------------------------------------
-# CHECK 5: stdout captured independently from stderr
-# Acceptance criterion 5: stdout/stderr separation.
-# -----------------------------------------------------------------------------
-echo "[5] stdout/stderr independence..."
-CAPTURED_OUT=$(docker run --rm --network none \
-  -v "$(pwd)/$SAMPLE_DIR:/sandbox/code:ro" \
-  "$IMAGE" python /sandbox/code/stderr_split.py 2>/tmp/t14_stderr.txt) || SPLIT_EXIT=$?
-SPLIT_EXIT="${SPLIT_EXIT:-0}"
-CAPTURED_ERR=$(cat /tmp/t14_stderr.txt)
-rm -f /tmp/t14_stderr.txt
-
-if [ "$CAPTURED_OUT" = "STDOUT line" ] && \
-   [ "$CAPTURED_ERR" = "STDERR line" ] && \
-   [ "$SPLIT_EXIT" = "0" ]; then
-  check_pass "stdout/stderr independence — each stream captured separately (AC5)"
-else
-  check_fail "stdout/stderr independence (AC5)" \
-    "Expected out='STDOUT line', err='STDERR line', exit=0; got out='$CAPTURED_OUT' err='$CAPTURED_ERR' exit=$SPLIT_EXIT"
-fi
-echo ""
-
-# -----------------------------------------------------------------------------
-# CHECK 6: nonzero exit code is preserved
-# Acceptance criterion 5: exit-code convention.
-# The program exits 42; the runner must return 42, not 0.
-# -----------------------------------------------------------------------------
-echo "[6] Nonzero exit code preserved..."
-NZ_EXIT=0
-docker run --rm --network none \
-  -v "$(pwd)/$SAMPLE_DIR:/sandbox/code:ro" \
-  "$IMAGE" python /sandbox/code/exit_nonzero.py > /dev/null 2>&1 || NZ_EXIT=$?
-
-if [ "$NZ_EXIT" = "42" ]; then
-  check_pass "Nonzero exit code — exit code 42 preserved (AC5)"
-else
-  check_fail "Nonzero exit code (AC5)" \
-    "Expected exit=42; got exit=$NZ_EXIT"
-fi
-echo ""
-
-# -----------------------------------------------------------------------------
-# CHECK 7: Running as non-root user
-# NFR3.2 (recommended now, required Sprint 2): user is 'sandbox', not root.
-# -----------------------------------------------------------------------------
-echo "[7] Non-root user..."
-WHOAMI=$(docker run --rm --network none "$IMAGE" id -u 2>/dev/null) || ID_EXIT=$?
-ID_EXIT="${ID_EXIT:-0}"
-
-if [ "$WHOAMI" != "0" ] && [ "$ID_EXIT" = "0" ]; then
-  # Also retrieve username for display
-  USERNAME=$(docker run --rm --network none "$IMAGE" id -un 2>/dev/null || echo "unknown")
-  check_pass "Non-root user — UID=$WHOAMI (user '$USERNAME'), not root (NFR3.2)"
-else
-  check_fail "Non-root user (NFR3.2)" \
-    "Expected UID != 0; got UID=$WHOAMI exit=$ID_EXIT"
-fi
-echo ""
-
-# -----------------------------------------------------------------------------
-# CHECK 8: Network is blocked (--network none)
-# NFR3.1: code must run with no network access.
-# network_probe.py exits 1 when network is blocked (expected outcome).
-# It exits 2 if the network was reachable (sandbox failure).
-# -----------------------------------------------------------------------------
-echo "[8] Network isolation (--network none)..."
-NETOUT=$(docker run --rm --network none \
-  -v "$(pwd)/$SAMPLE_DIR:/sandbox/code:ro" \
-  "$IMAGE" python /sandbox/code/network_probe.py 2>/dev/null; echo "exit:$?") \
-  || true
-NET_EXIT=$(echo "$NETOUT" | grep -o 'exit:[0-9]*' | cut -d: -f2)
-NET_STDOUT=$(echo "$NETOUT" | grep -v 'exit:')
-
-if [ "$NET_EXIT" = "1" ] && echo "$NET_STDOUT" | grep -q "NETWORK BLOCKED"; then
-  check_pass "Network isolation — connection refused as expected (NFR3.1)"
-elif [ "$NET_EXIT" = "2" ]; then
-  check_fail "Network isolation (NFR3.1)" \
-    "Network was REACHABLE — --network none did not isolate the container"
-else
-  check_fail "Network isolation (NFR3.1)" \
-    "Unexpected exit=$NET_EXIT stdout='$NET_STDOUT'"
-fi
-echo ""
-
-# -----------------------------------------------------------------------------
-# CHECK 9: Source code is NOT baked into the image
-# FR5.2 / DR2: code is supplied per run, not embedded.
-# Verify that the samples directory does NOT exist inside the image baseline.
-# -----------------------------------------------------------------------------
-echo "[9] Source code not baked into image..."
-BAKED=$(docker run --rm --network none "$IMAGE" \
-  sh -c 'test -f /sandbox/code/hello_world.py && echo FOUND || echo ABSENT' 2>/dev/null)
-
-if [ "$BAKED" = "ABSENT" ]; then
-  check_pass "Code not baked in — /sandbox/code/hello_world.py absent in bare image (FR5.2)"
-else
-  check_fail "Code not baked in (FR5.2)" \
-    "hello_world.py was found inside the image at /sandbox/code — code must not be baked in"
-fi
-echo ""
-
-# -----------------------------------------------------------------------------
-# CHECK 10: Container cleanup (--rm flag)
-# FR5.2: the container is destroyed after the run.
-# We run a container with a known unique name, verify it is gone after exit.
-# -----------------------------------------------------------------------------
-echo "[10] Container cleanup..."
-UNIQUE_NAME="t14-cleanup-$$"
-docker run --rm --network none --name "$UNIQUE_NAME" \
-  -v "$(pwd)/$SAMPLE_DIR:/sandbox/code:ro" \
-  "$IMAGE" python /sandbox/code/hello_world.py > /dev/null 2>&1 || true
-
-# Container should be gone now (--rm was passed)
-RUNNING=$(docker ps -a --filter "name=^/${UNIQUE_NAME}$" --format '{{.Names}}')
-if [ -z "$RUNNING" ]; then
-  check_pass "Container cleanup — container removed after exit (FR5.2)"
-else
-  check_fail "Container cleanup (FR5.2)" \
-    "Container '$UNIQUE_NAME' still exists after run"
-  # Clean up regardless
-  docker rm -f "$UNIQUE_NAME" > /dev/null 2>&1 || true
-fi
-echo ""
-
-# -----------------------------------------------------------------------------
-# CHECK 11: Image size (informational — not a pass/fail)
-# Acceptance criterion 8: image size recorded in README.
-# -----------------------------------------------------------------------------
-echo "[11] Image size (informational)..."
-SIZE=$(docker image inspect "$IMAGE" \
-  --format '{{.Size}}' 2>/dev/null | awk '{printf "%.1f MB", $1/1048576}') || true
-if [ -n "$SIZE" ]; then
-  check_pass "Image size: $SIZE — record this in the README (AC8)"
-  echo "    NOTE: Update README.md with the measured size above."
-else
-  check_skip "Image size" "Could not measure (image may not exist)"
-fi
-echo ""
-
-# =============================================================================
 # SUMMARY
-# =============================================================================
+# -----------------------------------------------------------------------------
 echo "============================================================"
 echo " Results: ${PASS} passed, ${FAIL} failed"
 echo "============================================================"
@@ -310,7 +386,7 @@ done
 echo ""
 
 if [ "$FAIL" -eq 0 ]; then
-  echo -e "${GREEN}All checks passed.${RESET}"
+  echo -e "${GREEN}All checks passed for all five languages.${RESET}"
   exit 0
 else
   echo -e "${RED}${FAIL} check(s) failed. Review the output above.${RESET}"

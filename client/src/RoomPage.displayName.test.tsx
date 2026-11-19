@@ -11,6 +11,7 @@ import * as Y from 'yjs'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import RoomPage from './RoomPage'
 import { USER_COLORS } from './userColor'
+import { ownerTokenKey } from './createRoom'
 
 const mockDeltaDecorations = vi.hoisted(() =>
   vi.fn((_oldDecorations: string[], newDecorations: unknown[]) => {
@@ -150,7 +151,15 @@ class T20Relay {
           return
         }
 
-        if (this.refuseNames.has(msg.display_name)) {
+        const room = this.rooms.get(meta.roomId) ?? new Map()
+        this.rooms.set(meta.roomId, room)
+        const currentMember = room.get(meta.sessionId)
+        const normalized = (name: string) => name.trim().normalize('NFKC').toLowerCase()
+        const taken = [...room.values()].some((member) =>
+          member.sessionId !== meta.sessionId &&
+          normalized(member.displayName) === normalized(String(msg.display_name)),
+        )
+        if (this.refuseNames.has(msg.display_name) || taken) {
           ws.receiveText(
             JSON.stringify({
               type: 'join-refused',
@@ -162,12 +171,12 @@ class T20Relay {
           return
         }
 
-        const room = this.rooms.get(meta.roomId) ?? new Map()
-        this.rooms.set(meta.roomId, room)
-        room.set(meta.sessionId, {
-          sessionId: meta.sessionId,
-          displayName: msg.display_name,
-        })
+        if (!currentMember) {
+          room.set(meta.sessionId, {
+            sessionId: meta.sessionId,
+            displayName: msg.display_name,
+          })
+        }
         const roomMode = this.roomModes.get(meta.roomId) ?? 'pair'
         ws.receiveText(
           JSON.stringify({
@@ -178,6 +187,17 @@ class T20Relay {
             permissions: { can_edit: true, can_run: true },
           }),
         )
+        const roster = JSON.stringify({
+          type: 'roster',
+          members: [...room.values()].map((member) => ({
+            member_id: member.sessionId,
+            display_name: member.displayName,
+            role: 'Guest',
+          })),
+        })
+        for (const [socket, memberMeta] of this.controlSockets) {
+          if (memberMeta.roomId === meta.roomId) socket.receiveText(roster)
+        }
       }
     } catch {
       // ignore
@@ -352,6 +372,7 @@ describe('RoomPage display-name and colour presence join lifecycle', () => {
   let relay: T20Relay
 
   beforeEach(() => {
+    sessionStorage.clear() // Each test starts without a previously joined browser tab.
     relay = new T20Relay()
     originalPathname = window.location.pathname
     window.history.replaceState({}, '', '/room/room-demo')
@@ -380,6 +401,34 @@ describe('RoomPage display-name and colour presence join lifecycle', () => {
 
     expect(container.textContent).toContain('Choose your display name')
     expect(container.querySelector('[data-testid="mock-monaco-editor"]')).toBeNull()
+  })
+
+  it('resumes a saved join when reading the owner token throws', async () => {
+    const sessionId = '10000000-0000-4000-8000-000000000001'
+    sessionStorage.setItem(`collab_room_name:room-demo:${sessionId}`, 'Alice')
+    const ownerTokenLookup = vi.spyOn(localStorage, 'getItem').mockImplementation(() => {
+      throw new DOMException('Storage access denied', 'SecurityError')
+    })
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    root = createRoot(container)
+
+    try {
+      await act(async () => {
+        root?.render(
+          <RoomPage wsOptions={{ WebSocketClass: createRelaySocketClass(relay), sessionId }} />,
+        )
+      })
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 45))
+      })
+
+      expect(ownerTokenLookup).toHaveBeenCalledWith(ownerTokenKey('room-demo'))
+      expect(container.querySelector('[data-testid="mock-monaco-editor"]')).not.toBeNull()
+      expect(container.querySelector('[data-testid="room-user-badge"]')?.textContent).toContain('You: Alice')
+    } finally {
+      ownerTokenLookup.mockRestore()
+    }
   })
 
   it('shows an invalid-link error when the room ID is missing', async () => {
@@ -541,6 +590,40 @@ describe('RoomPage display-name and colour presence join lifecycle', () => {
     // Editor is now accessible!
     expect(container.querySelector('[data-testid="mock-monaco-editor"]')).not.toBeNull()
     expect(container.textContent).toContain('You: ValidUniqueName')
+  })
+
+  it('uses the server roster name when a second tab rejoins with different casing', async () => {
+    const awarenessRef: RefObject<Awareness | null> = { current: null }
+    const room = new Map<string, RelayMember>()
+    const sessionId = '20000000-0000-4000-8000-000000000002'
+    room.set(sessionId, { sessionId, displayName: 'Ada' })
+    relay.rooms.set('room-demo', room)
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    root = createRoot(container)
+
+    await act(async () => {
+      root?.render(<RoomPage awarenessRef={awarenessRef} wsOptions={{
+        WebSocketClass: createRelaySocketClass(relay),
+        sessionId,
+      }} />)
+    })
+
+    const input = container.querySelector<HTMLInputElement>('#display-name')!
+    const form = container.querySelector<HTMLFormElement>('form')!
+    await act(async () => {
+      input.value = 'ada'
+      form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+    })
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    })
+
+    expect(container.textContent).toContain('You: Ada')
+    expect(container.textContent).not.toContain('You: ada')
+    const canonicalUser = awarenessRef.current?.getLocalState() as { user?: { name: string } } | null
+    expect(canonicalUser?.user?.name).toBe('Ada')
   })
 
   it('connection failure: keeps editor hidden and communicates failure if socket drops before join', async () => {
@@ -1316,7 +1399,11 @@ describe('US-03 live cursor and presence', () => {
       // The displayed role must still come from the server roster.
       const ytext = docRef.current!.getText('monaco')
       remoteAwareness.setLocalState({
-        user: { name: 'Bob', color: USER_COLORS[1] },
+        user: {
+          name: 'Bob',
+          color: USER_COLORS[1],
+          member_id: '99999999-9999-4999-9999-999999999999',
+        },
         role: 'Host',
         selection: {
           head: Y.createRelativePositionFromTypeIndex(ytext, 0),

@@ -72,4 +72,12 @@ class ExecutionLimitsPropertiesTest {
         assertThat(limits.getMaxQueueLength()).isGreaterThanOrEqualTo(1);
         assertThat(limits.getQueueRetryAfterSeconds()).isGreaterThan(0);
     }
+
+    @Test
+    @DisplayName("Repeated-run budget limits have positive defaults (NFR14, DR3, US-64)")
+    void repeatedRunBudgetLimits_haveValues() {
+        assertThat(limits.getAggregateTimeBudgetMs()).isGreaterThan(0);
+        assertThat(limits.getMaxRunsPerRequest()).isGreaterThanOrEqualTo(1);
+        assertThat(limits.getBudgetRetryAfterSeconds()).isGreaterThan(0);
+    }
 }

@@ -11,6 +11,8 @@ import org.springframework.stereotype.Component;
 import java.security.SecureRandom;
 import java.util.Base64;
 import java.util.Map;
+import java.util.List;
+import java.util.Comparator;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -51,6 +53,18 @@ public class ModuleService {
         return module;
     }
 
+    /** Returns a stable snapshot of approved modules for a joined room member. */
+    public synchronized List<ModuleRecord> listApproved(String roomId, Member requester) {
+        requireOpenRoom(roomId);
+        if (requester == null) throw new IllegalArgumentException("SESSION_NOT_FOUND");
+        Map<String, ModuleRecord> modules = byRoom.get(roomId);
+        if (modules == null) return List.of();
+        return modules.values().stream()
+                .filter(module -> !module.pending())
+                .sorted(Comparator.comparing(ModuleRecord::moduleId))
+                .toList();
+    }
+
     /** A socket may address only an approved module. */
     public boolean isActive(String roomId, String moduleId) {
         ModuleRecord module = find(roomId, moduleId);
@@ -60,6 +74,22 @@ public class ModuleService {
     public boolean canEdit(String roomId, String moduleId, Member member) {
         ModuleRecord module = find(roomId, moduleId);
         return member != null && module != null && module.canEdit(member.getMemberId());
+    }
+
+    /**
+     * Re-key a room's modules when its link is regenerated (US-28, V2.18): the
+     * room id changes but module ownership and writers are preserved.
+     */
+    public synchronized void moveRoom(String oldRoomId, String newRoomId) {
+        Map<String, ModuleRecord> modules = byRoom.remove(oldRoomId);
+        if (modules != null) {
+            // Merge rather than overwrite: if a module was created on the new id in
+            // the gap before this runs, keep it as well as the moved ones (US-28).
+            byRoom.merge(newRoomId, modules, (existing, incoming) -> {
+                existing.putAll(incoming);
+                return existing;
+            });
+        }
     }
 
     private Room requireOpenRoom(String roomId) {

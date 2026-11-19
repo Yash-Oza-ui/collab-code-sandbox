@@ -42,7 +42,7 @@ Any other value is refused with HTTP `422 UNSUPPORTED_LANGUAGE` before anything 
 
 | Language | Runs end to end today? | Notes |
 |----------|------------------------|-------|
-| `python` | **Yes** | Image `collab-sandbox-python:0.1.0` (T-14), run by `DockerRunner` (US-09). |
+| `python` | **Yes** | Image `collab-sandbox-python:0.2.0` (T-14/US-10), run by `DockerRunner` (US-09). |
 | `cpp`, `c`, `java`, `javascript` | Not yet | Accepted by the endpoint, but `DockerRunner` has no image for them. The run returns HTTP 200 with `exit_code: 2`, `failure_kind: "non_zero_exit"` and a stderr message saying the runtime currently supports Python only. The images arrive with US-14. |
 
 A program that fails (non-zero exit, syntax error, exception) is **a result, not a server error**:
@@ -113,18 +113,25 @@ After execution finishes, execution-service broadcasts the run result to sync-se
 
 ---
 
-## ⚠️ StubPermissionLookupService
+## Permission lookup (US-60, T-17 V2.11, FR41.4)
 
-`StubPermissionLookupService` is an in-memory stub activated by the
-`stub-permissions` Spring profile (enabled by default in `application.yml`).
-It returns `can_run: true` for every session that is not one of the
-well-known test session IDs (`OBSERVER_SESSION_ID`, `REVOKED_SESSION_ID`,
-`HOST_ONLY_SESSION_ID`, `NOT_IN_ROOM_SESSION_ID`).
+On every run request execution-service asks sync-service who the caller is and whether they may run
+(`GET {SYNC_SERVICE_INTERNAL_URL}/internal/rooms/{room_id}/sessions/{session_id}` with
+`X-Internal-Token`). The answer is never cached, so a change by the Host (Run taken away, Host-only
+running) refuses the member's very next run with `403 RUN_NOT_ALLOWED` and `error.reason` of
+`observer`, `run_revoked` or `host_only`.
 
-**This stub must be replaced** when sync-service implements real session
-lookup (T-20). To disable it, remove `stub-permissions` from
-`spring.profiles.active` and register a production `PermissionLookupService`
-bean.
+- **`HttpPermissionLookupService`** is the real lookup and the default. It fails closed: no
+  connection, a timeout, `401`, a `5xx` or an answer without a boolean `can_run` is
+  `503 ROOM_SERVICE_UNAVAILABLE` and the code is not run. `404 ROOM_NOT_FOUND` is
+  `404 ROOM_NOT_FOUND`; `404 SESSION_NOT_FOUND` is `403 RUN_NOT_ALLOWED` with reason `not_in_room`.
+  It needs `SYNC_SERVICE_INTERNAL_URL` and `INTERNAL_API_TOKEN` (the same settings as the result broadcast).
+- **`StubPermissionLookupService`** is an in-memory stub, used only when the `stub-permissions`
+  Spring profile is active (`SPRING_PROFILES_ACTIVE=stub-permissions`). It returns `can_run: true` for every
+  session that is not one of the well-known test session IDs (`OBSERVER_SESSION_ID`, `REVOKED_SESSION_ID`,
+  `HOST_ONLY_SESSION_ID`, `NOT_IN_ROOM_SESSION_ID`). The unit tests and the integration stack in
+  `docker-compose.yml` select it, because the older run scripts use made-up rooms and sessions. To run the
+  integration stack with the real lookup: `EXECUTION_SPRING_PROFILES= bash tests/integration/up.sh`.
 
 ---
 
@@ -139,6 +146,71 @@ The execution service uses the Docker daemon of the machine on which it runs. Do
 
 ---
 
+## US-10 execution metrics
+
+The real Docker runner reports measurements from the trusted supervisor inside
+the container; it does not use `FakeCodeRunner` values.
+
+### Execution time measurement
+- `execution_time_ms` uses Python's `time.monotonic_ns()` measured by the supervisor
+  immediately before the user process is spawned until that process exits.
+- It strictly measures the run stage and excludes queue waiting, Docker daemon
+  interaction, container spin-up, workspace creation, and cleanup.
+- Repeatability: Because container boot overhead is excluded, repeated executions
+  of deterministic code produce consistent execution times within small variance margins.
+
+### Peak memory measurement & high-water marks
+- `peak_memory_mb` is read from genuine kernel high-water marks:
+  1. cgroup v2: `/sys/fs/cgroup/memory.peak` (modern Docker on Linux/WSL2).
+  2. cgroup v1: `/sys/fs/cgroup/memory/memory.max_usage_in_bytes` (legacy hosts).
+  3. Fallback: `resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss * 1024`
+     (Linux child-process maximum resident set size across its lifetime).
+- High-water mark integrity: Instantaneous counters (`memory.current` or
+  `memory.usage_in_bytes`) are intentionally avoided because reading them after
+  process exit misses the true peak if the program deallocated memory before termination.
+  The high-water mark preserves the true maximum allocation regardless of later deallocation.
+
+### Peak-memory scope & supervisor overhead
+- **Measurement Boundary:** The cgroup high-water mark encompasses all processes
+  in the container cgroup: the supervisor process (`collab-sandbox-runner`) and the
+  submitted user process (plus any subprocesses spawned by user code).
+- **Justification for Cgroup Scope:**
+  1. *Resource Limit Alignment:* Container memory limits (`--memory=128m`) and
+     kernel OOM decisions are enforced at the cgroup boundary. Measuring at the cgroup
+     level accurately reports how close the workload was to triggering an OOM kill.
+  2. *Multi-Process Support:* If submitted code spawns worker processes or helper
+     tools, process-specific RSS (`ru_maxrss`) only reports the largest single child,
+     whereas cgroup statistics accurately aggregate concurrent process memory.
+  3. *Supervisor Overhead & Impact:* The supervisor is an idle Python process waiting
+     on `child.wait()`. Its resident memory footprint is static and minimal (~8-12 MB).
+     The reported `peak_memory_mb` therefore reflects the container's peak memory
+     including this ~8-12 MB runtime baseline.
+  4. *Fallback Scope:* In environments where cgroups are unavailable or when tested
+     with `COLLAB_SANDBOX_FORCE_RUSAGE=1`, the fallback uses `ru_maxrss`, which isolates
+     the submitted child process's peak RSS specifically (0 MB supervisor overhead).
+
+### Failed runs and OOM handling
+- Run timing and peak memory are recorded for successful runs, non-zero exits,
+  syntax errors (`compile_error`), timeouts, and OOM kills.
+- **OOM kills:** the supervisor raises the child's `oom_score_adj` to 1000, which biases the
+  kernel's OOM victim selection toward the submitted process and away from the supervisor.
+  This is a bias, not a guarantee: the kernel chooses the victim by its own scoring, so the
+  supervisor could still be killed in rare cases. The supervisor cannot lower its own score
+  because the container drops `CAP_SYS_RESOURCE`. When the supervisor survives, it records the
+  real monotonic execution time and cgroup peak reached before the kill. If the container
+  ended before the metrics file was written (for example the supervisor was killed),
+  `execution_time_ms` and `peak_memory_mb` report `0.0` (unavailable) rather than a made-up
+  value.
+- **Timeouts:** the clock stops when the wall-time limit fires, so a timed-out run reports
+  about the configured limit; the short SIGTERM-to-SIGKILL grace period is not counted.
+- Python has no separate compile stage, so `compile_time_ms` remains `null`;
+  `execution_time_ms` is still populated for syntax errors because the Python
+  interpreter must start and parse the submitted file.
+
+The response/UI contract is unchanged. `RunOutputPanel` already renders the
+exit outcome and the time/memory metrics in a metadata row separate from
+stdout/stderr; no `RunPanel.tsx` changes are needed for this story.
+
 ## How to run locally
 
 ### 1. Build the runtime image
@@ -146,7 +218,7 @@ The execution service uses the Docker daemon of the machine on which it runs. Do
 From the repository root, build the Python runtime image using the Dockerfile maintained in this repository:
 
 ```bash
-docker build -t collab-sandbox-python:0.1.0 execution-service/runtime-images/python
+docker build -t collab-sandbox-python:0.2.0 execution-service/runtime-images/python
 ```
 
 The execution service expects this image tag when running Python code. Build the image again whenever its Dockerfile changes.
@@ -246,7 +318,7 @@ curl -i -X POST http://localhost:8082/v1/runs \
 Build the Python image once (from the repository root) and run the end-to-end tests:
 
 ```bash
-docker build -t collab-sandbox-python:0.1.0 execution-service/runtime-images/python
+docker build -t collab-sandbox-python:0.2.0 execution-service/runtime-images/python
 cd execution-service
 ./mvnw -Dtest=RunControllerUS08DockerTest test       # Windows PowerShell: .\mvnw.cmd "-Dtest=RunControllerUS08DockerTest" test
 ```
@@ -323,8 +395,59 @@ Retry-After: 5
 ```
 
 > **Important (FR16 v2):** repeated runs, including those triggered by
-> automated batch features, count toward the same limit and receive the same
-> refusal. Never add a second gate or bypass this one.
+> automated batch features via `POST /internal/runs`, count toward the same
+> limit and receive the same refusal. Never add a second gate or bypass this one.
+
+---
+
+## Repeated-run budget & internal run endpoint (NFR14, CR10, US-64, T-18 Decision 7)
+
+Features that perform multiple runs (complexity measurement, generated-test batches,
+sanitizer checks) request executions through `POST /internal/runs` authenticated with
+`X-Internal-Token: ${INTERNAL_API_TOKEN}`. Internal runs are **never** broadcast as
+user-visible `run-result` messages.
+
+### How it works
+
+- Each `POST /internal/runs` request gets its own per-request `RunBudget` instance
+  from `RunBudgetFactory` (never a global counter).
+- Before starting the next run, `RunBudget` checks both configured limits:
+  1. Runs-per-request cap (`app.execution.limits.max-runs-per-request`)
+  2. Aggregate execution time budget (`app.execution.limits.aggregate-time-budget-ms`)
+- Every accepted run goes through the **same** `RunQueueGate` (FR16, US-11) and the
+  **same** `CodeRunner` (per-run 5 s wall-clock limit, 128 MB memory limit, container
+  isolation — NFR3, NFR4).
+- When either limit is reached, the next run is refused before starting a container with
+  HTTP `429 Too Many Requests`, `Retry-After` header, and `RUN_BUDGET_EXCEEDED`. Any runs
+  already completed before the limit was hit are preserved on the budget/exception and not lost.
+
+### Configuration (`application.yml`, DR3)
+
+| Key                                               | Default | Notes                                                          |
+|---------------------------------------------------|---------|----------------------------------------------------------------|
+| `app.execution.limits.aggregate-time-budget-ms`   | `20000` | Per-request aggregate wall-clock budget (ms, NFR14)            |
+| `app.execution.limits.max-runs-per-request`       | `10`    | Maximum number of runs allowed per repeated-run request (NFR14)|
+| `app.execution.limits.budget-retry-after-seconds` | `30`    | Sent in `Retry-After` and `error.retry_after_seconds` on 429   |
+
+### `RUN_BUDGET_EXCEEDED` error shape (`docs/examples/v2-error-run-budget-exceeded.json`)
+
+```http
+HTTP 429 Too Many Requests
+Retry-After: 30
+
+{
+  "request_id": "<uuid echoed from request>",
+  "error": {
+    "code": "RUN_BUDGET_EXCEEDED",
+    "message": "Aggregate repeated-run execution budget of 20000ms exceeded (NFR14).",
+    "reason": "aggregate_time_budget",
+    "retry_after_seconds": 30
+  }
+}
+```
+
+`error.reason` is `"aggregate_time_budget"` when the aggregate time budget is hit, or
+`"max_runs_per_request"` when the runs-per-request cap is hit.
 
 ---
 
@@ -396,7 +519,7 @@ Hardening options such as rootless Docker or a Docker socket proxy are not part 
 Build the image once (from the repository root), then run the isolation tests:
 
 ```bash
-docker build -t collab-sandbox-python:0.1.0 execution-service/runtime-images/python
+docker build -t collab-sandbox-python:0.2.0 execution-service/runtime-images/python
 cd execution-service
 ./mvnw -Dtest=DockerRunnerTest,DockerRunnerIsolationTest test      # mvnw.cmd on Windows
 ```
@@ -432,6 +555,9 @@ They are **never hard-coded** in Java source (DR3). To tune limits per host or e
 | `max-request-body-bytes`   | 1 048 576     | T-06 §2 / DR5| Maximum size of a single run request body (1 MiB).                   |
 | `max-queue-length`         | 10            | FR16 / US-11 | Max concurrent and waiting runs before refusing new runs with 503.   |
 | `queue-retry-after-seconds`| 5             | FR16 / US-11 | Seconds sent in `Retry-After` header and error body on queue full.   |
+| `aggregate-time-budget-ms` | 20 000        | NFR14 / US-64| Aggregate wall-clock time budget per repeated-run request (ms).      |
+| `max-runs-per-request`     | 10            | NFR14 / US-64| Maximum runs allowed per repeated-run request.                       |
+| `budget-retry-after-seconds`| 30           | NFR14 / US-64| Seconds sent in `Retry-After` header and error body on 429 budget hit.|
 
 > **Per-Host Configuration (DR3 / US-16):**
 > Every limit listed above is configurable per deployment host via environment variables

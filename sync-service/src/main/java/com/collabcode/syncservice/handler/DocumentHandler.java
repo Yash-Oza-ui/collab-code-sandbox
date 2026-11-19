@@ -47,11 +47,17 @@ import java.util.regex.Pattern;
  *     </ul>
  *   </li>
  *   <li>Checks edit permission (CR13) by inspecting only the first two bytes of
- *       each binary frame without parsing the document:
+ *       each binary frame without parsing the document. A frame is classified as
+ *       <em>not</em> a change only when it is one of the three known read-only shapes;
+ *       every other shape is treated as a possible change (see
+ *       {@link #isDocumentChange(byte[])}):
  *     <ul>
- *       <li>Byte 0 == {@code 0}: Yjs sync message.</li>
- *       <li>Byte 1 == {@code 1} (step 2) or {@code 2} (update): carries document changes.</li>
- *       <li>Byte 1 == {@code 0} (step 1): state vector exchange / request for state (read-only).</li>
+ *       <li>Byte 0 == {@code 1} (awareness) or {@code 3} (query awareness): read-only.</li>
+ *       <li>Bytes {@code 0, 0} (sync step 1): state vector exchange / request for state (read-only).</li>
+ *       <li>Bytes {@code 0, 1} (step 2) or {@code 0, 2} (update): carry document changes.</li>
+ *       <li>Anything else (an unknown message type, an unknown sync sub-type, or a
+ *           first byte of {@code 0x80} or more, which Yjs reads as a longer encoding of a
+ *           number) is treated as a possible change.</li>
  *       <li>If the sending member's {@code canEdit} flag is false, the frame is
  *           dropped and an {@code edit-rejected} text frame is sent on the
  *           <em>control</em> channel with the T-17 reason ({@code no_edit_access},
@@ -113,6 +119,9 @@ public class DocumentHandler extends AbstractWebSocketHandler {
     /** Yjs message type: awareness (1). */
     public static final byte AWARENESS_BYTE = 1;
 
+    /** Yjs message type: query awareness (3). */
+    public static final byte QUERY_AWARENESS_BYTE = 3;
+
     /** Maximum binary frame size: 1 MiB (contract section 3.5 rule 3). */
     private static final int MAX_BINARY_BYTES = 1024 * 1024;
 
@@ -150,11 +159,20 @@ public class DocumentHandler extends AbstractWebSocketHandler {
      */
     private final RoomRegistry controlRegistry;
 
+    /**
+     * Whether the per-edit write-permission check is DISABLED for this handler.
+     * {@code true} only when the {@code loadtest} Spring profile is active and
+     * {@code app.loadtest.edit-check-disabled=true} (wired in {@code WebSocketConfig}),
+     * for the T-22 CR13 baseline. {@code false} everywhere else, including
+     * production — the check cannot be bypassed without the isolated load-test profile.
+     */
+    private final boolean editCheckDisabled;
+
     public DocumentHandler(RoomStore roomStore,
                            RoomService roomService,
                            ModuleService moduleService,
                            RoomRegistry registry) {
-        this(roomStore, roomService, moduleService, registry, registry, new ObjectMapper());
+        this(roomStore, roomService, moduleService, registry, registry, new ObjectMapper(), false);
     }
 
     public DocumentHandler(RoomStore roomStore,
@@ -162,7 +180,7 @@ public class DocumentHandler extends AbstractWebSocketHandler {
                            ModuleService moduleService,
                            RoomRegistry registry,
                            ObjectMapper objectMapper) {
-        this(roomStore, roomService, moduleService, registry, registry, objectMapper);
+        this(roomStore, roomService, moduleService, registry, registry, objectMapper, false);
     }
 
     public DocumentHandler(RoomStore roomStore,
@@ -170,13 +188,15 @@ public class DocumentHandler extends AbstractWebSocketHandler {
                            ModuleService moduleService,
                            RoomRegistry registry,
                            RoomRegistry controlRegistry,
-                           ObjectMapper objectMapper) {
+                           ObjectMapper objectMapper,
+                           boolean editCheckDisabled) {
         this.roomStore = roomStore;
         this.roomService = roomService;
         this.moduleService = moduleService;
         this.registry = registry;
         this.controlRegistry = controlRegistry != null ? controlRegistry : registry;
         this.objectMapper = objectMapper != null ? objectMapper : new ObjectMapper();
+        this.editCheckDisabled = editCheckDisabled;
     }
 
     // -----------------------------------------------------------------------
@@ -310,7 +330,7 @@ public class DocumentHandler extends AbstractWebSocketHandler {
 
         // --- Edit permission check (CR13) ---
         // Inspect only the first two bytes; never parse the document content.
-        if (isDocumentChange(bytes)) {
+        if (!editCheckDisabled && isDocumentChange(bytes)) {
             String clientSessionId = (String) session.getAttributes().get(ATTR_SESSION_ID);
             Member member = roomService.findMemberBySession(roomId, clientSessionId);
 
@@ -366,23 +386,41 @@ public class DocumentHandler extends AbstractWebSocketHandler {
     // -----------------------------------------------------------------------
 
     /**
-     * Returns {@code true} if the first two bytes of the frame identify it as a
-     * Yjs document change (sync step-2 or update), without parsing the document (CR13).
+     * Returns {@code true} if a frame may change the document, deciding from the first two
+     * bytes only and never parsing the document (CR13).
      *
-     * <p>Contract reference: docs/api-contracts.md section V2.12:
+     * <p>The relay cannot parse the frame, but the receiving Yjs code can: it reads the
+     * message type and the sync sub-type as variable-length numbers
+     * ({@code decoding.readVarUint}), and that encoding is not unique. A modified client can
+     * write the sync type 0 as {@code 0x80 0x00} and the update sub-type 2 as {@code 0x82 0x00};
+     * receivers apply that frame as a normal update even though its first bytes are not
+     * {@code 0, 2}. A check that only looks for the canonical bytes {@code 0, 1} and {@code 0, 2}
+     * would forward such a frame. So the check is a short allow-list of frames that are
+     * read-only in every decoder, and everything else counts as a possible change:
      * <ul>
-     *   <li>Byte 0 = 0, Byte 1 = 0: Sync step 1 (state request) — forwarded (NOT a change)</li>
-     *   <li>Byte 0 = 0, Byte 1 = 1: Sync step 2 (missing updates) — carries document changes</li>
-     *   <li>Byte 0 = 0, Byte 1 = 2: Sync update (incremental update) — carries document changes</li>
-     *   <li>Byte 0 = 1: Awareness — forwarded (NOT a document change)</li>
-     *   <li>Byte 0 = 3: Query awareness — forwarded (NOT a document change)</li>
+     *   <li>Byte 0 = 1: Awareness, forwarded (not a document change)</li>
+     *   <li>Byte 0 = 3: Query awareness, forwarded (not a document change)</li>
+     *   <li>Bytes 0, 0: Sync step 1 (state request), forwarded (not a document change)</li>
+     *   <li>Bytes 0, 1 and 0, 2: Sync step 2 and update, carry document changes</li>
+     *   <li>Any other first byte, and any other second byte after a sync first byte (an unknown
+     *       type or sub-type, or a value of {@code 0x80} or more that starts a longer encoding),
+     *       are treated as a possible change</li>
      * </ul>
+     * A frame that is empty, or a lone {@code 0} byte, carries nothing a receiver can apply and
+     * returns {@code false}. Contract reference: docs/api-contracts.md section V2.12.
      */
     public static boolean isDocumentChange(byte[] bytes) {
-        if (bytes == null || bytes.length < 2) {
+        if (bytes == null || bytes.length == 0) {
             return false;
         }
-        return bytes[0] == YJS_SYNC && (bytes[1] == YJS_SYNC_STEP2 || bytes[1] == YJS_SYNC_UPDATE);
+        byte first = bytes[0];
+        if (first == AWARENESS_BYTE || first == QUERY_AWARENESS_BYTE) {
+            return false;
+        }
+        if (first == YJS_SYNC) {
+            return bytes.length >= 2 && bytes[1] != YJS_SYNC_STEP1;
+        }
+        return true;
     }
 
     /**

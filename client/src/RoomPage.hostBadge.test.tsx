@@ -122,6 +122,7 @@ describe('RoomPage Host indicator and owner token (T-10, FR9.5)', () => {
     FakeSocket.rosterMembers = null
     FakeSocket.instances = []
     vi.stubGlobal('localStorage', makeStorage())
+    sessionStorage.clear() // Each test starts without a previously joined browser tab.
     originalPathname = window.location.pathname
     window.history.replaceState({}, '', `/room/${ROOM_ID}`)
   })
