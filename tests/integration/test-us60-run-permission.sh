@@ -53,7 +53,7 @@ fi
 export INTERNAL_API_TOKEN="${INTERNAL_API_TOKEN:-}"
 
 # Real run-refusal checks only when the stack runs the real lookup (variable set to empty).
-if [ "${EXECUTION_SPRING_PROFILES:-}" != "stub-permissions" ]; then
+if [ "${EXECUTION_SPRING_PROFILES-stub-permissions}" != "stub-permissions" ]; then
   export US60_CHECK_RUN=1
   export EXECUTION_API_URL="${EXECUTION_API_URL:-$(service_url execution-service)}"
 fi
