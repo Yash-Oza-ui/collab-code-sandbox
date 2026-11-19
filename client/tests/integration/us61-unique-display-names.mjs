@@ -97,15 +97,25 @@ async function main() {
 
   // Race two genuinely distinct sessions for one name: exactly one wins.
   const raceRoom = await createRoom()
-  const raceA = await connect(raceRoom.room_id, randomUUID())
-  const raceB = await connect(raceRoom.room_id, randomUUID())
+  const raceSessionA = randomUUID()
+  const raceSessionB = randomUUID()
+  const raceA = await connect(raceRoom.room_id, raceSessionA)
+  const raceB = await connect(raceRoom.room_id, raceSessionB)
   const [a, b] = await Promise.all([join(raceA, 'Grace'), join(raceB, 'grace')])
   assert.equal([a, b].filter(m => m.type === 'joined').length, 1)
   assert.equal([a, b].filter(m => m.reason === 'NAME_TAKEN').length, 1)
 
-  const winner = a.type === 'joined' ? raceA : raceB
+  // A racing join's roster broadcast can overlap the refused socket closing.
+  // Query the stable winner identity on a fresh tab, rather than assuming the
+  // first socket receives a broadcast at a particular point in the race.
+  const winnerSession = a.type === 'joined' ? raceSessionA : raceSessionB
+  const winnerName = a.type === 'joined' ? 'Grace' : 'grace'
+  const winnerTab = await connect(raceRoom.room_id, winnerSession)
+  const winnerRejoin = await join(winnerTab, winnerName)
+  assert.equal(winnerRejoin.type, 'joined')
+  assert.equal(winnerRejoin.member_id, (a.type === 'joined' ? a : b).member_id)
   const finalRoster = await waitFor(() =>
-    winner.messages.filter(m => m.type === 'roster').at(-1), 'race roster'
+    winnerTab.messages.filter(m => m.type === 'roster').at(-1), 'race roster after rejoin'
   )
   assert.equal(finalRoster.members.length, 1)
   console.log('US-61 integration: PASS (duplicate, case, same-session tabs, retry, race, roster)')
