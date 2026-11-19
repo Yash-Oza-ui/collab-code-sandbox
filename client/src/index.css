@@ -392,3 +392,58 @@ body {
   margin-bottom: 0.5rem;
   font-size: 0.85rem;
 }
+
+/* US-03: Remote collaborator cursor labels */
+.remote-cursor-label {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.5;
+  white-space: nowrap;
+  vertical-align: middle;
+  pointer-events: none;
+}
+
+.remote-cursor-label-0 {
+  background-color: #e11d48;
+}
+
+.remote-cursor-label-1 {
+  background-color: #2563eb;
+}
+
+.remote-cursor-label-2 {
+  background-color: #16a34a;
+}
+
+.remote-cursor-label-3 {
+  background-color: #d97706;
+}
+
+.remote-cursor-label-4 {
+  background-color: #7c3aed;
+}
+
+.remote-cursor-label-5 {
+  background-color: #0891b2;
+}
+
+.remote-cursor-label-6 {
+  background-color: #ea580c;
+}
+
+.remote-cursor-label-7 {
+  background-color: #4f46e5;
+}
+
+.remote-cursor-label-8 {
+  background-color: #059669;
+}
+
+.remote-cursor-label-9 {
+  background-color: #c026d3;
+}

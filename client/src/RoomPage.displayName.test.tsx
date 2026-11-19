@@ -2,14 +2,48 @@
 import { act } from 'react'
 import type { RefObject } from 'react'
 import { createRoot } from 'react-dom/client'
-import type { Awareness } from 'y-protocols/awareness'
-import type * as Y from 'yjs'
+import {
+  Awareness,
+  applyAwarenessUpdate,
+  encodeAwarenessUpdate,
+} from 'y-protocols/awareness'
+import * as Y from 'yjs'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import RoomPage from './RoomPage'
 import { USER_COLORS } from './userColor'
 
+const mockDeltaDecorations = vi.hoisted(() =>
+  vi.fn((_oldDecorations: string[], newDecorations: unknown[]) => {
+    return newDecorations.map((_, index) => `decoration-${index}`)
+  }),
+)
+
 vi.mock('@monaco-editor/react', () => ({
-  default: () => <div data-testid="mock-monaco-editor" />,
+  default: ({
+    onMount,
+  }: {
+    onMount?: (editor: unknown) => void
+  }) => {
+    const editor = {
+      updateOptions: vi.fn(),
+      getModel: () => ({
+        getPositionAt: (index: number) => ({
+          lineNumber: 1,
+          column: index + 1,
+        }),
+      }),
+      deltaDecorations: mockDeltaDecorations,
+    }
+
+    return (
+      <div
+        data-testid="mock-monaco-editor"
+        ref={(element) => {
+          if (element && onMount) onMount(editor)
+        }}
+      />
+    )
+  },
 }))
 
 vi.mock('y-monaco', () => ({
@@ -256,6 +290,20 @@ class RelaySocket {
     this.dispatchEvent('message', ev)
   }
 
+  receiveRoster(members: RelayMember[]) {
+    this.receiveText(
+      JSON.stringify({
+        type: 'roster',
+        members: members.map((member) => ({
+          member_id: member.sessionId,
+          display_name: member.displayName,
+          role: 'Participant',
+          permissions: { can_edit: true, can_run: true },
+        })),
+      }),
+    )
+  }
+
   receiveBinary(data: Uint8Array) {
     if (this.readyState !== 1) return
     const buf = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength)
@@ -280,6 +328,21 @@ function createRelaySocketClass(relay: T20Relay, autoOpen?: boolean): typeof Web
       super(url, relay, autoOpen ?? relay.autoOpen)
     }
   } as unknown as typeof WebSocket
+}
+
+function getControlSocket(
+  relay: T20Relay,
+  roomId: string,
+): RelaySocket {
+  const socket = Array.from(relay.controlSockets.entries()).find(
+    ([, meta]) => meta.roomId === roomId,
+  )?.[0]
+
+  if (!socket) {
+    throw new Error(`Control socket not found for room: ${roomId}`)
+  }
+
+  return socket
 }
 
 describe('RoomPage display-name and colour presence join lifecycle', () => {
@@ -1186,6 +1249,137 @@ describe('RoomPage display-name and colour presence join lifecycle', () => {
       await act(async () => {
         root.unmount()
       })
+      container.remove()
+    }
+  })
+})
+
+describe('US-03 live cursor and presence', () => {
+  it('shows remote presence and uses the server roster role instead of forged awareness role', async () => {
+    const relay = new T20Relay()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+
+    const docRef: RefObject<Y.Doc | null> = { current: null }
+    const awarenessRef: RefObject<Awareness | null> = { current: null }
+    const remoteDoc = new Y.Doc()
+    const remoteAwareness = new Awareness(remoteDoc)
+
+    window.history.replaceState({}, '', '/room/room-demo')
+    mockDeltaDecorations.mockClear()
+
+    try {
+      await act(async () => {
+        root.render(
+          <RoomPage
+            docRef={docRef}
+            awarenessRef={awarenessRef}
+            wsOptions={{
+              WebSocketClass: createRelaySocketClass(relay),
+              sessionId: '88888888-8888-4888-8888-888888888888',
+            }}
+          />,
+        )
+      })
+
+      const input = container.querySelector<HTMLInputElement>('#display-name')!
+      const form = container.querySelector<HTMLFormElement>('form')!
+
+      await act(async () => {
+        input.value = 'Alice'
+        form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+      })
+
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 45))
+      })
+
+      expect(docRef.current).not.toBeNull()
+      expect(awarenessRef.current).not.toBeNull()
+
+      // Simulate the server roster containing Alice and Bob.
+      await act(async () => {
+        getControlSocket(relay, 'room-demo').receiveRoster([
+          {
+            sessionId: '88888888-8888-4888-8888-888888888888',
+            displayName: 'Alice',
+          },
+          {
+            sessionId: '99999999-9999-4999-9999-999999999999',
+            displayName: 'Bob',
+          },
+        ])
+      })
+
+      // Bob advertises a forged Host role in awareness.
+      // The displayed role must still come from the server roster.
+      const ytext = docRef.current!.getText('monaco')
+      remoteAwareness.setLocalState({
+        user: { name: 'Bob', color: USER_COLORS[1] },
+        role: 'Host',
+        selection: {
+          head: Y.createRelativePositionFromTypeIndex(ytext, 0),
+        },
+      })
+
+      await act(async () => {
+        applyAwarenessUpdate(
+          awarenessRef.current!,
+          encodeAwarenessUpdate(remoteAwareness, [remoteAwareness.clientID]),
+          'test',
+        )
+      })
+
+      expect(container.textContent).toContain('Active now (2)')
+      expect(container.textContent).toContain('Bob')
+      expect(container.textContent).toContain('participant')
+
+      const decorationCalls = mockDeltaDecorations.mock.calls
+      const allDecorations = decorationCalls.flatMap((call) => call[1])
+      expect(JSON.stringify(allDecorations)).toContain('Bob')
+      expect(JSON.stringify(allDecorations)).toContain('participant')
+      expect(JSON.stringify(allDecorations)).toContain('remote-cursor-label-1')
+      expect(JSON.stringify(allDecorations)).not.toContain('host')
+      // Simulate the server changing Bob's role to Observer.
+      await act(async () => {
+        getControlSocket(relay, 'room-demo').receiveText(
+          JSON.stringify({
+            type: 'roster',
+            members: [
+              {
+                member_id: '88888888-8888-4888-8888-888888888888',
+                display_name: 'Alice',
+                role: 'Participant',
+                permissions: { can_edit: true, can_run: true },
+              },
+              {
+                member_id: '99999999-9999-4999-9999-999999999999',
+                display_name: 'Bob',
+                role: 'Observer',
+                permissions: { can_edit: false, can_run: false },
+              },
+            ],
+          }),
+        )
+      })
+
+      expect(container.textContent).toContain('observer')
+
+      const latestDecorations =
+        mockDeltaDecorations.mock.calls[
+          mockDeltaDecorations.mock.calls.length - 1
+        ]?.[1]
+
+      expect(JSON.stringify(latestDecorations)).toContain('observer')
+    } finally {
+      remoteAwareness.destroy()
+      remoteDoc.destroy()
+
+      await act(async () => {
+        root.unmount()
+      })
+
       container.remove()
     }
   })

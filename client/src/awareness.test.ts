@@ -1,4 +1,8 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+import {
+  applyAwarenessUpdate,
+  encodeAwarenessUpdate,
+} from 'y-protocols/awareness'
 import * as Y from 'yjs'
 import {
   createAwareness,
@@ -54,6 +58,52 @@ describe('awareness', () => {
       awareness.destroy()
     } finally {
       doc.destroy()
+    }
+  })
+  it('removes a remote collaborator after 30 seconds without awareness updates', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+
+    const aliceDoc = new Y.Doc()
+    const bobDoc = new Y.Doc()
+    const aliceAwareness = createAwareness(aliceDoc)
+    const bobAwareness = createAwareness(bobDoc)
+
+    try {
+      bobAwareness.setLocalState({
+        user: { name: 'Bob', color: '#2563eb' },
+      })
+
+      const bobClientID = bobAwareness.clientID
+      const removedClients: number[] = []
+
+      aliceAwareness.on('change', ({ removed }: { removed: number[] }) => {
+        removedClients.push(...removed)
+      })
+
+      applyAwarenessUpdate(
+        aliceAwareness,
+        encodeAwarenessUpdate(bobAwareness, [bobClientID]),
+        'test',
+      )
+
+      expect(aliceAwareness.getStates().has(bobClientID)).toBe(true)
+
+      // Simulate Bob's last awareness update being 31 seconds old.
+      const bobMeta = aliceAwareness.meta.get(bobClientID)
+      expect(bobMeta).toBeDefined()
+
+      bobMeta!.lastUpdated = Date.now() - 31_000
+
+      await vi.advanceTimersByTimeAsync(3_000)
+
+      expect(aliceAwareness.getStates().has(bobClientID)).toBe(false)
+      expect(removedClients).toContain(bobClientID)
+    } finally {
+      aliceAwareness.destroy()
+      bobAwareness.destroy()
+      aliceDoc.destroy()
+      bobDoc.destroy()
+      vi.useRealTimers()
     }
   })
 })

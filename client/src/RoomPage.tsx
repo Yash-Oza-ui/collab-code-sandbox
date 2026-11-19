@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { RefObject } from 'react'
 import type { editor as MonacoEditor } from 'monaco-editor'
 import type { Awareness } from 'y-protocols/awareness'
-import type * as Y from 'yjs'
+import * as Y from 'yjs'
 import Editor from '@monaco-editor/react'
 import { MonacoBinding } from 'y-monaco'
 import DisplayNamePrompt from './DisplayNamePrompt'
@@ -26,7 +26,7 @@ import { getRoomIdFromPath } from './roomId'
 import { useRoomDoc } from './roomDoc'
 import { parseRunResultFrame } from './runCode'
 import type { RunResponseData, SupportedLanguage } from './runCode'
-import { pickUserColor } from './userColor'
+import { pickUserColor, USER_COLORS } from './userColor'
 import { config } from './config'
 
 export interface RoomPageProps {
@@ -94,6 +94,10 @@ export default function RoomPage(props: RoomPageProps = {}) {
   const [role, setRole] = useState<string | null>(null)
   const [myMemberId, setMyMemberId] = useState<string | null>(null)
   const [roster, setRoster] = useState<RosterMember[]>([])
+  const rosterRef = useRef<RosterMember[]>([])
+  const [activePresence, setActivePresence] = useState<
+    Array<{ member: RosterMember; color: string }>
+  >([])
   const [roleChangeError, setRoleChangeError] = useState<string | null>(null)
   const [changingRoleFor, setChangingRoleFor] = useState<string | null>(null)
   const isObserver = role?.toLowerCase() === 'observer'
@@ -108,10 +112,107 @@ export default function RoomPage(props: RoomPageProps = {}) {
   const onDisplayNameAcceptedRef = useRef(onDisplayNameAccepted)
   const bindingRef = useRef<MonacoBinding | null>(null)
   const editorRef = useRef<MonacoEditor.IStandaloneCodeEditor | null>(null)
+  const remoteCursorDecorationsRef = useRef<string[]>([])
   const sessionIdRef = useRef<string | null>(null)
   // request_ids already shown: a result can arrive twice (own HTTP response and the room frame), first one wins
   const shownRunIdsRef = useRef<string[]>([])
   const myMemberIdRef = useRef<string | null>(null)
+
+  const renderRemoteCursorLabels = useCallback(() => {
+    const editor = editorRef.current
+    const doc = docRef.current
+    const awareness = awarenessInstanceRef.current
+    const model = editor?.getModel()
+
+    if (!editor || !doc || !awareness || !model) return
+
+    const ytext = doc.getText('monaco')
+    const decorations: MonacoEditor.IModelDeltaDecoration[] = []
+
+    awareness.getStates().forEach((state, clientID) => {
+      if (clientID === awareness.clientID) return
+
+      const user = (state as AwarenessUserState)?.user
+      const selection = (
+        state as AwarenessUserState & {
+          selection?: { head?: Y.RelativePosition }
+        }
+      ).selection
+
+      if (!user?.name || !user.color || !selection?.head) return
+
+      const member = rosterRef.current.find(
+        (entry) => entry.display_name === user.name,
+      )
+
+      if (!member) return
+
+      const colorIndex = USER_COLORS.findIndex(
+        (color) => color.toLowerCase() === user.color.toLowerCase(),
+      )
+
+      if (colorIndex === -1) return
+
+      const absolutePosition = Y.createAbsolutePositionFromRelativePosition(
+        selection.head,
+        doc,
+      )
+
+      if (!absolutePosition || absolutePosition.type !== ytext) return
+
+      const position = model.getPositionAt(absolutePosition.index)
+
+      decorations.push({
+        range: {
+          startLineNumber: position.lineNumber,
+          startColumn: position.column,
+          endLineNumber: position.lineNumber,
+          endColumn: position.column,
+        },
+        options: {
+          after: {
+            content: ` ${member.display_name} · ${member.role.toLowerCase()}`,
+            inlineClassName: `remote-cursor-label remote-cursor-label-${colorIndex}`,
+          },
+        },
+      })
+    })
+
+    remoteCursorDecorationsRef.current = editor.deltaDecorations(
+      remoteCursorDecorationsRef.current,
+      decorations,
+    )
+  }, [docRef])
+
+  const updateActivePresence = useCallback(() => {
+    const awareness = awarenessInstanceRef.current
+
+    if (!awareness) {
+      setActivePresence([])
+      return
+    }
+
+    const activeMembers: Array<{ member: RosterMember; color: string }> = []
+
+    awareness.getStates().forEach((state) => {
+      const user = (state as AwarenessUserState)?.user
+
+      if (!user?.name || !user.color) return
+
+      const member = rosterRef.current.find(
+        (entry) => entry.display_name === user.name,
+      )
+
+      if (!member) return
+
+      activeMembers.push({
+        member,
+        color: user.color,
+      })
+    })
+
+    setActivePresence(activeMembers)
+  }, [])
 
   const showRunResult = useCallback((data: RunResponseData) => {
     const shown = shownRunIdsRef.current
@@ -182,6 +283,13 @@ export default function RoomPage(props: RoomPageProps = {}) {
 
     awareness.on('change', handleAwarenessChange)
 
+    const handleRemoteCursorChange = () => {
+      renderRemoteCursorLabels()
+      updateActivePresence()
+    }
+
+    awareness.on('change', handleRemoteCursorChange)
+
     // Connect awareness and Yjs document sync to room WebSocket relay if in a room (US-02 / US-05 / T-20)
     let wsCleanup: (() => void) | undefined
     if (roomId) {
@@ -223,7 +331,11 @@ export default function RoomPage(props: RoomPageProps = {}) {
           onDisplayNameAcceptedRef.current?.(name, color)
         },
         onRoster: (roster) => {
-          setRoster(roster.members ?? [])
+          const members = roster.members ?? []
+          rosterRef.current = members
+          setRoster(members)
+          renderRemoteCursorLabels()
+          updateActivePresence()
 
           if (myMemberIdRef.current) {
             const me = roster.members?.find((m) => m.member_id === myMemberIdRef.current)
@@ -321,16 +433,31 @@ export default function RoomPage(props: RoomPageProps = {}) {
 
     return () => {
       awareness.off('change', handleAwarenessChange)
+      awareness.off('change', handleRemoteCursorChange)
+
+      const editor = editorRef.current
+      if (editor && typeof editor.deltaDecorations === 'function') {
+        editor.deltaDecorations(remoteCursorDecorationsRef.current, [])
+      }
+
+      remoteCursorDecorationsRef.current = []
+      setActivePresence([])
+
       wsCleanup?.()
+
       bindingRef.current?.destroy()
       bindingRef.current = null
+
       awareness.destroy()
+
       if (awarenessInstanceRef.current === awareness) {
         awarenessInstanceRef.current = null
       }
+
       if (externalAwarenessRef && externalAwarenessRef.current === awareness) {
         externalAwarenessRef.current = null
       }
+
       if (
         typeof window !== 'undefined' &&
         (window as unknown as { awareness?: Awareness }).awareness === awareness
@@ -338,7 +465,7 @@ export default function RoomPage(props: RoomPageProps = {}) {
         delete (window as unknown as { awareness?: Awareness }).awareness
       }
     }
-  }, [roomId, isInvalidRoomId, docRef, externalAwarenessRef, propDocId, resolveDocId, wsOptions, showRunResult])
+  }, [roomId, isInvalidRoomId, docRef, externalAwarenessRef, propDocId, resolveDocId, wsOptions, showRunResult, renderRemoteCursorLabels, updateActivePresence])
 
   // Keep presence updated in awareness whenever displayName and userColor are set or change
   useEffect(() => {
@@ -547,6 +674,31 @@ export default function RoomPage(props: RoomPageProps = {}) {
           </ul>
         )}
 
+        <div className="active-presence" data-testid="active-presence">
+          <h4>Active now ({activePresence.length})</h4>
+
+          {activePresence.length === 0 ? (
+            <p>No active collaborators.</p>
+          ) : (
+            <ul>
+              {activePresence.map(({ member, color }) => (
+                <li
+                  key={member.member_id}
+                  data-testid={`active-presence-${member.member_id}`}
+                >
+                  <span
+                    aria-hidden="true"
+                    className="active-presence-color"
+                    style={{ backgroundColor: color }}
+                  />
+                  <span>{member.display_name}</span>
+                  <span>{member.role.toLowerCase()}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+
         {roleChangeError && (
           <p role="alert" data-testid="role-change-error">
             {roleChangeError}
@@ -591,6 +743,7 @@ export default function RoomPage(props: RoomPageProps = {}) {
                 )
               }
             }
+            renderRemoteCursorLabels()
           }}
         />
       </div>

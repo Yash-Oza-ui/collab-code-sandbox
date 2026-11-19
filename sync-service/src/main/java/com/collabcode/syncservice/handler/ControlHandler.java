@@ -269,6 +269,26 @@ public class ControlHandler extends AbstractWebSocketHandler {
                 roomId, member.getMemberId(), member.getRole());
     }
 
+    /**
+     * Broadcast the current server-authoritative roster to every control socket
+     * in the room. Called after a successful member role change.
+     */
+    public void broadcastRoster(String roomId) {
+        Room room = roomStore.get(roomId);
+        if (room == null) {
+            return;
+        }
+
+        try {
+            String rosterJson = objectMapper.writeValueAsString(RoomMessages.roster(room));
+            for (WebSocketSession target : registry.getAll(roomId)) {
+                sendText(target, rosterJson);
+            }
+        } catch (Exception e) {
+            log.error("Control: failed to broadcast roster for room={}: {}", roomId, e.getMessage());
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------------
