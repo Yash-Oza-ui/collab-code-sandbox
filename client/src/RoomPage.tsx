@@ -224,7 +224,7 @@ export default function RoomPage(props: RoomPageProps = {}) {
       return
     }
 
-    const activeMembers: Array<{ member: RosterMember; color: string }> = []
+    const seenByMemberId = new Map<string, { member: RosterMember; color: string }>()
 
     awareness.getStates().forEach((state) => {
       const user = (state as AwarenessUserState)?.user
@@ -235,15 +235,15 @@ export default function RoomPage(props: RoomPageProps = {}) {
         (entry) => entry.display_name === user.name,
       )
 
-      if (!member) return
+      if (!member || seenByMemberId.has(member.member_id)) return
 
-      activeMembers.push({
+      seenByMemberId.set(member.member_id, {
         member,
         color: user.color,
       })
     })
 
-    setActivePresence(activeMembers)
+    setActivePresence(Array.from(seenByMemberId.values()))
   }, [])
 
   const showRunResult = useCallback((data: RunResponseData) => {

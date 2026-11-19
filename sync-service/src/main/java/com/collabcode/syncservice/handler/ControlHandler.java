@@ -162,7 +162,7 @@ public class ControlHandler extends AbstractWebSocketHandler {
     @Override
     public void afterConnectionClosed(@NonNull WebSocketSession session,
                                       @NonNull CloseStatus status) {
-        registry.remove(session);
+        handleDisconnect(session);
         log.info("Control: closed wsSession={} room={} status={}",
                 session.getId(), session.getAttributes().get(ATTR_ROOM_ID), status);
     }
@@ -170,8 +170,37 @@ public class ControlHandler extends AbstractWebSocketHandler {
     @Override
     public void handleTransportError(@NonNull WebSocketSession session,
                                      @NonNull Throwable ex) {
-        registry.remove(session);
+        handleDisconnect(session);
         log.warn("Control: transport error wsSession={}: {}", session.getId(), ex.getMessage());
+    }
+
+    private void handleDisconnect(WebSocketSession session) {
+        Object roomIdObj = session.getAttributes().get(ATTR_ROOM_ID);
+        Object sessionIdObj = session.getAttributes().get(ATTR_SESSION_ID);
+        boolean wasJoined = Boolean.TRUE.equals(session.getAttributes().get(ATTR_JOINED));
+
+        registry.remove(session);
+
+        if (!wasJoined || roomIdObj == null || sessionIdObj == null) {
+            return;
+        }
+
+        String roomId = roomIdObj.toString();
+        String clientSessionId = sessionIdObj.toString();
+
+        boolean stillConnectedInAnotherTab = registry
+                .getBySessionIds(roomId, java.util.Collections.singletonList(clientSessionId))
+                .stream()
+                .anyMatch(s -> Boolean.TRUE.equals(s.getAttributes().get(ATTR_JOINED)));
+
+        if (!stillConnectedInAnotherTab) {
+            Member left = roomService.leaveBySessionId(roomId, clientSessionId);
+            if (left != null) {
+                broadcastRoster(roomId);
+                log.info("Control: member left room={} member={} session={}",
+                        roomId, left.getMemberId(), clientSessionId);
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -279,7 +308,7 @@ public class ControlHandler extends AbstractWebSocketHandler {
 
         // 2. Broadcast updated roster to every session in the room (including the new member)
         String rosterJson = objectMapper.writeValueAsString(RoomMessages.roster(room));
-        for (WebSocketSession target : registry.getAll(roomId)) {
+        for (WebSocketSession target : registry.getJoinedControlSessions(roomId)) {
             sendText(target, rosterJson);
         }
 
