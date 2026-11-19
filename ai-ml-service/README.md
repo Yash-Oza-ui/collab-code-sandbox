@@ -236,9 +236,7 @@ For all earlier runs in the room sharing the same `input_hash`, `ai-ml-service` 
    $$\text{MAD} = \text{median}(|x_i - \tilde{x}|)$$
 3. **Statistical Outlier Threshold:**
    $$T_{\text{threshold}} = \tilde{x} + k \cdot \text{MAD}$$
-   where $k$ defaults to `3.0` per contract §16.2 (configurable via `SLOWDOWN_OUTLIER_THRESHOLD`).
-4. **Modified Z-Score Formulation (Boris Iglewicz and David Hoaglin, 1993):**
-   $$\text{modified\_z} = 0.6745 \times \frac{T_{\text{curr}} - \tilde{x}}{\text{MAD}}$$
+   where $k$ defaults to `3.0` per contract §16.2 (configurable via `SLOWDOWN_OUTLIER_THRESHOLD` with `SLOWDOWN_MODIFIED_Z_THRESHOLD` retained as a backward-compatible alias).
 
 ### Dual Flagging Criteria (Regression Decision)
 A run is flagged as a performance slowdown (`is_slowdown: true`) if and only if **BOTH** of the following independent criteria hold (§16.2):

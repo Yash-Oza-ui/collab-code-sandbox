@@ -7,6 +7,7 @@ an empirical Median and Median Absolute Deviation (MAD) baseline.
 
 import logging
 import math
+import re
 import threading
 import time
 from typing import Any, Literal, Optional
@@ -62,6 +63,9 @@ class SlowdownCurrentRun(BaseModel):
         return v
 
 
+_SHA256_HEX_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+
+
 class SlowdownAnalysisRequest(BaseModel):
     """Payload for POST /v1/analyses/slowdown conforming to T-18 v2 contract."""
 
@@ -78,9 +82,9 @@ class SlowdownAnalysisRequest(BaseModel):
     @field_validator("input_hash")
     @classmethod
     def validate_input_hash(cls, v: str) -> str:
-        if not v or not isinstance(v, str) or not v.strip():
-            raise ValueError("input_hash must be a non-empty string")
-        return v
+        if not isinstance(v, str) or not _SHA256_HEX_RE.fullmatch(v.strip()):
+            raise ValueError("input_hash must be a 64-character hexadecimal SHA-256 digest")
+        return v.strip().lower()
 
     @field_validator("room_id")
     @classmethod
@@ -158,9 +162,18 @@ class SlowdownStore:
         self._lock = threading.Lock()
         # Structure: {room_id: {input_hash: [ {"execution_time_ms": float, "peak_memory_mb": float, "timestamp": float}, ... ]}}
         self._rooms: dict[str, dict[str, list[dict[str, Any]]]] = {}
+        self._key_locks: dict[tuple[str, str], threading.Lock] = {}
         self._max_history = max_history_per_hash or getattr(
             settings, "SLOWDOWN_MAX_HISTORY", 100
         )
+
+    def get_lock(self, room_id: str, input_hash: str) -> threading.Lock:
+        """Return the threading.Lock for a specific (room_id, input_hash) pair."""
+        with self._lock:
+            key = (room_id, input_hash)
+            if key not in self._key_locks:
+                self._key_locks[key] = threading.Lock()
+            return self._key_locks[key]
 
     def get_history(self, room_id: str, input_hash: str) -> list[dict[str, Any]]:
         """Return a shallow copy of previous measurements for this room and input hash."""
@@ -195,13 +208,17 @@ class SlowdownStore:
                 history.pop(0)
 
     def clear_room(self, room_id: str) -> bool:
-        """Purge all measurements for a specific room. Idempotent."""
+        """Purge all measurements and key locks for a specific room. Idempotent."""
         with self._lock:
+            self._key_locks = {
+                k: v for k, v in self._key_locks.items() if k[0] != room_id
+            }
             return self._rooms.pop(room_id, None) is not None
 
     def clear_all(self) -> None:
         """Clear all room measurements across the service (used for test teardown)."""
         with self._lock:
+            self._key_locks.clear()
             self._rooms.clear()
 
 
@@ -255,43 +272,6 @@ def calculate_baseline(
     abs_deviations = [abs(t - median_val) for t in valid_times]
     mad_val = float(np.median(abs_deviations))
     return median_val, mad_val, len(valid_times), abs_deviations
-
-
-def compute_modified_z_score(
-    current_runtime: float,
-    median: float,
-    mad: float,
-    abs_deviations: list[float],
-) -> float:
-    """Compute modified z-score using Boris Iglewicz and David Hoaglin (1993) formulation:
-
-        modified_z = 0.6745 * (current_runtime - median) / MAD
-
-    Safe handling of MAD = 0:
-    - If current_runtime <= median: returns 0.0 (no upward outlier).
-    - If current_runtime > median and MAD == 0:
-      - If mean absolute deviation (mean_ad) > 0: uses mean_ad in place of MAD:
-            modified_z = 0.6745 * (current_runtime - median) / mean_ad
-      - If mean_ad == 0 (all historical baseline runs are identical):
-        historical variance is zero, so any execution exceeding the median is
-        statistically anomalous. Returns float("inf") so that Condition 1
-        (modified_z > z_threshold) is satisfied without division by zero.
-        Condition 2 (current_runtime >= factor_threshold * median) still governs
-        whether it represents a severe fold slowdown, completely preventing false alarms.
-    """
-    if current_runtime <= median:
-        return 0.0
-
-    if mad > 0.0:
-        return 0.6745 * (current_runtime - median) / mad
-
-    # MAD is 0.0: check mean absolute deviation
-    mean_ad = float(np.mean(abs_deviations)) if abs_deviations else 0.0
-    if mean_ad > 0.0:
-        return 0.6745 * (current_runtime - median) / mean_ad
-
-    # All baseline runs are identical: non-zero increase has infinite modified z-score
-    return float("inf")
 
 
 # ============================================================================
@@ -458,17 +438,84 @@ def detect_slowdown(
     if store is None:
         store = get_slowdown_store()
 
-    earlier_runs = store.get_history(room_id, input_hash)
-    baseline_median, baseline_mad, sample_count, abs_devs = calculate_baseline(earlier_runs)
+    with store.get_lock(room_id, input_hash):
+        earlier_runs = store.get_history(room_id, input_hash)
+        baseline_median, baseline_mad, sample_count, abs_devs = calculate_baseline(earlier_runs)
 
-    # 1. Check if history is sufficient
-    if sample_count < min_samples:
-        # Record current run into history as a normal baseline point
-        store.record_measurement(room_id, input_hash, execution_time_ms, peak_memory_mb)
-        all_runs = store.get_history(room_id, input_hash)
-        new_median, new_mad, new_count, _ = calculate_baseline(all_runs)
+        # 1. Check if history is sufficient
+        if sample_count < min_samples:
+            # Record current run into history as a normal baseline point
+            store.record_measurement(room_id, input_hash, execution_time_ms, peak_memory_mb)
+            all_runs = store.get_history(room_id, input_hash)
+            new_median, new_mad, new_count, _ = calculate_baseline(all_runs)
 
-        # AI step representation when baseline is establishing (§16.2 Example 3)
+            # AI step representation when baseline is establishing (§16.2 Example 3)
+            if consent is False or consent is None:
+                ai_step = SlowdownAIStep(
+                    status="skipped",
+                    error_code="CONSENT_MISSING",
+                    explanation=None,
+                )
+            elif ai_enabled is False:
+                ai_step = SlowdownAIStep(
+                    status="skipped",
+                    error_code="AI_DISABLED",
+                    explanation=None,
+                )
+            else:
+                ai_step = SlowdownAIStep(
+                    status="skipped",
+                    error_code=None,
+                    explanation=None,
+                )
+
+            return {
+                "is_slowdown": False,
+                "slowdown_factor": 1.0,
+                "baseline": BaselineMetrics(
+                    median_ms=round(new_median, 1),
+                    mad_ms=round(new_mad, 1),
+                    sample_count=new_count,
+                ),
+                "changed_lines": [],
+                "message": f"Recorded run measurements. Baseline establishing ({new_count} of {min_samples} minimum samples collected).",
+                "ai_step": ai_step,
+            }
+
+        # 2. Baseline is established (sample_count >= min_samples)
+        if baseline_median > 0.0:
+            raw_factor = execution_time_ms / baseline_median
+        elif execution_time_ms == 0.0:
+            raw_factor = 1.0
+        else:
+            # baseline_median is 0.0 ms, runtime > 0.0 ms.
+            # Use timer resolution floor (1.0 ms) as effective baseline denominator
+            # to prevent division by zero, ensure finite JSON serialization, and prevent
+            # false alarms on insignificant sub-millisecond executions.
+            raw_factor = execution_time_ms / 1.0
+
+        slowdown_factor = round(raw_factor, 2)
+
+        # Condition 1: Statistical Outlier (contract §16.2: T_curr > median + outlier_threshold * MAD)
+        if execution_time_ms <= baseline_median:
+            condition_1_outlier = False
+        elif baseline_mad > 0.0:
+            condition_1_outlier = execution_time_ms > (baseline_median + outlier_threshold * baseline_mad)
+        else:
+            # Safe handling of MAD = 0
+            mean_ad = float(np.mean(abs_devs)) if abs_devs else 0.0
+            if mean_ad > 0.0:
+                condition_1_outlier = execution_time_ms > (baseline_median + outlier_threshold * mean_ad)
+            else:
+                # Baseline samples are completely identical: any non-zero increase is statistically anomalous
+                condition_1_outlier = True
+
+        # Condition 2: Severe Fold Slowdown (contract §16.2: slowdown_factor >= factor_threshold)
+        condition_2_severe = raw_factor >= factor_threshold
+
+        is_slowdown = bool(condition_1_outlier and condition_2_severe)
+
+        # 3. Base AI step envelope (evaluated further in router if regression detected)
         if consent is False or consent is None:
             ai_step = SlowdownAIStep(
                 status="skipped",
@@ -483,93 +530,33 @@ def detect_slowdown(
             )
         else:
             ai_step = SlowdownAIStep(
-                status="skipped",
+                status="ok",
                 error_code=None,
                 explanation=None,
             )
 
+        # 4. Message and storage update
+        if is_slowdown:
+            # Abnormal run is NOT recorded into normal baseline history to avoid baseline poisoning
+            display_factor = round(raw_factor, 1)
+            message = f"Execution runtime was {display_factor}x slower than normal baseline."
+        else:
+            # Normal run is recorded into the historical baseline
+            store.record_measurement(room_id, input_hash, execution_time_ms, peak_memory_mb)
+            message = "Execution runtime is within normal parameters."
+
         return {
-            "is_slowdown": False,
-            "slowdown_factor": 1.0,
+            "is_slowdown": is_slowdown,
+            "slowdown_factor": slowdown_factor,
             "baseline": BaselineMetrics(
-                median_ms=round(new_median, 1),
-                mad_ms=round(new_mad, 1),
-                sample_count=new_count,
+                median_ms=round(baseline_median, 1),
+                mad_ms=round(baseline_mad, 1),
+                sample_count=sample_count,
             ),
             "changed_lines": [],
-            "message": f"Recorded run measurements. Baseline establishing ({new_count} of {min_samples} minimum samples collected).",
+            "message": message,
             "ai_step": ai_step,
         }
-
-    # 2. Baseline is established (sample_count >= min_samples)
-    if baseline_median > 0.0:
-        raw_factor = execution_time_ms / baseline_median
-    else:
-        raw_factor = 1.0 if execution_time_ms == 0.0 else float("inf")
-
-    slowdown_factor = round(raw_factor, 2)
-
-    # Condition 1: Statistical Outlier (contract §16.2: T_curr > median + outlier_threshold * MAD)
-    if execution_time_ms <= baseline_median:
-        condition_1_outlier = False
-    elif baseline_mad > 0.0:
-        condition_1_outlier = execution_time_ms > (baseline_median + outlier_threshold * baseline_mad)
-    else:
-        # Safe handling of MAD = 0
-        mean_ad = float(np.mean(abs_devs)) if abs_devs else 0.0
-        if mean_ad > 0.0:
-            condition_1_outlier = execution_time_ms > (baseline_median + outlier_threshold * mean_ad)
-        else:
-            # Baseline samples are completely identical: any non-zero increase is statistically anomalous
-            condition_1_outlier = True
-
-    # Condition 2: Severe Fold Slowdown (contract §16.2: slowdown_factor >= factor_threshold)
-    condition_2_severe = raw_factor >= factor_threshold
-
-    is_slowdown = bool(condition_1_outlier and condition_2_severe)
-
-    # 3. Base AI step envelope (evaluated further in router if regression detected)
-    if consent is False or consent is None:
-        ai_step = SlowdownAIStep(
-            status="skipped",
-            error_code="CONSENT_MISSING",
-            explanation=None,
-        )
-    elif ai_enabled is False:
-        ai_step = SlowdownAIStep(
-            status="skipped",
-            error_code="AI_DISABLED",
-            explanation=None,
-        )
-    else:
-        ai_step = SlowdownAIStep(
-            status="ok",
-            error_code=None,
-            explanation=None,
-        )
-
-    # 4. Message and storage update
-    if is_slowdown:
-        # Abnormal run is NOT recorded into normal baseline history to avoid baseline poisoning
-        display_factor = round(raw_factor, 1)
-        message = f"Execution runtime was {display_factor}x slower than normal baseline."
-    else:
-        # Normal run is recorded into the historical baseline
-        store.record_measurement(room_id, input_hash, execution_time_ms, peak_memory_mb)
-        message = "Execution runtime is within normal parameters."
-
-    return {
-        "is_slowdown": is_slowdown,
-        "slowdown_factor": slowdown_factor,
-        "baseline": BaselineMetrics(
-            median_ms=round(baseline_median, 1),
-            mad_ms=round(baseline_mad, 1),
-            sample_count=sample_count,
-        ),
-        "changed_lines": [],
-        "message": message,
-        "ai_step": ai_step,
-    }
 
 
 async def generate_slowdown_explanation(
@@ -626,11 +613,17 @@ async def generate_slowdown_explanation(
     )
 
     # Cache lookup (NFR5.2, Decision 11)
+    cache_context = {
+        "execution_time_ms": round(execution_time_ms, 1),
+        "baseline_median_ms": round(baseline_median_ms, 1),
+        "slowdown_factor": round(slowdown_factor, 1),
+    }
     cache_key = compute_cache_key(
         code=relevant_code,
         language=language,
         request_type="slowdown",
         error_signature=f"slowdown:{round(slowdown_factor, 1)}",
+        cache_context=cache_context,
     )
     cache = get_analysis_cache()
     cached = cache.get(cache_key, room_id=room_id)

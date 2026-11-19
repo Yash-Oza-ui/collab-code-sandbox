@@ -226,7 +226,7 @@ def test_integration_privacy_logging(caplog):
             "language": "python",
             "consent": True,
             "ai_enabled": True,
-            "input_hash": "hash-log-safe-abc",
+            "input_hash": "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
             "current_run": {
                 "execution_time_ms": 120.0,
                 "peak_memory_mb": 14.0,
@@ -253,7 +253,7 @@ def test_integration_dynamic_threshold_overrides():
     """Verify factor_threshold, z_threshold, and min_samples can be overridden via headers/query."""
     client = TestClient(app)
     room_id = "room-dynamic-thresh"
-    input_hash = "hash-dynamic-thresh"
+    input_hash = "b1c2d3e4f5a60718293a4b5c6d7e8f90b1c2d3e4f5a60718293a4b5c6d7e8f90"
 
     # Pre-populate with 2 runs
     for _ in range(2):
@@ -307,7 +307,7 @@ def test_integration_invalid_threshold_overrides_return_422():
     """Verify endpoint rejects min_samples=0, negative, and non-finite overrides with 422 INVALID_REQUEST."""
     client = TestClient(app)
     room_id = "room-integ-invalid"
-    input_hash = "hash-integ-invalid"
+    input_hash = "c1d2e3f4a5b60718293a4b5c6d7e8f90c1d2e3f4a5b60718293a4b5c6d7e8f90"
 
     payload = {
         "request_id": "test-inv-ovr",
