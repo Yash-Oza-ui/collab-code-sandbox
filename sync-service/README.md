@@ -48,6 +48,8 @@ Both sockets require `session_id` to be a valid UUID v4 query parameter.
 |--------|------|-------------|
 | `POST` | `/v1/rooms` | Create a room — returns `room_id`, `owner_token`, `mode`, `preset`, `language` |
 | `GET` | `/v1/rooms/{id}/owner` | Validate the owner token (T-10) |
+| `PATCH` | `/v1/rooms/{room_id}/members/{member_id}/run-permission` | Host only: take Run away from a participant or give it back, body `{"can_run": false}` (US-60, V2.20) |
+| `PATCH` | `/v1/rooms/{room_id}/run-policy` | Host only: switch Host-only running on or off, body `{"host_only_run": true}` (US-60, V2.20) |
 | `GET` | `/internal/rooms/{room_id}/sessions/{session_id}` | Session lookup for execution-service (requires `X-Internal-Token`) |
 | `POST` | `/internal/rooms/{room_id}/messages` | Broadcast or deliver targeted JSON messages to control sockets and record `run-result` entries (requires `X-Internal-Token`) |
 | `GET` | `/internal/rooms/{room_id}/runs` | Read stored run records for a room, optionally filtered by `input_hash`, newest first (requires `X-Internal-Token`, FR29 / US-52 / US-68) |
@@ -109,7 +111,7 @@ Host includes `"owner_token"`:
 
 **`joined`** — sent to the joining session on success:
 ```json
-{ "type": "joined", "member_id": "m_...", "role": "host", "mode": "pair", "preset": "teach_interview", "permissions": { "can_edit": true, "can_run": true } }
+{ "type": "joined", "member_id": "m_...", "role": "host", "mode": "pair", "preset": "teach_interview", "permissions": { "can_edit": true, "can_run": true, "run_denied_reason": null } }
 ```
 
 **`join-refused`** — e.g. NAME_TAKEN:
@@ -119,8 +121,9 @@ Host includes `"owner_token"`:
 
 **`roster`** — broadcast to all sessions in the room after every join:
 ```json
-{ "type": "roster", "members": [ { "member_id": "m_...", "display_name": "Alice", "role": "host", "permissions": { "can_edit": true, "can_run": true } } ] }
+{ "type": "roster", "members": [ { "member_id": "m_...", "display_name": "Alice", "role": "host", "permissions": { "can_edit": true, "can_run": true, "run_denied_reason": null } } ], "host_only_run": false }
 ```
+`can_run` is the effective answer (the same one the session lookup gives) and `run_denied_reason` is `observer`, `run_revoked`, `host_only` or `null` (US-60, V2.20). The roster is sent again whenever the Host changes who can run.
 
 **`edit-rejected`** — sent to a session that attempted a document change without write permission:
 ```json
@@ -279,6 +282,7 @@ Used by `execution-service` on every run request to authenticate the caller, det
     "ai_enabled": true
   }
   ```
+- **`can_run` / `run_denied_reason` (US-60, V2.20)**: the effective answer, read fresh on every call (execution-service never caches it). `run_denied_reason` is `observer`, `run_revoked` (the Host took Run away) or `host_only` (Host-only running is on), in that order when several apply; the Host can always run. The rule lives in `Room.runDeniedReason`.
 - **Error Codes**:
   - `401 Unauthorized` (`UNAUTHORIZED`): Missing or invalid `X-Internal-Token`.
   - `404 Not Found` (`ROOM_NOT_FOUND`): Room does not exist.
