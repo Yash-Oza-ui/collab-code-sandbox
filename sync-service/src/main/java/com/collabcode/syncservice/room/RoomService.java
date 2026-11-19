@@ -4,9 +4,11 @@ import com.collabcode.syncservice.run.RunRecordStore;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
+import java.text.Normalizer;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 
 /**
  * Join and roster logic (T-17 V2.3, V2.4; FR42).
@@ -64,7 +66,8 @@ public class RoomService {
             return JoinOutcome.refused("APPROVAL_PENDING");
         }
 
-        // A display name already used by a DIFFERENT session is refused (FR42).
+        // FR42: uniqueness is case-insensitive, across different sessions only.
+        // Normalize Unicode compatibility characters before comparing names.
         if (findByName(room, displayName) != null) {
             return JoinOutcome.refused("NAME_TAKEN");
         }
@@ -289,11 +292,21 @@ public class RoomService {
 
     private Member findByName(Room room, String displayName) {
         for (Member m : room.getMembers().values()) {
-            if (m.getDisplayName().equals(displayName)) {
+            if (nameKey(m.getDisplayName()).equals(nameKey(displayName))) {
                 return m;
             }
         }
         return null;
+    }
+
+    /**
+     * Comparison key only: keep the display spelling unchanged in the roster.
+     * Locale-independent case matching also treats full-width Unicode variants
+     * like "Ａｄａ" as the same name as "Ada".
+     */
+    private static String nameKey(String name) {
+        return Normalizer.normalize(name.strip(), Normalizer.Form.NFKC)
+                .toLowerCase(Locale.ROOT);
     }
 
     /**
