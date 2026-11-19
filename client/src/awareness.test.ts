@@ -61,6 +61,7 @@ describe('awareness', () => {
       doc.destroy()
     }
   })
+
   it('removes a remote collaborator after 30 seconds without awareness updates', async () => {
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
 
@@ -157,5 +158,50 @@ describe('awareness', () => {
       awareness.destroy()
       doc.destroy()
     }
-  })})
+  })
+
+  it('ignores forged awareness names/roles and projects authoritative roster names by member_id', () => {
+    const doc = new Y.Doc()
+    const localAwareness = createAwareness(doc)
+    const remoteClientId = localAwareness.clientID + 1
+
+    localAwareness.getStates().set(remoteClientId, {
+      user: {
+        name: 'Spoofed Host',
+        color: '#2563eb',
+        member_id: 'm_obs',
+        role: 'HOST',
+      },
+    })
+
+    applyRosterNamesToAwareness(localAwareness, [
+      { member_id: 'm_obs', display_name: 'Real Observer' },
+    ])
+
+    const projected = localAwareness.getStates().get(remoteClientId) as {
+      user?: { name?: string; member_id?: string; role?: string }
+    }
+    expect(projected.user?.name).toBe('Real Observer')
+    expect(projected.user?.member_id).toBe('m_obs')
+
+    // Unknown/forged member_id must not display the claimed name
+    localAwareness.getStates().set(remoteClientId, {
+      user: {
+        name: 'Fake Admin',
+        color: '#e11d48',
+        member_id: 'm_forged',
+      },
+    })
+
+    applyRosterNamesToAwareness(localAwareness, [
+      { member_id: 'm_obs', display_name: 'Real Observer' },
+    ])
+
+    const unknownProjected = localAwareness.getStates().get(remoteClientId) as {
+      user?: { name?: string }
+    }
+    expect(unknownProjected.user?.name).toBe('Unknown participant')
+    doc.destroy()
+  })
+})
 
