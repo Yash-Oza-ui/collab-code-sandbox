@@ -228,6 +228,192 @@ class DockerRunnerIsolationTest {
         assertTrue(listContainers(prefix, true).isEmpty());
     }
 
+    // ---------------------------------------------------------------------
+    // US-12 Sandbox Isolation (NFR3.1 - NFR3.4)
+    // ---------------------------------------------------------------------
+
+    @Test
+    void codeRunsAsNonRootUser() throws Exception {
+        String prefix = uniquePrefix();
+        Set<String> names = ConcurrentHashMap.newKeySet();
+        DockerRunner runner = runnerWithPrefix(prefix, names, 15);
+
+        ExecutionResult result = runner.execute(python(
+                "import os, sys\n"
+                        + "uid = os.getuid()\n"
+                        + "gid = os.getgid()\n"
+                        + "if uid == 0:\n"
+                        + "    print('ROOT USER')\n"
+                        + "    sys.exit(2)\n"
+                        + "print(f'NON_ROOT uid={uid} gid={gid}')\n"));
+
+        assertEquals(0, result.getExitCode());
+        assertTrue(result.getStdout().contains("NON_ROOT"));
+        assertTrue(result.getStdout().contains("uid=1001"));
+        assertFalse(result.getStdout().contains("ROOT USER"));
+        assertTrue(listContainers(prefix, true).isEmpty());
+    }
+
+    @Test
+    void codeDirectoryIsMountedReadOnly() throws Exception {
+        String prefix = uniquePrefix();
+        Set<String> names = ConcurrentHashMap.newKeySet();
+        DockerRunner runner = runnerWithPrefix(prefix, names, 15);
+
+        ExecutionResult result = runner.execute(python(
+                "import sys\n"
+                        + "for path in ['/sandbox/code/evil.txt', 'evil.txt']:\n"
+                        + "    try:\n"
+                        + "        with open(path, 'w') as f:\n"
+                        + "            f.write('untrusted')\n"
+                        + "        print('WRITE_SUCCEEDED')\n"
+                        + "        sys.exit(2)\n"
+                        + "    except OSError:\n"
+                        + "        pass\n"
+                        + "print('WRITE_BLOCKED')\n"
+                        + "sys.exit(1)\n"));
+
+        assertEquals(1, result.getExitCode());
+        assertEquals("WRITE_BLOCKED", result.getStdout().trim());
+        assertTrue(listContainers(prefix, true).isEmpty());
+    }
+
+    @Test
+    void rootFilesystemIsReadOnly() throws Exception {
+        String prefix = uniquePrefix();
+        Set<String> names = ConcurrentHashMap.newKeySet();
+        DockerRunner runner = runnerWithPrefix(prefix, names, 15);
+
+        ExecutionResult result = runner.execute(python(
+                "import sys\n"
+                        + "try:\n"
+                        + "    with open('/etc/evil.conf', 'w') as f:\n"
+                        + "        f.write('untrusted')\n"
+                        + "    print('ROOT_WRITABLE')\n"
+                        + "    sys.exit(2)\n"
+                        + "except OSError:\n"
+                        + "    print('ROOT_READ_ONLY')\n"
+                        + "    sys.exit(0)\n"));
+
+        assertEquals(0, result.getExitCode());
+        assertEquals("ROOT_READ_ONLY", result.getStdout().trim());
+        assertTrue(listContainers(prefix, true).isEmpty());
+    }
+
+    @Test
+    void concurrentRunsCannotSeeEachOthersFiles() throws Exception {
+        String prefix = uniquePrefix();
+        Set<String> names = ConcurrentHashMap.newKeySet();
+        DockerRunner runner = runnerWithPrefix(prefix, names, 20);
+
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            // Run 1 writes a secret into its private /tmp and pauses
+            Future<ExecutionResult> run1 = pool.submit(() -> runner.execute(python(
+                    "import time\n"
+                            + "with open('/tmp/secret_token.txt', 'w') as f:\n"
+                            + "    f.write('super_secret_run1')\n"
+                            + "time.sleep(3)\n"
+                            + "print('RUN1_DONE')\n")));
+
+            // Small delay so Run 1 starts and writes before Run 2 checks
+            Thread.sleep(1000);
+
+            // Run 2 checks if Run 1's file is visible in its /tmp
+            Future<ExecutionResult> run2 = pool.submit(() -> runner.execute(python(
+                    "import os\n"
+                            + "if os.path.exists('/tmp/secret_token.txt'):\n"
+                            + "    print('FOUND_OTHER_RUN_FILE')\n"
+                            + "else:\n"
+                            + "    print('OTHER_RUN_FILE_NOT_FOUND')\n")));
+
+            ExecutionResult res1 = run1.get(15, TimeUnit.SECONDS);
+            ExecutionResult res2 = run2.get(15, TimeUnit.SECONDS);
+
+            assertEquals(0, res1.getExitCode());
+            assertEquals(0, res2.getExitCode());
+            assertEquals("RUN1_DONE", res1.getStdout().trim());
+            assertEquals("OTHER_RUN_FILE_NOT_FOUND", res2.getStdout().trim(),
+                    "Concurrent runs must not share /tmp or see each other's data");
+        } finally {
+            pool.shutdownNow();
+        }
+
+        assertEquals(2, names.size(), "Two concurrent runs must use two different containers");
+        assertTrue(listContainers(prefix, true).isEmpty(), "No containers left behind");
+    }
+
+    @Test
+    void runCannotAccessHostFiles() throws Exception {
+        String prefix = uniquePrefix();
+        Set<String> names = ConcurrentHashMap.newKeySet();
+        DockerRunner runner = runnerWithPrefix(prefix, names, 15);
+
+        ExecutionResult result = runner.execute(python(
+                "import os, sys\n"
+                        + "leak = False\n"
+                        + "for path in ['/var/run/docker.sock', '/host', '/host_root']:\n"
+                        + "    if os.path.exists(path):\n"
+                        + "        leak = True\n"
+                        + "for sensitive in ['/etc/shadow', '/root/.ssh']:\n"
+                        + "    if os.path.exists(sensitive):\n"
+                        + "        try:\n"
+                        + "            with open(sensitive, 'rb') as f:\n"
+                        + "                f.read(1)\n"
+                        + "            leak = True\n"
+                        + "        except OSError:\n"
+                        + "            pass\n"
+                        + "if leak:\n"
+                        + "    print('HOST_LEAK')\n"
+                        + "    sys.exit(2)\n"
+                        + "print('HOST_ISOLATED')\n"
+                        + "sys.exit(0)\n"));
+
+        assertEquals(0, result.getExitCode());
+        assertEquals("HOST_ISOLATED", result.getStdout().trim());
+        assertTrue(listContainers(prefix, true).isEmpty());
+    }
+
+    @Test
+    void isolationSettingsEnforcedBySingleFunction() {
+        ExecutionLimitsProperties limits = new ExecutionLimitsProperties();
+        limits.setWallTimeSeconds(5);
+        limits.setMemoryMb(128);
+        limits.setPidsLimit(64);
+        limits.setMaxOutputBytes(1024 * 1024);
+        limits.setCompileTimeoutSeconds(10);
+        limits.setMaxRequestBodyBytes(1024 * 1024);
+
+        DockerRunner runner = new DockerRunner(limits);
+        Path ws = Path.of("/tmp/test-ws");
+        Path metrics = Path.of("/tmp/test-metrics");
+
+        ProcessBuilder pb = runner.buildIsolatedContainerProcess(
+                "test-cont",
+                ws,
+                metrics,
+                "collab-sandbox-python:0.2.0",
+                List.of("python", "main.py")
+        );
+
+        List<String> cmd = pb.command();
+        assertTrue(cmd.contains("--network"));
+        int netIdx = cmd.indexOf("--network");
+        assertEquals("none", cmd.get(netIdx + 1), "NFR3.1: Must use --network none");
+
+        assertTrue(cmd.contains("--cap-drop=ALL"), "NFR3.2: Must drop capabilities");
+        assertTrue(cmd.contains("--security-opt=no-new-privileges"), "NFR3.2: Must disable new privileges");
+        assertTrue(cmd.contains("--user"), "NFR3.2: Must specify user");
+
+        assertTrue(cmd.contains("--read-only"), "NFR3.3: Must have read-only root");
+        assertTrue(cmd.stream().anyMatch(s -> s.contains("/sandbox/code,readonly")),
+                "NFR3.3: Code mount must be readonly");
+        assertTrue(cmd.stream().anyMatch(s -> s.contains("/tmp:rw,noexec,nosuid")),
+                "NFR3.3: Scratch tmpfs must have noexec,nosuid");
+        assertTrue(cmd.contains("--memory"), "NFR4: Memory limit required");
+        assertTrue(cmd.contains("--pids-limit"), "NFR4: Pids limit required");
+    }
+
     @Test
     void workspaceDirectoryIsRemovedAfterRun() throws Exception {
         Set<String> before = workspaceEntries();
