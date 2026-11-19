@@ -939,12 +939,31 @@ export function connectAwarenessWs(
   const join = (name: string, token?: string) => {
     if (isDestroyed) return
 
-    // Prevent duplicate join attempts while a request is already queued or active
-    if (activeHandshake) {
-      return
-    }
-    activeHandshake = { name, token }
+    // Prevent duplicate join attempts while a request is already queued or active.
+    if (activeHandshake) return
 
+    // V2.3 closes the control socket after join-refused. A retry must never
+    // send another join on that refused socket, even if its close event is
+    // still in flight. Reset terminal state only for an explicit user retry.
+    if (terminal) {
+      terminal = false
+      reconnecting = false
+      clearReconnectTimer()
+      closeDocumentSocket()
+      const refusedSocket = controlWs
+      controlWs = null
+      if (refusedSocket) {
+        refusedSocket.onopen = null
+        refusedSocket.onmessage = null
+        refusedSocket.onerror = null
+        refusedSocket.onclose = null
+        if (refusedSocket.readyState === WS_OPEN || refusedSocket.readyState === WS_CONNECTING) {
+          refusedSocket.close()
+        }
+      }
+    }
+
+    activeHandshake = { name, token }
     const activeControlWs = controlWs
     if (!activeControlWs || activeControlWs.readyState === WS_CLOSED || activeControlWs.readyState === WS_CLOSING) {
       // Reconnect with a fresh WebSocket attempt

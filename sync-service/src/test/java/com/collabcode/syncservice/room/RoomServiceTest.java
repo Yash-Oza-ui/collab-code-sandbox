@@ -5,6 +5,11 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -137,4 +142,70 @@ class RoomServiceTest {
         assertThat(members).allSatisfy(m ->
                 assertThat(m).containsKey("member_id").doesNotContainKey("session_id"));
     }
+    @Test
+    void caseVariantsAndUnicodeCompatibilityNames_areTakenAcrossSessions() {
+        Room room = pairRoom("teach_interview", "secret");
+        JoinOutcome first = service.join(room.getRoomId(), "sess-1", "Ada", null);
+
+        for (String variant : List.of("ada", "ADA", "Ａｄａ", " Ada ")) {
+            JoinOutcome duplicate = service.join(room.getRoomId(), "session-" + variant, variant, null);
+            assertThat(duplicate.isJoined()).as("variant %s", variant).isFalse();
+            assertThat(duplicate.getRefusedReason()).isEqualTo("NAME_TAKEN");
+        }
+        assertThat(service.roster(room.getRoomId())).hasSize(1);
+        assertThat(first.getMember().getDisplayName()).isEqualTo("Ada");
+    }
+
+    @Test
+    void sameSessionWithDifferentCasing_keepsOriginalServerRosterName() {
+        Room room = pairRoom("teach_interview", "secret");
+        JoinOutcome first = service.join(room.getRoomId(), "sess-1", "Ada", null);
+        JoinOutcome second = service.join(room.getRoomId(), "sess-1", "ada", null);
+        assertThat(second.isJoined()).isTrue();
+        assertThat(second.getMember().getMemberId()).isEqualTo(first.getMember().getMemberId());
+        assertThat(second.getMember().getDisplayName()).isEqualTo("Ada");
+    }
+
+    @Test
+    void simultaneousJoinsForSameName_admitExactlyOneSession() throws Exception {
+        Room room = pairRoom("teach_interview", "secret");
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        CountDownLatch start = new CountDownLatch(1);
+        try {
+            Future<JoinOutcome> first = pool.submit(() -> {
+                start.await();
+                return service.join(room.getRoomId(), "sess-1", "Grace", null);
+            });
+            Future<JoinOutcome> second = pool.submit(() -> {
+                start.await();
+                return service.join(room.getRoomId(), "sess-2", "grace", null);
+            });
+            start.countDown();
+            JoinOutcome a = first.get(5, TimeUnit.SECONDS);
+            JoinOutcome b = second.get(5, TimeUnit.SECONDS);
+
+            assertThat(List.of(a, b).stream().filter(JoinOutcome::isJoined).count()).isEqualTo(1L);
+            assertThat(List.of(a, b).stream().filter(out -> !out.isJoined())
+                    .map(JoinOutcome::getRefusedReason).toList()).containsExactly("NAME_TAKEN");
+            assertThat(service.roster(room.getRoomId())).hasSize(1);
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    @Test
+    void takenNameIsRejectedEvenWhenRoomRequiresApproval() {
+        Room room = pairRoom("teach_interview", "secret");
+        service.join(room.getRoomId(), "sess-1", "Ada", null);
+        room.setRequiresApproval(true);
+
+        JoinOutcome duplicate = service.join(room.getRoomId(), "sess-2", "ada", null);
+        assertThat(duplicate.isJoined()).isFalse();
+        assertThat(duplicate.getRefusedReason()).isEqualTo("NAME_TAKEN");
+
+        JoinOutcome freshName = service.join(room.getRoomId(), "sess-3", "Lin", null);
+        assertThat(freshName.isJoined()).isFalse();
+        assertThat(freshName.getRefusedReason()).isEqualTo("APPROVAL_PENDING");
+    }
+
 }
