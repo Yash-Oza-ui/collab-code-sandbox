@@ -13,9 +13,18 @@ public class Member {
     private final String memberId;
     private final String sessionId;   // private; never put in roster or any broadcast
     private final String displayName;
-    private Role role;
-    private boolean canEdit;
-    private boolean canRun;
+    // Read by WebSocket threads on every frame and written by REST calls (role change,
+    // Host transfer, Run permission), so a change must be visible to the next frame without
+    // locking.
+    private volatile Role role;
+    private volatile boolean canEdit;
+    /**
+     * The member's own Run grant (US-60, V2.20). {@code false} means the Host took
+     * Run away (FR41.2), or the member is an Observer. It is not the effective
+     * permission: Host-only running and the Host's own right are applied by
+     * {@link Room#canRun(Member)}, which is what every reader must use.
+     */
+    private volatile boolean canRun;
 
     public Member(String memberId, String sessionId, String displayName,
                   Role role, boolean canEdit, boolean canRun) {

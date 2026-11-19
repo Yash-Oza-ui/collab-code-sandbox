@@ -44,7 +44,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class DockerRunnerIsolationTest {
 
-    private static final String IMAGE = "collab-sandbox-python:0.1.0";
+    private static final String IMAGE = "collab-sandbox-python:0.2.0";
     private static final Path WORKSPACE_ROOT = Path.of("/tmp/collab-code-workspaces");
 
     @BeforeAll

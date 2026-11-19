@@ -170,6 +170,8 @@ export interface RunErrorEnvelope {
   error?: {
     code?: string
     message?: string
+    /** Only on RUN_NOT_ALLOWED: observer, run_revoked, host_only or not_in_room (V2.12). */
+    reason?: string
     details?: unknown
     retry_after_seconds?: number
   }
@@ -181,6 +183,8 @@ export type RunResult =
       ok: false
       error: string
       code?: string
+      /** Why a run was refused (RUN_NOT_ALLOWED only). */
+      reason?: string
       retryAfterSeconds?: number
       status?: number
     }
@@ -197,6 +201,26 @@ export interface ExecuteRunOptions {
   timeoutMs?: number
   /** Optional external abort signal to cancel execution */
   signal?: AbortSignal
+}
+
+/**
+ * Plain words for a refused run (FR41.4, V2.12). The reason decides the text, so the
+ * user always learns why; the server's own message is only a fallback for a reason
+ * this client does not know.
+ */
+export function runNotAllowedMessage(reason?: string, serverMessage?: string): string {
+  switch (reason) {
+    case 'observer':
+      return 'Observers cannot run code.'
+    case 'run_revoked':
+      return 'The Host has turned off running for you.'
+    case 'host_only':
+      return 'Only the Host can run code in this room right now.'
+    case 'not_in_room':
+      return 'You are not in this room.'
+    default:
+      return serverMessage || 'You do not have permission to run code in this room.'
+  }
 }
 
 export interface ExpectedRunContext {
@@ -520,6 +544,7 @@ export async function executeRun(options: ExecuteRunOptions): Promise<RunResult>
       const code = errorData?.error?.code
       const msg = errorData?.error?.message
       const retryAfter = errorData?.error?.retry_after_seconds
+      const reason = typeof errorData?.error?.reason === 'string' ? errorData.error.reason : undefined
 
       let friendlyMessage = msg || `Execution failed with HTTP status ${response.status}.`
       if (code === 'QUEUE_FULL') {
@@ -527,13 +552,14 @@ export async function executeRun(options: ExecuteRunOptions): Promise<RunResult>
       } else if (code === 'UNSUPPORTED_LANGUAGE') {
         friendlyMessage = `Language "${language}" is not supported by the runner.`
       } else if (code === 'RUN_NOT_ALLOWED') {
-        friendlyMessage = msg || 'You do not have permission to run code in this room.'
+        friendlyMessage = runNotAllowedMessage(reason, msg)
       }
 
       return {
         ok: false,
         error: friendlyMessage,
         code,
+        reason,
         retryAfterSeconds: retryAfter,
         status: response.status,
       }
