@@ -458,7 +458,9 @@ The cost cap is controlled via service environment variables:
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `MONTHLY_BUDGET_USD` | `10.0` | Maximum monthly budget in USD for external AI provider calls (NFR7.2). |
+| `MONTHLY_BUDGET_USD` | `10.0` | Maximum monthly budget in USD for external AI provider calls (NFR7.2). Must be a finite positive number (`> 0.0`). Zero, negative values, and non-finite floats (`inf`, `nan`) are rejected at startup and configuration time (fail-closed). |
+| `AI_MAX_TOKENS_PER_REQUEST` | `4096` | Canonical maximum tokens the AI may generate per request (FR40.4). Drives both provider request payload parameters (`maxOutputTokens` / `max_tokens`) and admission reservation token estimates. Must be positive. |
+| `LLM_MAX_OUTPUT_TOKENS` | `4096` | Backward-compatible legacy alias for `AI_MAX_TOKENS_PER_REQUEST`. If both are provided and differ, `AI_MAX_TOKENS_PER_REQUEST` takes precedence with a startup warning. |
 | `TOKEN_COST_PER_TOKEN` | `0.0000035` | Price in USD per consumed token (Gemini 1.5 Flash reference rate: $0.0035 / 1K tokens). |
 | `ALERT_WEBHOOK_URL` | `None` | Optional HTTPS webhook URL for external alert notifications (NFR7.4). |
 
@@ -468,7 +470,7 @@ The cost cap is controlled via service environment variables:
 - **Delivery Mechanism:**
   - A structured warning-level log is always emitted:
     `AI_COST_CAP_ALERT: Monthly external AI spending has reached or exceeded 80% of budget. spend_usd=... budget_usd=... threshold_usd=... month=YYYY-MM`
-  - If `ALERT_WEBHOOK_URL` is configured, an HTTP POST payload is dispatched with metadata.
+  - If `ALERT_WEBHOOK_URL` is configured, an HTTP POST payload is dispatched with metadata asynchronously via a dedicated background thread pool (`ThreadPoolExecutor`). Webhook delivery is completely non-blocking: the usage tracker lock is never held during HTTP I/O, and webhook delays, network timeouts, or external failures cannot stall concurrent FastAPI request handlers or corrupt spending state.
 - **Privacy Guarantee (NFR8.2):** Alerts contain numeric and temporal metadata only (`spend_usd`, `budget_usd`, `threshold_usd`, `month`). Alerts **never** contain source code, stderr, prompts, model responses, or user text.
 
 ### 4. Cost-Cap Enforcement & Skipped AI Steps (NFR7.2, T-18 Decision 10)
@@ -498,6 +500,7 @@ The AI/ML service is never in the critical path of code execution or editing (NF
 
 ### 6. Concurrency Strategy, Overshoot Bound & Operational Limitations
 - **Atomic Reservation Logic:** To prevent multiple concurrent requests from reading a stale spending total and stampeding past the budget cap, `UsageTracker.reserve_call` atomically reserves estimated token headroom under a thread lock before dispatching an outbound request. If active reservations + committed spend reach or exceed the budget, subsequent concurrent requests are immediately blocked with `CostCapReachedError`.
+- **Reservation Lifecycle & Rejection of Automatic TTL Eviction:** Active reservations track in-flight provider calls with deterministic finalization guarantees provided by Python context managers (`with tracker.reserve_call(...)`) and `try...finally` blocks. Automatic time-based expiration (TTL) for reservations was explicitly evaluated and rejected: prematurely expiring an active reservation while an LLM call is still running would falsely open budget headroom, admitting new requests that cause uncontrolled budget overshoots when the original call finishes and reports its usage (violating NFR7.2). Every reservation is guaranteed to finalize (commit, commit uncertain, or release) upon request completion, timeout, cancellation, or error.
 - **Admission Estimate & Overshoot Dynamics:** The reservation is an **admission estimate**, not a strict upper bound. External LLM providers (Google Gemini, OpenAI) bill on **total tokens** (input prompt tokens + output generated tokens) and do not provide a pre-flight token quoting API. Because total tokens include user prompt length, the final overshoot on the single admitted in-flight call is $(\text{actual\_total\_tokens} - \text{reserved\_tokens}) \times \text{TOKEN\_COST\_PER\_TOKEN}$, and is **not strictly bounded** by `maxOutputTokens`. Once this final call commits, all subsequent calls are strictly blocked.
 - **Uncertain Post-Dispatch Outcomes:** Pre-dispatch network failures (e.g. `ConnectError`, `ConnectTimeout`) mean the request never reached the provider and release reservations with zero cost. For uncertain post-dispatch outcomes (e.g. `ReadTimeout`, connection drop while reading response, or client cancellation after transmission), the provider may have executed generation and billed the account; the service employs conservative accounting by committing the reserved tokens to monthly spend so expenditure is never undercounted.
 - **Cross-Month Rollover for In-Flight Calls:** When a UTC month rollover occurs while calls are in flight, active reservations are preserved (not cleared) so they continue holding headroom in the new month. When generation finishes, their spend is attributed to the month in which completion occurs, preventing reservation leaks or orphaned tokens.

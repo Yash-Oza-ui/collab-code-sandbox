@@ -143,25 +143,28 @@ class LLMClient:
         timeout_seconds: Optional[float] = None,
         room_id: Optional[str] = None,
         reservation: Optional[CallReservation] = None,
+        max_tokens: Optional[int] = None,
     ) -> str:
         """Execute outbound HTTP call to LLM provider.
 
         Every outbound call MUST hold an atomic budget reservation (US-24, NFR7.2).
         If caller did not pass an active reservation, one is acquired atomically here.
         """
+        target_max_output = max_tokens or int(
+            getattr(settings, "AI_MAX_TOKENS_PER_REQUEST", getattr(settings, "LLM_MAX_OUTPUT_TOKENS", 4096))
+        )
         local_reservation: Optional[CallReservation] = None
         active_res = reservation
         if active_res is None:
             # Admission estimate (US-24, NFR7.2):
             # Reserve prompt tokens (approximated at 1 token per 4 chars) plus the
-            # configured maximum output tokens (LLM_MAX_OUTPUT_TOKENS, matching the
-            # maxOutputTokens / max_tokens field sent in every request body).
+            # configured maximum output tokens (matching the maxOutputTokens / max_tokens
+            # field sent in every request body).
             # This is an upper-bound estimate; actual spend uses provider-reported tokens.
             # Token estimation is intentionally approximate: prompt tokenisation varies by
             # provider and model, so the final admitted request may still cause a small
             # budget overshoot (US-24 documented limitation).
-            max_output_tokens = int(getattr(settings, "LLM_MAX_OUTPUT_TOKENS", 256))
-            admission_tokens = max(100, (len(prompt) // 4) + max_output_tokens)
+            admission_tokens = max(100, (len(prompt) // 4) + target_max_output)
             local_reservation = reserve_call(estimated_tokens=admission_tokens)
             active_res = local_reservation
 
@@ -174,6 +177,7 @@ class LLMClient:
                 timeout_seconds=timeout_seconds,
                 room_id=room_id,
                 active_res=active_res,
+                max_tokens=target_max_output,
             )
         except asyncio.CancelledError:
             # Cancellation after reservation is an uncertain post-dispatch outcome.
@@ -195,6 +199,7 @@ class LLMClient:
         timeout_seconds: Optional[float],
         room_id: Optional[str],
         active_res: CallReservation,
+        max_tokens: Optional[int] = None,
     ) -> str:
         self.call_count += 1
 
@@ -209,7 +214,9 @@ class LLMClient:
         target_model = model or settings.LLM_MODEL
         target_base_url = base_url or getattr(settings, "LLM_BASE_URL", None)
         timeout = timeout_seconds or getattr(settings, "LLM_TIMEOUT_SECONDS", 10.0)
-        max_output_tokens = int(getattr(settings, "LLM_MAX_OUTPUT_TOKENS", 256))
+        max_output_tokens = max_tokens or int(
+            getattr(settings, "AI_MAX_TOKENS_PER_REQUEST", getattr(settings, "LLM_MAX_OUTPUT_TOKENS", 4096))
+        )
 
         is_gemini = not target_base_url and target_model.lower().startswith("gemini")
 
@@ -389,6 +396,7 @@ async def call_llm_with_consent(
     base_url: Optional[str] = None,
     timeout_seconds: Optional[float] = None,
     room_id: Optional[str] = None,
+    max_tokens: Optional[int] = None,
 ) -> str:
     """Universal consent and Host AI switch gate through which every outbound LLM call must pass (FR12.2, FR12.4, FR35, US-17, US-21).
 
@@ -431,8 +439,10 @@ async def call_llm_with_consent(
     # Admission estimate (US-24, NFR7.2): prompt tokens (~1 token per 4 chars) plus
     # the configured maximum output tokens. Must match LLMClient.complete() exactly.
     # Token estimation is approximate; see US-24 documented overshoot limitation.
-    max_output_tokens = int(getattr(settings, "LLM_MAX_OUTPUT_TOKENS", 256))
-    admission_tokens = max(100, (len(prompt) // 4) + max_output_tokens)
+    effective_max_tokens = max_tokens or int(
+        getattr(settings, "AI_MAX_TOKENS_PER_REQUEST", getattr(settings, "LLM_MAX_OUTPUT_TOKENS", 4096))
+    )
+    admission_tokens = max(100, (len(prompt) // 4) + effective_max_tokens)
     with reserve_call(estimated_tokens=admission_tokens) as reservation:
         return await target_client.complete(
             prompt=prompt,
@@ -442,4 +452,5 @@ async def call_llm_with_consent(
             timeout_seconds=timeout_seconds,
             room_id=room_id,
             reservation=reservation,
+            max_tokens=effective_max_tokens,
         )

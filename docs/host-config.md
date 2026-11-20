@@ -48,9 +48,14 @@ Or set them in `ai-ml-service/.env` (git-ignored, copied from `.env.example`).
 | NFR14    | Max runs per session                     | sync-service       | `APP_ROOM_LIMITS_MAX_RUNS_PER_SESSION`            | `0` (none)  | US-63 🔲         |
 | FR37.2   | AI slowdown factor                       | ai-ml-service      | `AI_SLOWDOWN_FACTOR`                              | `1.0`       | US-77 🔲         |
 | FR40.4   | LLM request timeout (seconds)            | ai-ml-service      | `LLM_TIMEOUT_SECONDS`                             | `10.0`      | US-16 ✅         |
-| FR40.4   | Max tokens per AI request                | ai-ml-service      | `AI_MAX_TOKENS_PER_REQUEST`                       | `4096`      | US-24 🔲         |
+| FR40.4   | Max tokens per AI request                | ai-ml-service      | `AI_MAX_TOKENS_PER_REQUEST`                       | `4096`      | US-24 ✅         |
 | NFR5.3   | Hourly per-room AI request limit         | ai-ml-service      | `ROOM_HOURLY_LIMIT`                               | `20`        | US-22 ✅         |
-| NFR7.2   | Monthly AI spend cap (USD)               | ai-ml-service      | `MONTHLY_BUDGET_USD`                              | `10.0`      | US-77 🔲         |
+| NFR7.2   | Monthly AI spend cap (USD)               | ai-ml-service      | `MONTHLY_BUDGET_USD`                              | `10.0`      | US-24 ✅         |
+
+**Notes on AI limits (US-24):**
+- `AI_MAX_TOKENS_PER_REQUEST`: Canonical configuration for maximum generation tokens per request (default `4096`). `LLM_MAX_OUTPUT_TOKENS` is supported as a backwards-compatible alias. Both provider request bodies and admission reservation estimates use this unified value.
+- `MONTHLY_BUDGET_USD`: Must be a finite positive number (> 0, default `10.0`). Zero, negative, NaN, and infinity values are rejected at startup. Fail-closed budget enforcement: reaching budget strictly blocks all further paid AI calls.
+- `ALERT_WEBHOOK_URL`: Optional HTTPS webhook URL for 80% monthly budget alerts (NFR7.4). Dispatched via a non-blocking background worker.
 
 **Legend:** ✅ Enforced | 🟡 Entry created, enforcement in a future story | 🔲 Placeholder, story not yet started
 

@@ -25,6 +25,7 @@ import json
 import logging
 import sys
 import threading
+import time
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -53,6 +54,7 @@ from app.counters import (
     reset_counters,
     set_clock,
     set_tracker,
+    wait_for_alert_webhook,
 )
 from app.llm.client import (
     LLMClient,
@@ -72,6 +74,7 @@ def clean_state():
     set_clock(None)
     clear_analysis_cache()
     yield
+    wait_for_alert_webhook(timeout=1.0)
     reset_counters()
     set_clock(None)
     clear_analysis_cache()
@@ -944,135 +947,139 @@ async def test_concurrent_direct_complete_calls_cannot_bypass_budget_gate():
        - tracker._active_reservations_tokens returns to exactly 0 (no leaks).
        - No concurrent admission ever bypassed the budget cap.
     """
-    tracker = get_tracker()
-    tracker.token_cost_per_token = 0.001
+    with (
+        patch.object(settings, "AI_MAX_TOKENS_PER_REQUEST", 256),
+        patch.object(settings, "LLM_MAX_OUTPUT_TOKENS", 256),
+    ):
+        tracker = get_tracker()
+        tracker.token_cost_per_token = 0.001
 
-    max_output_tokens = int(getattr(settings, "LLM_MAX_OUTPUT_TOKENS", 256))
-    prompt = "Direct call test"  # 16 chars -> 4 tokens
-    admission_tokens = max(100, (len(prompt) // 4) + max_output_tokens)  # 260 tokens
-    assert admission_tokens == 260
+        max_output_tokens = int(getattr(settings, "LLM_MAX_OUTPUT_TOKENS", 256))
+        prompt = "Direct call test"  # 16 chars -> 4 tokens
+        admission_tokens = max(100, (len(prompt) // 4) + max_output_tokens)  # 260 tokens
+        assert admission_tokens == 260
 
-    # Establish initial committed usage: 200 tokens ($0.20)
-    record_model_call("room-direct-init", tokens=200)
-    assert tracker.monthly_tokens_used == 200
-
-    # Budget calibrated for exactly 2 admissions:
-    # Call 1 projected: 200 + 0 + 260 = 460 < 800 (admitted)
-    # Call 2 projected: 200 + 260 + 260 = 720 < 800 (admitted)
-    # Call 3 projected: 200 + 520 + 260 = 980 >= 800 (rejected)
-    budget_tokens = 800
-    tracker.monthly_budget_usd = budget_tokens * 0.001  # $0.80
-
-    llm_client = LLMClient()
-
-    in_flight_entered = asyncio.Event()
-    release_in_flight = asyncio.Event()
-    admitted_calls = []
-    admitted_lock = asyncio.Lock()
-
-    async def mock_post(url, headers=None, json=None, timeout=None):
-        nonlocal admitted_calls
-        async with admitted_lock:
-            # An admitted call has passed reserve_call() and entered network dispatch
-            current_monthly = tracker.monthly_tokens_used
-            current_active = tracker._active_reservations_tokens
-            call_idx = len(admitted_calls) + 1
-            admitted_calls.append((call_idx, current_monthly, current_active))
-            if len(admitted_calls) == 2:
-                in_flight_entered.set()
-
-        # Hold this call in-flight until the test signals release
-        await release_in_flight.wait()
-
-        # Call 1 succeeds with 150 actual tokens; Call 2 fails with HTTP 500
-        mock_resp = MagicMock()
-        if call_idx == 1:
-            mock_resp.status_code = 200
-            mock_resp.json.return_value = {
-                "candidates": [{"content": {"parts": [{"text": "Fix applied"}]}}],
-                "usageMetadata": {"totalTokenCount": 150},
-            }
-        else:
-            mock_resp.status_code = 500
-        return mock_resp
-
-    results = {}
-
-    async def worker(worker_id: int):
-        try:
-            res = await llm_client.complete(
-                prompt=prompt,
-                api_key="fake-key",
-                model="gemini-1.5-flash",
-                room_id="room-direct-worker",
-            )
-            results[worker_id] = ("SUCCESS", res)
-        except CostCapReachedError:
-            results[worker_id] = ("COST_CAP_REACHED", None)
-        except LLMProviderError as exc:
-            results[worker_id] = ("PROVIDER_ERROR", exc.status_code)
-
-    with patch("httpx.AsyncClient.post", side_effect=mock_post):
-        # Launch 5 concurrent workers calling complete() directly
-        tasks = [asyncio.create_task(worker(i)) for i in range(5)]
-
-        # Wait deterministically until exactly 2 admitted calls are in flight
-        await asyncio.wait_for(in_flight_entered.wait(), timeout=5.0)
-
-        # Allow other worker coroutines to run their reservation attempts while the 2 calls are in flight
-        await asyncio.sleep(0.05)
-
-        # ----------------------------------------------------------------------
-        # INVARIANT VERIFICATION WHILE CALLS ARE IN FLIGHT:
-        # For every admitted call, the admission invariant must hold:
-        # committed monthly usage + active reservations + new reservation < budget
-        # ----------------------------------------------------------------------
-        assert len(admitted_calls) == 2, f"Expected exactly 2 admitted calls, got {len(admitted_calls)}"
-
-        # Check snapshot 1 (when Call 1 was admitted):
-        # committed = 200, active was 260 (200 + 0 + 260 = 460 < 800)
-        call1_idx, call1_monthly, call1_active = admitted_calls[0]
-        assert call1_monthly == 200
-        assert call1_active == 260
-        assert call1_monthly + call1_active <= budget_tokens
-
-        # Check snapshot 2 (when Call 2 was admitted):
-        # committed = 200, active was 520 (200 + 260 + 260 = 720 < 800)
-        call2_idx, call2_monthly, call2_active = admitted_calls[1]
-        assert call2_monthly == 200
-        assert call2_active == 520
-        assert call2_monthly + call2_active <= budget_tokens
-
-        # While both calls are in flight, active reservations must equal exactly 2 * 260 = 520:
-        assert tracker._active_reservations_tokens == 520
+        # Establish initial committed usage: 200 tokens ($0.20)
+        record_model_call("room-direct-init", tokens=200)
         assert tracker.monthly_tokens_used == 200
-        # Invariant check: committed + active <= budget
-        assert tracker.monthly_tokens_used + tracker._active_reservations_tokens <= budget_tokens
 
-        # All other 3 workers MUST have been blocked already by CostCapReachedError
-        # because committed(200) + active(520) + new(260) = 980 >= 800:
-        blocked_so_far = [w_id for w_id, (status, _) in results.items() if status == "COST_CAP_REACHED"]
-        assert len(blocked_so_far) == 3, f"Expected 3 blocked calls, got {len(blocked_so_far)}"
+        # Budget calibrated for exactly 2 admissions:
+        # Call 1 projected: 200 + 0 + 260 = 460 < 800 (admitted)
+        # Call 2 projected: 200 + 260 + 260 = 720 < 800 (admitted)
+        # Call 3 projected: 200 + 520 + 260 = 980 >= 800 (rejected)
+        budget_tokens = 800
+        tracker.monthly_budget_usd = budget_tokens * 0.001  # $0.80
 
-        # ----------------------------------------------------------------------
-        # RELEASE IN-FLIGHT CALLS & VERIFY COMMIT / RELEASE LIFECYCLE:
-        # ----------------------------------------------------------------------
-        release_in_flight.set()
-        await asyncio.gather(*tasks)
+        llm_client = LLMClient()
 
-    # 1. Exactly 1 success, 1 provider error, 3 cost cap blocked
-    statuses = [status for status, _ in results.values()]
-    assert statuses.count("SUCCESS") == 1
-    assert statuses.count("PROVIDER_ERROR") == 1
-    assert statuses.count("COST_CAP_REACHED") == 3
+        in_flight_entered = asyncio.Event()
+        release_in_flight = asyncio.Event()
+        admitted_calls = []
+        admitted_lock = asyncio.Lock()
 
-    # 2. Reservation cleanup: ALL active reservations must be 0 (no leaks!)
-    assert tracker._active_reservations_tokens == 0
+        async def mock_post(url, headers=None, json=None, timeout=None):
+            nonlocal admitted_calls
+            async with admitted_lock:
+                # An admitted call has passed reserve_call() and entered network dispatch
+                current_monthly = tracker.monthly_tokens_used
+                current_active = tracker._active_reservations_tokens
+                call_idx = len(admitted_calls) + 1
+                admitted_calls.append((call_idx, current_monthly, current_active))
+                if len(admitted_calls) == 2:
+                    in_flight_entered.set()
 
-    # 3. Monthly usage: initial (200) + successful committed actual tokens (150) = 350
-    # (failed call released without billing, blocked calls never billed)
-    assert tracker.monthly_tokens_used == 350
-    assert tracker.get_room_usage("room-direct-worker")["tokens_used"] == 150
+            # Hold this call in-flight until the test signals release
+            await release_in_flight.wait()
+
+            # Call 1 succeeds with 150 actual tokens; Call 2 fails with HTTP 500
+            mock_resp = MagicMock()
+            if call_idx == 1:
+                mock_resp.status_code = 200
+                mock_resp.json.return_value = {
+                    "candidates": [{"content": {"parts": [{"text": "Fix applied"}]}}],
+                    "usageMetadata": {"totalTokenCount": 150},
+                }
+            else:
+                mock_resp.status_code = 500
+            return mock_resp
+
+        results = {}
+
+        async def worker(worker_id: int):
+            try:
+                res = await llm_client.complete(
+                    prompt=prompt,
+                    api_key="fake-key",
+                    model="gemini-1.5-flash",
+                    room_id="room-direct-worker",
+                )
+                results[worker_id] = ("SUCCESS", res)
+            except CostCapReachedError:
+                results[worker_id] = ("COST_CAP_REACHED", None)
+            except LLMProviderError as exc:
+                results[worker_id] = ("PROVIDER_ERROR", exc.status_code)
+
+        with patch("httpx.AsyncClient.post", side_effect=mock_post):
+            # Launch 5 concurrent workers calling complete() directly
+            tasks = [asyncio.create_task(worker(i)) for i in range(5)]
+
+            # Wait deterministically until exactly 2 admitted calls are in flight
+            await asyncio.wait_for(in_flight_entered.wait(), timeout=5.0)
+
+            # Allow other worker coroutines to run their reservation attempts while the 2 calls are in flight
+            await asyncio.sleep(0.05)
+
+            # ----------------------------------------------------------------------
+            # INVARIANT VERIFICATION WHILE CALLS ARE IN FLIGHT:
+            # For every admitted call, the admission invariant must hold:
+            # committed monthly usage + active reservations + new reservation < budget
+            # ----------------------------------------------------------------------
+            assert len(admitted_calls) == 2, f"Expected exactly 2 admitted calls, got {len(admitted_calls)}"
+
+            # Check snapshot 1 (when Call 1 was admitted):
+            # committed = 200, active was 260 (200 + 0 + 260 = 460 < 800)
+            call1_idx, call1_monthly, call1_active = admitted_calls[0]
+            assert call1_monthly == 200
+            assert call1_active == 260
+            assert call1_monthly + call1_active <= budget_tokens
+
+            # Check snapshot 2 (when Call 2 was admitted):
+            # committed = 200, active was 520 (200 + 260 + 260 = 720 < 800)
+            call2_idx, call2_monthly, call2_active = admitted_calls[1]
+            assert call2_monthly == 200
+            assert call2_active == 520
+            assert call2_monthly + call2_active <= budget_tokens
+
+            # While both calls are in flight, active reservations must equal exactly 2 * 260 = 520:
+            assert tracker._active_reservations_tokens == 520
+            assert tracker.monthly_tokens_used == 200
+            # Invariant check: committed + active <= budget
+            assert tracker.monthly_tokens_used + tracker._active_reservations_tokens <= budget_tokens
+
+            # All other 3 workers MUST have been blocked already by CostCapReachedError
+            # because committed(200) + active(520) + new(260) = 980 >= 800:
+            blocked_so_far = [w_id for w_id, (status, _) in results.items() if status == "COST_CAP_REACHED"]
+            assert len(blocked_so_far) == 3, f"Expected 3 blocked calls, got {len(blocked_so_far)}"
+
+            # ----------------------------------------------------------------------
+            # RELEASE IN-FLIGHT CALLS & VERIFY COMMIT / RELEASE LIFECYCLE:
+            # ----------------------------------------------------------------------
+            release_in_flight.set()
+            await asyncio.gather(*tasks)
+
+        # 1. Exactly 1 success, 1 provider error, 3 cost cap blocked
+        statuses = [status for status, _ in results.values()]
+        assert statuses.count("SUCCESS") == 1
+        assert statuses.count("PROVIDER_ERROR") == 1
+        assert statuses.count("COST_CAP_REACHED") == 3
+
+        # 2. Reservation cleanup: ALL active reservations must be 0 (no leaks!)
+        assert tracker._active_reservations_tokens == 0
+
+        # 3. Monthly usage: initial (200) + successful committed actual tokens (150) = 350
+        # (failed call released without billing, blocked calls never billed)
+        assert tracker.monthly_tokens_used == 350
+        assert tracker.get_room_usage("room-direct-worker")["tokens_used"] == 150
 
 
 # ============================================================================
@@ -1094,6 +1101,7 @@ def test_alert_webhook_timeout_does_not_break_request(caplog):
     ):
         # Must succeed without throwing
         record_model_call("room-webhook-timeout", tokens=800000)
+        tracker.wait_for_alert_webhook()
 
     assert tracker.alert_80_percent_triggered is True
     assert tracker.get_monthly_spend_usd() == 8.0
@@ -1114,6 +1122,7 @@ def test_alert_webhook_connection_error_does_not_break_request(caplog):
         caplog.at_level(logging.WARNING),
     ):
         record_model_call("room-webhook-conn", tokens=800000)
+        tracker.wait_for_alert_webhook()
 
     assert tracker.alert_80_percent_triggered is True
     assert tracker.get_monthly_spend_usd() == 8.0
@@ -1135,6 +1144,7 @@ def test_alert_webhook_http_500_logged_as_warning_not_success(caplog):
         caplog.at_level(logging.WARNING),
     ):
         record_model_call("room-webhook-500", tokens=800000)
+        tracker.wait_for_alert_webhook()
 
     assert tracker.alert_80_percent_triggered is True
     assert any("Alert webhook dispatch failed with HTTP status 500" in r.getMessage() for r in caplog.records)
@@ -1167,6 +1177,7 @@ def test_concurrent_threshold_crossing_initiates_only_one_webhook_call():
         for t in threads:
             t.join()
 
+        tracker.wait_for_alert_webhook()
         # Exactly 1 HTTP POST dispatched
         assert mock_post.call_count == 1
 
@@ -1184,6 +1195,7 @@ def test_alert_webhook_never_logs_url_secrets_or_code_canary(caplog):
         caplog.at_level(logging.DEBUG),
     ):
         record_model_call("room-secret", tokens=800000)
+        tracker.wait_for_alert_webhook()
 
     for record in caplog.records:
         msg = record.getMessage()
@@ -1684,41 +1696,297 @@ async def test_actual_billing_uses_provider_tokens_not_admission_estimate():
       actual monthly spend to exceed the budget by up to the actual total token count
       minus the reserved token count.
     """
+    with (
+        patch.object(settings, "AI_MAX_TOKENS_PER_REQUEST", 256),
+        patch.object(settings, "LLM_MAX_OUTPUT_TOKENS", 256),
+    ):
+        tracker = get_tracker()
+        max_output_tokens = int(getattr(settings, "LLM_MAX_OUTPUT_TOKENS", 256))
+
+        # Short prompt → admission = max(100, 0 + 256) = 256 tokens
+        short_prompt = "x"
+        admission = max(100, (len(short_prompt) // 4) + max_output_tokens)
+
+        tracker.monthly_budget_usd = 100.0
+        tracker.token_cost_per_token = 0.0000035
+
+        # Mock provider returns 1200 actual tokens (input 944 + output 256 = 1200)
+        # This exceeds the 256-token admission reservation
+        actual_provider_tokens = 1200
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "candidates": [{"content": {"parts": [{"text": "Long output here"}]}}],
+            "usageMetadata": {"totalTokenCount": actual_provider_tokens},
+        }
+
+        with patch("httpx.AsyncClient.post", return_value=mock_resp):
+            await call_llm_with_consent(
+                prompt=short_prompt,
+                consent=True,
+                ai_enabled=True,
+                api_key="fake-key",
+                room_id="room-overshoot",
+            )
+
+        # Monthly spend must equal actual provider tokens (1200), NOT the admission (256)
+        assert tracker.monthly_tokens_used == actual_provider_tokens, (
+            f"Expected monthly tokens == {actual_provider_tokens} (actual provider tokens), "
+            f"got {tracker.monthly_tokens_used} (admission was {admission})"
+        )
+        # Room-level tokens also reflect actual provider tokens
+        assert get_room_usage("room-overshoot")["tokens_used"] == actual_provider_tokens
+        # This confirms documented overshoot: spend = 1200 tokens vs 256 reserved
+        assert tracker.monthly_tokens_used > admission
+
+
+# ============================================================================
+# 22. PR Review Feedback Verifications (Prince's Review)
+# ============================================================================
+
+
+def test_alert_webhook_does_not_block_caller_on_slow_endpoint():
+    """Verify that a slow webhook endpoint (delayed HTTP response) does NOT block the caller or hold the tracker lock."""
     tracker = get_tracker()
-    max_output_tokens = int(getattr(settings, "LLM_MAX_OUTPUT_TOKENS", 256))
+    tracker.monthly_budget_usd = 10.0
+    tracker.token_cost_per_token = 0.00001  # $8.00 threshold = 800,000 tokens
 
-    # Short prompt → admission = max(100, 0 + 256) = 256 tokens
-    short_prompt = "x"
-    admission = max(100, (len(short_prompt) // 4) + max_output_tokens)
+    webhook_entered = threading.Event()
+    release_webhook = threading.Event()
 
-    tracker.monthly_budget_usd = 100.0
-    tracker.token_cost_per_token = 0.0000035
+    def slow_post(url, json=None, timeout=None):
+        webhook_entered.set()
+        release_webhook.wait(timeout=5.0)
+        resp = MagicMock()
+        resp.status_code = 200
+        return resp
 
-    # Mock provider returns 1200 actual tokens (input 944 + output 256 = 1200)
-    # This exceeds the 256-token admission reservation
-    actual_provider_tokens = 1200
+    with (
+        patch.object(settings, "ALERT_WEBHOOK_URL", "https://slow.webhook/alerts"),
+        patch("httpx.Client.post", side_effect=slow_post),
+    ):
+        t0 = time.perf_counter()
+        # Crossing 80% triggers webhook dispatch in background
+        record_model_call("room-slow-hook", tokens=850000)
+        elapsed = time.perf_counter() - t0
+
+        # record_model_call must return essentially instantaneously without waiting for slow_post
+        assert elapsed < 0.2, f"record_model_call blocked for {elapsed:.3f}s"
+
+        # Wait until background worker actually enters slow_post
+        assert webhook_entered.wait(timeout=2.0), "Background webhook worker did not start"
+
+        # Verify tracker lock is NOT held while webhook is in flight:
+        # A concurrent operation must be able to acquire lock and run immediately
+        t_lock_start = time.perf_counter()
+        record_model_call("room-concurrent", tokens=1000)
+        lock_elapsed = time.perf_counter() - t_lock_start
+        assert lock_elapsed < 0.05, f"Tracker lock was held during webhook dispatch! Elapsed: {lock_elapsed:.3f}s"
+
+        # Release the slow webhook worker
+        release_webhook.set()
+        tracker.wait_for_alert_webhook(timeout=2.0)
+
+    assert tracker.alert_80_percent_triggered is True
+    assert tracker.monthly_tokens_used == 851000
+
+
+def test_reservation_lifecycle_timestamp_and_idempotent_finalization():
+    """Verify reservation created_at timestamp, is_finalized property, and idempotent commit/release."""
+    tracker = get_tracker()
+    tracker.monthly_budget_usd = 10.0
+    tracker.token_cost_per_token = 0.00001
+
+    t_before = datetime.now(timezone.utc)
+    res = tracker.reserve_call(estimated_tokens=500)
+    t_after = datetime.now(timezone.utc)
+
+    assert t_before <= res.created_at <= t_after
+    assert res.is_finalized is False
+    assert tracker.get_active_reservations_count() == 1
+    assert tracker.get_active_reservations_tokens() == 500
+
+    # Commit the reservation
+    res.commit(tokens=250, room_id="room-life")
+    assert res.is_finalized is True
+    assert tracker.get_active_reservations_count() == 0
+    assert tracker.get_active_reservations_tokens() == 0
+    assert tracker.monthly_tokens_used == 250
+
+    # Idempotent second commit: must be a no-op (no double-counting)
+    res.commit(tokens=250, room_id="room-life")
+    assert tracker.monthly_tokens_used == 250
+
+    # Idempotent release after commit: must be a no-op
+    res.release()
+    assert tracker.get_active_reservations_tokens() == 0
+    assert tracker.monthly_tokens_used == 250
+
+    # Test release idempotency on a new reservation
+    res2 = tracker.reserve_call(estimated_tokens=300)
+    assert tracker.get_active_reservations_tokens() == 300
+    res2.release()
+    assert res2.is_finalized is True
+    assert tracker.get_active_reservations_tokens() == 0
+    res2.release()  # second release is a no-op
+    assert tracker.get_active_reservations_tokens() == 0
+
+    # Test commit_uncertain idempotency
+    res3 = tracker.reserve_call(estimated_tokens=400)
+    res3.commit_uncertain(room_id="room-life")
+    assert res3.is_finalized is True
+    assert tracker.monthly_tokens_used == 250 + 400
+    res3.commit_uncertain(room_id="room-life")  # second call is a no-op
+    assert tracker.monthly_tokens_used == 250 + 400
+    res3.release()  # release after commit_uncertain is a no-op
+    assert tracker.monthly_tokens_used == 250 + 400
+
+
+def test_reservation_guaranteed_cleanup_in_context_manager_on_exception():
+    """Verify context manager guarantees release of reservation if an unhandled exception occurs."""
+    tracker = get_tracker()
+    tracker.monthly_budget_usd = 10.0
+    tracker.token_cost_per_token = 0.00001
+
+    try:
+        with tracker.reserve_call(estimated_tokens=1500) as res:
+            assert tracker.get_active_reservations_tokens() == 1500
+            assert res.is_finalized is False
+            raise RuntimeError("Unexpected failure inside processing block")
+    except RuntimeError:
+        pass
+
+    # Context manager __exit__ must have deterministically finalized/released the reservation
+    assert tracker.get_active_reservations_tokens() == 0
+    assert tracker.get_active_reservations_count() == 0
+    assert res.is_finalized is True
+
+
+def test_clock_reset_isolation_restores_real_utc_clock():
+    """Verify UsageTracker.reset() restores real UTC clock and recalculates current calendar month."""
+    tracker = get_tracker()
+    # Inject synthetic future clock
+    future_time = datetime(2035, 7, 20, 12, 0, 0, tzinfo=timezone.utc)
+    tracker.set_clock(lambda: future_time)
+    tracker.record_model_call("room-future", tokens=500)
+
+    assert tracker._current_month_key == (2035, 7)
+    assert tracker._clock_fn is not None
+
+    # Reset tracker
+    tracker.reset()
+
+    real_now = datetime.now(timezone.utc)
+    assert tracker._clock_fn is None
+    assert tracker._current_month_key == (real_now.year, real_now.month)
+    assert tracker.monthly_tokens_used == 0
+
+
+def test_budget_setter_validation_rejects_zero_negative_nan_inf():
+    """Verify UsageTracker.monthly_budget_usd setter validates finite positive values."""
+    tracker = get_tracker()
+
+    with pytest.raises(ValueError, match="must be a finite positive number"):
+        tracker.monthly_budget_usd = 0.0
+
+    with pytest.raises(ValueError, match="must be a finite positive number"):
+        tracker.monthly_budget_usd = -5.0
+
+    with pytest.raises(ValueError, match="must be a finite positive number"):
+        tracker.monthly_budget_usd = float("nan")
+
+    with pytest.raises(ValueError, match="must be a finite positive number"):
+        tracker.monthly_budget_usd = float("inf")
+
+    with pytest.raises(ValueError, match="must be a finite positive number"):
+        tracker.monthly_budget_usd = float("-inf")
+
+    with pytest.raises(ValueError, match="must be a valid float"):
+        tracker.monthly_budget_usd = "not-a-number"
+
+
+@pytest.mark.anyio
+async def test_unified_token_config_governs_payload_and_admission_gemini_and_openai():
+    """Verify effective max tokens governs both LLM request payload and admission reservation for Gemini and OpenAI."""
+    llm_client = LLMClient()
+    captured_payloads = []
+
     mock_resp = MagicMock()
     mock_resp.status_code = 200
     mock_resp.json.return_value = {
-        "candidates": [{"content": {"parts": [{"text": "Long output here"}]}}],
-        "usageMetadata": {"totalTokenCount": actual_provider_tokens},
+        "candidates": [{"content": {"parts": [{"text": "Result"}]}}],
+        "usageMetadata": {"totalTokenCount": 50},
     }
 
-    with patch("httpx.AsyncClient.post", return_value=mock_resp):
+    async def mock_post(url, headers=None, json=None, timeout=None):
+        captured_payloads.append(json)
+        return mock_resp
+
+    with (
+        patch.object(settings, "AI_MAX_TOKENS_PER_REQUEST", 777),
+        patch.object(settings, "LLM_MAX_OUTPUT_TOKENS", 777),
+        patch("httpx.AsyncClient.post", side_effect=mock_post),
+    ):
+        # 1. Gemini payload check
+        await llm_client.complete(
+            prompt="Test Gemini tokens",
+            api_key="fake-gemini-key",
+            model="gemini-1.5-flash",
+            room_id="room-gemini",
+        )
+        assert captured_payloads[0]["generationConfig"]["maxOutputTokens"] == 777
+
+        # 2. OpenAI payload check
+        openai_mock_resp = MagicMock()
+        openai_mock_resp.status_code = 200
+        openai_mock_resp.json.return_value = {
+            "choices": [{"message": {"content": "OpenAI Result"}}],
+            "usage": {"total_tokens": 50},
+        }
+        mock_resp.json.return_value = openai_mock_resp.json.return_value
+
+        await llm_client.complete(
+            prompt="Test OpenAI tokens",
+            api_key="fake-openai-key",
+            model="gpt-4o-mini",
+            room_id="room-openai",
+        )
+        assert captured_payloads[1]["max_tokens"] == 777
+
+
+@pytest.mark.anyio
+async def test_us77_explicit_max_tokens_parameter_governs_payload_and_admission():
+    """Verify US-77 compatibility: passing max_tokens explicitly overrides default in payload and reservation."""
+    captured_payloads = []
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {
+        "candidates": [{"content": {"parts": [{"text": "US77 result"}]}}],
+        "usageMetadata": {"totalTokenCount": 80},
+    }
+
+    async def mock_post(url, headers=None, json=None, timeout=None):
+        captured_payloads.append(json)
+        return mock_resp
+
+    tracker = get_tracker()
+    tracker.monthly_budget_usd = 100.0
+
+    with (
+        patch.object(settings, "AI_MAX_TOKENS_PER_REQUEST", 4096),
+        patch("httpx.AsyncClient.post", side_effect=mock_post),
+    ):
+        # Call with explicit max_tokens=150 (as US-77 does)
+        prompt = "US-77 prompt"  # 13 chars -> 3 tokens
+        # Admission must be max(100, 3 + 150) = 153 tokens, NOT max(100, 3 + 4096) = 4099 tokens
         await call_llm_with_consent(
-            prompt=short_prompt,
+            prompt=prompt,
             consent=True,
             ai_enabled=True,
             api_key="fake-key",
-            room_id="room-overshoot",
+            room_id="room-us77",
+            max_tokens=150,
         )
 
-    # Monthly spend must equal actual provider tokens (1200), NOT the admission (256)
-    assert tracker.monthly_tokens_used == actual_provider_tokens, (
-        f"Expected monthly tokens == {actual_provider_tokens} (actual provider tokens), "
-        f"got {tracker.monthly_tokens_used} (admission was {admission})"
-    )
-    # Room-level tokens also reflect actual provider tokens
-    assert get_room_usage("room-overshoot")["tokens_used"] == actual_provider_tokens
-    # This confirms documented overshoot: spend = 1200 tokens vs 256 reserved
-    assert tracker.monthly_tokens_used > admission
+        assert captured_payloads[0]["generationConfig"]["maxOutputTokens"] == 150

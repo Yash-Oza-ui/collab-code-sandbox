@@ -17,15 +17,62 @@ Never stores raw code, stderr, prompts, or other user-written text.
 Supports per-room teardown (clear_room) for room lifecycle management (FR32, US-56).
 """
 
+import atexit
+import concurrent.futures
 from datetime import datetime, timezone
 from decimal import Decimal
 import logging
+import math
 import threading
 from typing import Any, Callable, Optional
 
 from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+_webhook_executor: Optional[concurrent.futures.ThreadPoolExecutor] = None
+_webhook_executor_lock = threading.Lock()
+
+
+def _get_webhook_executor() -> concurrent.futures.ThreadPoolExecutor:
+    global _webhook_executor
+    with _webhook_executor_lock:
+        if _webhook_executor is None or getattr(_webhook_executor, "_shutdown", False):
+            _webhook_executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=2, thread_name_prefix="cost-cap-alert"
+            )
+        return _webhook_executor
+
+
+def shutdown_webhook_executor(wait: bool = True) -> None:
+    """Shut down the background alert webhook executor (safe for graceful exit)."""
+    global _webhook_executor
+    with _webhook_executor_lock:
+        if _webhook_executor is not None:
+            _webhook_executor.shutdown(wait=wait)
+            _webhook_executor = None
+
+
+atexit.register(shutdown_webhook_executor, wait=True)
+
+
+def _dispatch_webhook_http(webhook_url: str, payload: dict[str, Any]) -> None:
+    """Execute synchronous webhook HTTP POST inside a background worker thread."""
+    try:
+        import httpx
+
+        with httpx.Client(timeout=2.0) as client:
+            resp = client.post(webhook_url, json=payload)
+            if resp.status_code >= 400:
+                logger.warning(
+                    "Alert webhook dispatch failed with HTTP status %d",
+                    resp.status_code,
+                )
+            else:
+                logger.info("Alert webhook dispatched successfully (HTTP %d)", resp.status_code)
+    except Exception as exc:
+        # Strictly safe logging: do not log webhook URL, secrets, or prompt content (NFR8.2)
+        logger.warning("Failed to dispatch alert webhook: %s", type(exc).__name__)
 
 
 class CostCapReachedError(Exception):
@@ -53,6 +100,7 @@ class CallReservation:
         self._reservation_id = reservation_id
         self._reserved_tokens = reserved_tokens
         self._committed = False
+        self._created_at = tracker._get_utc_now()
 
     @property
     def reservation_id(self) -> int:
@@ -65,6 +113,16 @@ class CallReservation:
     @property
     def is_committed(self) -> bool:
         return self._committed
+
+    @property
+    def is_finalized(self) -> bool:
+        """Alias for is_committed indicating reservation has completed its lifecycle."""
+        return self._committed
+
+    @property
+    def created_at(self) -> datetime:
+        """UTC timestamp when the reservation was granted (observability)."""
+        return self._created_at
 
     def commit(
         self,
@@ -160,6 +218,7 @@ class UsageTracker:
         self._current_month_key: tuple[int, int] = (now.year, now.month)
         self._monthly_tokens_used: int = 0
         self._alert_80_percent_triggered: bool = False
+        self._last_alert_future: Optional[concurrent.futures.Future] = None
 
         # In-flight call reservations for concurrency protection (US-24, NFR7.2)
         self._active_reservations_tokens: int = 0
@@ -211,13 +270,21 @@ class UsageTracker:
 
     @monthly_budget_usd.setter
     def monthly_budget_usd(self, value: float) -> None:
+        try:
+            val_float = float(value)
+        except (ValueError, TypeError) as exc:
+            raise ValueError(f"monthly_budget_usd must be a valid float, got {value!r}") from exc
+        if math.isnan(val_float) or math.isinf(val_float) or val_float <= 0.0:
+            raise ValueError(
+                f"monthly_budget_usd must be a finite positive number (> 0), got {val_float}"
+            )
         trigger_alert = False
         alert_args: tuple[float, float, float, str] = (0.0, 0.0, 0.0, "")
         with self._lock:
-            self._monthly_budget_override = float(value)
+            self._monthly_budget_override = val_float
             self._check_month_rollover()
             cost_dec = Decimal(str(self.token_cost_per_token))
-            budget_dec = Decimal(str(value))
+            budget_dec = Decimal(str(val_float))
             spend_dec = Decimal(self._monthly_tokens_used) * cost_dec
             threshold_dec = Decimal("0.8") * budget_dec
             if spend_dec >= threshold_dec and not self._alert_80_percent_triggered:
@@ -234,7 +301,7 @@ class UsageTracker:
             # must not reset its deduplication state (US-24).
 
         if trigger_alert:
-            self._send_80_percent_alert(*alert_args)
+            self._last_alert_future = self._send_80_percent_alert(*alert_args)
 
     @property
     def token_cost_per_token(self) -> float:
@@ -267,7 +334,7 @@ class UsageTracker:
             # must not reset its deduplication state (US-24).
 
         if trigger_alert:
-            self._send_80_percent_alert(*alert_args)
+            self._last_alert_future = self._send_80_percent_alert(*alert_args)
 
     @property
     def monthly_tokens_used(self) -> int:
@@ -319,10 +386,23 @@ class UsageTracker:
             spend_dec = Decimal(tokens) * cost_dec
             return spend_dec >= budget_dec
 
-    def _send_80_percent_alert(self, current_spend: float, budget: float, threshold: float, month_str: str) -> None:
+    def get_active_reservations_count(self) -> int:
+        """Return the number of currently active in-flight reservations (observability)."""
+        with self._lock:
+            return len(self._reservations)
+
+    def get_active_reservations_tokens(self) -> int:
+        """Return the total token count across all active in-flight reservations (observability)."""
+        with self._lock:
+            return self._active_reservations_tokens
+
+    def _send_80_percent_alert(
+        self, current_spend: float, budget: float, threshold: float, month_str: str
+    ) -> Optional[concurrent.futures.Future]:
         """Deliver the 80% budget alert via structured logging and optional webhook (US-24, NFR7.4).
 
-        Synchronous network I/O is performed without holding self._lock.
+        Synchronous network I/O is offloaded to a dedicated background worker without
+        holding self._lock and without blocking the caller or asyncio event loop.
         Best-effort: errors never break analysis or accounting.
         """
         logger.warning(
@@ -335,28 +415,19 @@ class UsageTracker:
         )
         webhook_url = getattr(settings, "ALERT_WEBHOOK_URL", None)
         if webhook_url:
+            payload = {
+                "event": "AI_COST_CAP_ALERT",
+                "spend_usd": current_spend,
+                "budget_usd": budget,
+                "threshold_usd": threshold,
+                "month": month_str,
+            }
             try:
-                import httpx
-
-                payload = {
-                    "event": "AI_COST_CAP_ALERT",
-                    "spend_usd": current_spend,
-                    "budget_usd": budget,
-                    "threshold_usd": threshold,
-                    "month": month_str,
-                }
-                with httpx.Client(timeout=2.0) as client:
-                    resp = client.post(webhook_url, json=payload)
-                    if resp.status_code >= 400:
-                        logger.warning(
-                            "Alert webhook dispatch failed with HTTP status %d",
-                            resp.status_code,
-                        )
-                    else:
-                        logger.info("Alert webhook dispatched successfully (HTTP %d)", resp.status_code)
+                executor = _get_webhook_executor()
+                return executor.submit(_dispatch_webhook_http, webhook_url, payload)
             except Exception as exc:
-                # Strictly safe logging: do not log webhook URL, secrets, or prompt content (NFR8.2)
-                logger.warning("Failed to dispatch alert webhook: %s", type(exc).__name__)
+                logger.warning("Failed to submit alert webhook to background executor: %s", type(exc).__name__)
+        return None
 
     def reserve_call(self, estimated_tokens: int = 100) -> CallReservation:
         """Atomically check cost cap and reserve budget headroom for an outbound call (US-24, NFR7.2).
@@ -446,7 +517,7 @@ class UsageTracker:
                 )
 
         if trigger_alert:
-            self._send_80_percent_alert(*alert_args)
+            self._last_alert_future = self._send_80_percent_alert(*alert_args)
 
     def _release_reservation(self, reservation_id: int) -> None:
         """Release reservation without recording tokens (must be thread-safe)."""
@@ -507,7 +578,7 @@ class UsageTracker:
                 )
 
         if trigger_alert:
-            self._send_80_percent_alert(*alert_args)
+            self._last_alert_future = self._send_80_percent_alert(*alert_args)
 
     def record_cache_hit(self, room_id: Optional[str] = None) -> None:
         """Record a cache hit for an analysis task (FR40.1, US-75).
@@ -616,6 +687,10 @@ class UsageTracker:
     def reset(self) -> None:
         """Reset all counters, tracked rooms, reservations, and monthly spend (for test isolation)."""
         with self._lock:
+            # Fix 5: Restore _clock_fn to None and recalculate month using real UTC clock
+            self._clock_fn = None
+            now = datetime.now(timezone.utc)
+            self._current_month_key = (now.year, now.month)
             self._monthly_budget_override = None
             self._token_cost_override = None
             self._total_model_calls = 0
@@ -625,10 +700,18 @@ class UsageTracker:
             self._room_counters.clear()
             self._monthly_tokens_used = 0
             self._alert_80_percent_triggered = False
+            self._last_alert_future = None
             self._active_reservations_tokens = 0
             self._reservations.clear()
-            now = self._get_utc_now()
-            self._current_month_key = (now.year, now.month)
+
+    def wait_for_alert_webhook(self, timeout: float = 5.0) -> None:
+        """Wait for any in-flight alert webhook delivery to complete (useful in tests and shutdown)."""
+        fut = self._last_alert_future
+        if fut is not None:
+            try:
+                fut.result(timeout=timeout)
+            except Exception:
+                pass
 
 
 # Default global tracker instance
@@ -699,3 +782,13 @@ def get_monthly_spend() -> float:
 def set_clock(clock: Optional[Callable[[], datetime]]) -> None:
     """Configure clock function on default tracker for testing UTC month transitions."""
     _default_tracker.set_clock(clock)
+
+
+def shutdown_alert_webhook_worker(wait: bool = True) -> None:
+    """Shut down the background alert webhook worker thread pool."""
+    shutdown_webhook_executor(wait=wait)
+
+
+def wait_for_alert_webhook(timeout: float = 5.0) -> None:
+    """Wait for any in-flight alert webhook delivery to complete."""
+    _default_tracker.wait_for_alert_webhook(timeout=timeout)
