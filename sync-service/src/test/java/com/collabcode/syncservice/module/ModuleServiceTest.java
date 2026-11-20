@@ -325,4 +325,80 @@ class ModuleServiceTest {
         assertThat(result.pending()).isFalse();
         assertThat(result.ownerMemberId()).isIn("m_host", "m_part");
     }
+
+    @Test
+    @DisplayName("Owner can grant and revoke write access (FR22.1)")
+    void owner_canGrantAndRevokeWriteAccess() {
+        ModuleRecord module = moduleService.createApprovedModule(OPEN_ROOM_ID, host, "owner-control.py");
+        assertThat(moduleService.canEdit(OPEN_ROOM_ID, module.moduleId(), participant)).isFalse();
+
+        // Grant write access to participant
+        moduleService.grantWriteAccess(OPEN_ROOM_ID, module.moduleId(), host, null, participant.getMemberId());
+        assertThat(module.writers()).contains(participant.getMemberId());
+        assertThat(moduleService.canEdit(OPEN_ROOM_ID, module.moduleId(), participant)).isTrue();
+
+        // Revoke write access
+        moduleService.revokeWriteAccess(OPEN_ROOM_ID, module.moduleId(), host, null, participant.getMemberId());
+        assertThat(module.writers()).doesNotContain(participant.getMemberId());
+        assertThat(moduleService.canEdit(OPEN_ROOM_ID, module.moduleId(), participant)).isFalse();
+    }
+
+    @Test
+    @DisplayName("Host with valid token can grant write access to participant and to Host (FR22.1)")
+    void host_withOwnerToken_canGrantWriteAccess() {
+        // Module owned by participant
+        ModuleRecord module = moduleService.createModule(OPEN_ROOM_ID, participant.getMemberId(), "part-owned.py", false);
+        assertThat(moduleService.canEdit(OPEN_ROOM_ID, module.moduleId(), host)).isFalse();
+
+        // Host grants write access to Host
+        moduleService.grantWriteAccess(OPEN_ROOM_ID, module.moduleId(), host, OWNER_TOKEN, host.getMemberId());
+        assertThat(module.writers()).contains(host.getMemberId());
+        assertThat(moduleService.canEdit(OPEN_ROOM_ID, module.moduleId(), host)).isTrue();
+    }
+
+    @Test
+    @DisplayName("Non-owner non-host cannot grant or revoke write access (NOT_MODULE_OWNER)")
+    void nonOwnerNonHost_cannotChangeWriteAccess() {
+        ModuleRecord module = moduleService.createApprovedModule(OPEN_ROOM_ID, host, "host-mod.py");
+
+        assertThatThrownBy(() -> moduleService.grantWriteAccess(
+                OPEN_ROOM_ID, module.moduleId(), participant, null, participant.getMemberId()))
+                .isInstanceOf(SecurityException.class)
+                .hasMessage("NOT_MODULE_OWNER");
+
+        module.addWriter(participant.getMemberId());
+
+        assertThatThrownBy(() -> moduleService.revokeWriteAccess(
+                OPEN_ROOM_ID, module.moduleId(), participant, null, participant.getMemberId()))
+                .isInstanceOf(SecurityException.class)
+                .hasMessage("NOT_MODULE_OWNER");
+    }
+
+    @Test
+    @DisplayName("Module owner cannot lose write access")
+    void owner_cannotLoseWriteAccess() {
+        ModuleRecord module = moduleService.createApprovedModule(OPEN_ROOM_ID, host, "permanent-owner.py");
+
+        assertThatThrownBy(() -> moduleService.revokeWriteAccess(
+                OPEN_ROOM_ID, module.moduleId(), host, null, host.getMemberId()))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("OWNER_CANNOT_LOSE_WRITE_ACCESS");
+
+        assertThat(moduleService.canEdit(OPEN_ROOM_ID, module.moduleId(), host)).isTrue();
+    }
+
+    @Test
+    @DisplayName("Observer cannot edit even if write access recorded (reason observer)")
+    void observer_cannotEditEvenIfInWriters() {
+        Member observer = new Member("m_obs", "s_obs", "Observer", Role.OBSERVER, false, false);
+        Room room = roomStore.get(OPEN_ROOM_ID);
+        room.getMembers().put(observer.getMemberId(), observer);
+
+        ModuleRecord module = moduleService.createApprovedModule(OPEN_ROOM_ID, host, "obs-test.py");
+        moduleService.grantWriteAccess(OPEN_ROOM_ID, module.moduleId(), host, null, observer.getMemberId());
+
+        assertThat(module.writers()).contains(observer.getMemberId());
+        // must be false because member is OBSERVER
+        assertThat(moduleService.canEdit(OPEN_ROOM_ID, module.moduleId(), observer)).isFalse();
+    }
 }
