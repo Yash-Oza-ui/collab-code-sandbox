@@ -503,9 +503,9 @@ async def analyze_slowdown(
         )
     else:
         ai_step = result["ai_step"]
+        if ai_step.error_code:
+            record_fallback(payload.room_id)
 
-    if ai_step.error_code:
-        record_fallback(payload.room_id)
     request.state.error_code = ai_step.error_code
 
     return SlowdownAnalysisResponse(
