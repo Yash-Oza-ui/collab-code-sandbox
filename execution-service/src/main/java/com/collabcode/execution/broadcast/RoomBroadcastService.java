@@ -113,6 +113,69 @@ public class RoomBroadcastService {
         }
     }
 
+    /**
+     * Sends the analysis-result message to sync-service with audience matching the run result (T-18 Decision 6, §17.1).
+     */
+    public void broadcastAnalysisResult(String roomId, String sessionId, String visibility, com.collabcode.execution.analysis.AnalysisResultMessage message) {
+        try {
+            Map<String, Object> payload = buildAnalysisPayload(message, sessionId, visibility);
+            byte[] jsonBytes = objectMapper.writeValueAsBytes(payload);
+
+            String url = syncServiceInternalUrl + "/internal/rooms/" + roomId + "/messages";
+
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(url))
+                    .timeout(Duration.ofSeconds(5))
+                    .header("Content-Type", "application/json")
+                    .header("X-Internal-Token", internalToken)
+                    .POST(HttpRequest.BodyPublishers.ofByteArray(jsonBytes))
+                    .build();
+
+            HttpResponse<String> httpResponse =
+                    httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+
+            if (httpResponse.statusCode() == 200) {
+                log.debug("broadcastAnalysisResult: room={} status=200", roomId);
+            } else {
+                log.warn("broadcastAnalysisResult: room={} unexpected status={} body={}",
+                        roomId, httpResponse.statusCode(), httpResponse.body());
+            }
+
+        } catch (Exception e) {
+            log.warn("broadcastAnalysisResult: room={} failed to deliver analysis-result to sync-service: {}",
+                    roomId, e.getMessage());
+        }
+    }
+
+    public Map<String, Object> buildAnalysisPayload(
+            com.collabcode.execution.analysis.AnalysisResultMessage msg,
+            String sessionId,
+            String visibility) {
+        Map<String, Object> m = new LinkedHashMap<>();
+
+        // T-17 V2.10 & T-18 §17.1: audience specification matching run result visibility
+        Map<String, Object> audience = new LinkedHashMap<>();
+        if ("private".equalsIgnoreCase(visibility)) {
+            audience.put("kind", "sessions");
+            audience.put("session_ids", sessionId != null ? List.of(sessionId) : Collections.emptyList());
+        } else {
+            audience.put("kind", "room");
+        }
+        m.put("audience", audience);
+
+        m.put("type", "analysis-result");
+        m.put("request_id", msg.getRequest_id());
+        m.put("analysis_id", msg.getAnalysis_id());
+        m.put("room_id", msg.getRoom_id());
+        m.put("task", msg.getTask());
+        m.put("status", msg.getStatus());
+        m.put("ai_step", msg.getAi_step());
+        m.put("result", msg.getResult() != null ? msg.getResult() : Collections.emptyMap());
+        m.put("message", msg.getMessage());
+
+        return m;
+    }
+
     public Map<String, Object> buildPayload(RunResponse r, String sessionId) {
         Map<String, Object> m = new LinkedHashMap<>();
 

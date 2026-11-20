@@ -410,6 +410,20 @@ body {
   font-size: 0.85rem;
 }
 
+.analysis-fallback-notice {
+  color: #fbbf24;
+  font-style: italic;
+}
+
+.analysis-success-notice {
+  color: #34d399;
+}
+
+.analysis-result-label {
+  font-weight: 600;
+  font-style: normal;
+}
+
 /* US-03: Remote collaborator cursor labels */
 .remote-cursor-label {
   display: inline-block;
