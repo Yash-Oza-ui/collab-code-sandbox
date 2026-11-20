@@ -5,6 +5,8 @@ Provides thread-safe in-memory usage counting for:
 - Token usage (extracted from provider response, not estimated from user text)
 - Cache hits
 - Fallback activations
+- Deterministic rule answers (US-77)
+- Local model answers (US-77)
 - Monthly external AI expenditure tracking and budget cap enforcement (US-24, NFR7.1, NFR7.2)
 - 80% budget threshold alert deduplication per UTC calendar month (US-24, NFR7.4)
 - Calendar month rollover handling (including December to January) in UTC (US-24, NFR7.1)
@@ -209,6 +211,8 @@ class UsageTracker:
         self._total_tokens_used: int = 0
         self._total_cache_hits: int = 0
         self._total_fallback_activations: int = 0
+        self._total_rules_answers: int = 0
+        self._total_local_model_answers: int = 0
 
         # Per-room counter mapping: room_id (str) -> dict of numeric metrics
         self._room_counters: dict[str, dict[str, int]] = {}
@@ -579,6 +583,8 @@ class UsageTracker:
                 "tokens_used": 0,
                 "cache_hits": 0,
                 "fallback_activations": 0,
+                "rules_answers": 0,
+                "local_model_answers": 0,
             }
         return self._room_counters[room_id]
 
@@ -650,6 +656,43 @@ class UsageTracker:
             if room_id:
                 room = self._ensure_room(str(room_id))
                 room["fallback_activations"] += 1
+
+    def record_rules_answer(self, room_id: Optional[str] = None) -> None:
+        """Record an answer resolved via deterministic rules/statistics (US-77, FR40.3).
+
+        Args:
+            room_id: The room identifier where the rule answered. When None or empty,
+                     updates platform totals without creating a synthetic room entry.
+        """
+        with self._lock:
+            self._total_rules_answers += 1
+            if room_id:
+                room = self._ensure_room(str(room_id))
+                room["rules_answers"] = room.get("rules_answers", 0) + 1
+
+    def record_local_model_answer(self, room_id: Optional[str] = None) -> None:
+        """Record an answer resolved via an optional local model (US-77, FR40.3).
+
+        Args:
+            room_id: The room identifier where the local model answered. When None or empty,
+                     updates platform totals without creating a synthetic room entry.
+        """
+        with self._lock:
+            self._total_local_model_answers += 1
+            if room_id:
+                room = self._ensure_room(str(room_id))
+                room["local_model_answers"] = room.get("local_model_answers", 0) + 1
+
+    def get_stage_counters(self) -> dict[str, int]:
+        """Return breakdown of stages that answered requests (metadata only, NFR8.2, US-77)."""
+        with self._lock:
+            return {
+                "cache_hits": self._total_cache_hits,
+                "rules_answers": self._total_rules_answers,
+                "local_model_answers": self._total_local_model_answers,
+                "model_calls": self._total_model_calls,
+                "fallback_activations": self._total_fallback_activations,
+            }
 
     def clear_room(self, room_id: str) -> bool:
         """Remove counters for a specific room when closed/deleted (US-56, FR32).
@@ -742,6 +785,8 @@ class UsageTracker:
             self._total_tokens_used = 0
             self._total_cache_hits = 0
             self._total_fallback_activations = 0
+            self._total_rules_answers = 0
+            self._total_local_model_answers = 0
             self._room_counters.clear()
             self._monthly_tokens_used = 0
             self._alert_80_percent_triggered = False
@@ -788,6 +833,21 @@ def record_cache_hit(room_id: Optional[str] = None) -> None:
 def record_fallback(room_id: Optional[str] = None) -> None:
     """Record a fallback / skipped AI step activation (FR40.1, US-75)."""
     _default_tracker.record_fallback(room_id=room_id)
+
+
+def record_rules_answer(room_id: Optional[str] = None) -> None:
+    """Record a deterministic rules answer (US-77, FR40.3)."""
+    _default_tracker.record_rules_answer(room_id=room_id)
+
+
+def record_local_model_answer(room_id: Optional[str] = None) -> None:
+    """Record an answer from an optional local model (US-77, FR40.3)."""
+    _default_tracker.record_local_model_answer(room_id=room_id)
+
+
+def get_stage_counters() -> dict[str, int]:
+    """Return stage counter breakdown (US-77)."""
+    return _default_tracker.get_stage_counters()
 
 
 def clear_room(room_id: str) -> bool:

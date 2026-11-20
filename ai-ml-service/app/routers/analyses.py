@@ -14,6 +14,8 @@ import numpy as np
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from app import chain
+from app.chain import ChainRequest
 from app.config import settings
 from app.cache import compute_cache_key, get_analysis_cache
 from app.counters import (
@@ -26,7 +28,6 @@ from app.limiter import get_room_rate_limiter
 from app.llm import (
     AIDisabledError,
     ConsentMissingError,
-    CostCapReachedError,
     LLMProviderError,
     LLMRateLimitError,
     LLMTimeoutError,
@@ -227,7 +228,7 @@ def estimate_complexity_from_measurements(measurements: list[MeasurementItem]) -
 
 @router.post("/analyses/complexity", response_model=ComplexityResponse)
 async def analyze_complexity(payload: ComplexityRequest, request: Request) -> ComplexityResponse:
-    """Analyze time complexity using rules-first static analysis and AI fallback (US-17, US-65..US-67, FR12.3, US-76)."""
+    """Analyze time complexity using rules-first static analysis and central method chain (US-17, US-65..US-67, US-77, FR12.3, FR40.3)."""
     request.state.request_id = payload.request_id
     request.state.room_id = payload.room_id
     request.state.request_type = payload.request_type
@@ -236,27 +237,7 @@ async def analyze_complexity(payload: ComplexityRequest, request: Request) -> Co
     # 1. Compute empirical complexity metrics from measurements (FR36.1, FR36.2)
     comp_metrics = estimate_complexity_from_measurements(payload.measurements)
 
-    # 2. Define the AI optimization fallback with relevant code extraction (FR40.2, US-76)
-    async def ai_fallback() -> str:
-        detected_patterns = detect_slow_patterns(payload.code, language=payload.language)
-        target_line = detected_patterns[0]["line"] if detected_patterns else None
-        relevant_code = extract_relevant_section(
-            code=payload.code,
-            language=payload.language,
-            error_line=target_line,
-        )
-        prompt = (
-            f"Suggest an optimization fix for {payload.language} code:\n"
-            f"```\n{relevant_code}\n```"
-        )
-        return await call_llm_with_consent(
-            prompt=prompt,
-            consent=payload.consent,
-            ai_enabled=payload.ai_enabled,
-            room_id=payload.room_id,
-        )
-
-    # 3. Rules-First Static Analysis with Central Consent/AI Gate (FR12.2, FR12.3, FR35, US-67)
+    # 2. Rules-First Static Analysis via Central Method Chain (US-77, US-67, FR40.3)
     rules_first = (
         payload.rules_first is not False
         and request.headers.get("x-rules-first", "").lower() not in ("false", "0")
@@ -268,16 +249,14 @@ async def analyze_complexity(payload: ComplexityRequest, request: Request) -> Co
         language=payload.language,
         consent=payload.consent,
         ai_enabled=payload.ai_enabled,
-        ai_fallback=ai_fallback,
         room_id=payload.room_id,
         request_type="complexity",
         rules_first=rules_first,
     )
-
     ai_step = rule_analysis["ai_step"]
     request.state.error_code = ai_step.get("error_code")
 
-    # 4. Sandbox patch verification (FR36.3, US-66)
+    # 3. Sandbox patch verification (FR36.3, US-66)
     if ai_step.get("status") == "ok":
         if payload.suggested_patch and payload.suggested_patch_runtimes_ms and payload.measurements:
             orig_medians = [float(np.median(m.runtimes_ms)) for m in payload.measurements if m.runtimes_ms]
@@ -293,6 +272,15 @@ async def analyze_complexity(payload: ComplexityRequest, request: Request) -> Co
                     ai_step["verified"] = False
                     ai_step["verified_speedup_pct"] = None
 
+    slow_patterns_list = [
+        SlowPatternItem(
+            pattern=p["pattern"],
+            line=p["line"],
+            message=p["message"],
+        )
+        for p in rule_analysis.get("slow_patterns", [])
+    ]
+
     return ComplexityResponse(
         request_id=payload.request_id,
         analysis_id=payload.analysis_id,
@@ -301,14 +289,7 @@ async def analyze_complexity(payload: ComplexityRequest, request: Request) -> Co
         estimated_complexity=comp_metrics["estimated_complexity"],
         r2_score=comp_metrics["r2_score"],
         projected_timeout_input_size=comp_metrics["projected_timeout_input_size"],
-        slow_patterns=[
-            SlowPatternItem(
-                pattern=p["pattern"],
-                line=p["line"],
-                message=p["message"],
-            )
-            for p in rule_analysis.get("slow_patterns", [])
-        ],
+        slow_patterns=slow_patterns_list,
         ai_step=AIStepResponse(
             status=ai_step["status"],
             error_code=ai_step.get("error_code"),
@@ -321,7 +302,7 @@ async def analyze_complexity(payload: ComplexityRequest, request: Request) -> Co
 
 @router.post("/analyses/crash-explanation", response_model=CrashExplanationResponse)
 async def explain_crash(payload: CrashExplanationRequest, request: Request) -> CrashExplanationResponse:
-    """Explain sanitizer crash report for C/C++ code (US-73, US-74, US-76, T-18 v2 §16.4)."""
+    """Explain sanitizer crash report for C/C++ code using central method chain (US-73, US-74, US-76, US-77, T-18 v2 §16.4)."""
     request.state.request_id = payload.request_id
     request.state.room_id = payload.room_id
     request.state.request_type = payload.request_type
@@ -345,7 +326,6 @@ async def explain_crash(payload: CrashExplanationRequest, request: Request) -> C
     line_number = parsed.line_number
     summary = parsed.summary
 
-    # 3. Controlled AI pipeline (US-17, US-21, FR12.4, FR35, NFR5.3, NFR5.2, US-22, US-75)
     if not error_type and not summary:
         ai_step = CrashAIStep(
             status="ok",
@@ -353,147 +333,57 @@ async def explain_crash(payload: CrashExplanationRequest, request: Request) -> C
             explanation=None,
             suggested_fix=None,
         )
-    elif payload.consent is not True:
-        record_fallback(payload.room_id)
-        ai_step = CrashAIStep(
-            status="skipped",
-            error_code="CONSENT_MISSING",
-            explanation=None,
-            suggested_fix=None,
+        return CrashExplanationResponse(
+            request_id=payload.request_id,
+            analysis_id=payload.analysis_id,
+            task="crash_explanation",
+            error_type=error_type,
+            line_number=line_number,
+            summary=summary,
+            ai_step=ai_step,
         )
-    elif payload.ai_enabled is not True:
-        record_fallback(payload.room_id)
+
+    # 3. Controlled AI pipeline using Central Method Chain (US-77, FR40.3)
+    req_type = payload.request_type or "crash_explanation"
+    err_sig = f"{error_type}:{line_number}" if error_type and line_number else (error_type or "")
+    chain_req = ChainRequest(
+        request_type=req_type,
+        code=payload.code_snippet,
+        language=payload.language,
+        room_id=payload.room_id,
+        request_id=payload.request_id,
+        consent=payload.consent,
+        ai_enabled=payload.ai_enabled,
+        failure_kind="crash",
+        exit_code=139,
+        error_output=payload.sanitizer_output,
+        sanitizer_output=payload.sanitizer_output,
+        error_signature=err_sig,
+        error_line=line_number,
+        pre_sliced=True,
+    )
+    chain_resp = await chain.answer(chain_req)
+    c_step = chain_resp.ai_step
+    status_str = c_step.get("status", "skipped")
+    err_code = c_step.get("error_code")
+    request.state.error_code = err_code
+
+    if status_str == "ok":
+        explanation = c_step.get("explanation") or chain_resp.answer
+        suggested_fix = c_step.get("suggested_fix") or (f"Add boundary check before line {line_number}." if line_number else None)
         ai_step = CrashAIStep(
-            status="skipped",
-            error_code="AI_DISABLED",
-            explanation=None,
-            suggested_fix=None,
+            status="ok",
+            error_code=None,
+            explanation=explanation,
+            suggested_fix=suggested_fix,
         )
     else:
-        cache = get_analysis_cache()
-        cache_key = compute_cache_key(
-            code=payload.code_snippet,
-            language=payload.language,
-            request_type="crash_explanation",
-            error_signature=f"{error_type}:{line_number}",
-            error_output=payload.sanitizer_output,
+        ai_step = CrashAIStep(
+            status="skipped",
+            error_code=err_code,
+            explanation=None,
+            suggested_fix=None,
         )
-        cached = cache.get(cache_key, room_id=payload.room_id)
-        if cached is not None and "explanation" in cached:
-            ai_step = CrashAIStep(
-                status="ok",
-                error_code=None,
-                explanation=str(cached["explanation"]),
-                suggested_fix=cached.get("suggested_fix"),
-            )
-        elif payload.room_id and not get_room_rate_limiter().check_and_reserve(payload.room_id):
-            record_fallback(payload.room_id)
-            ai_step = CrashAIStep(
-                status="skipped",
-                error_code="ROOM_RATE_LIMITED",
-                explanation=None,
-                suggested_fix=None,
-            )
-        else:
-            try:
-                explanation = await generate_explanation(
-                    language=payload.language,
-                    consent=payload.consent,
-                    ai_enabled=payload.ai_enabled,
-                    failure_kind="crash",
-                    exit_code=139,
-                    stderr=payload.sanitizer_output,
-                    timed_out=False,
-                    oom_killed=False,
-                    code=payload.code_snippet,
-                    request_id=payload.request_id,
-                    room_id=payload.room_id,
-                    error_line=line_number,
-                    pre_sliced=True,
-                )
-                suggested_fix = f"Add boundary check before line {line_number}." if line_number is not None else "Review code logic around reported failure."
-                cache.set(
-                    cache_key,
-                    {"explanation": explanation, "suggested_fix": suggested_fix},
-                    room_id=payload.room_id,
-                )
-                ai_step = CrashAIStep(
-                    status="ok",
-                    error_code=None,
-                    explanation=explanation,
-                    suggested_fix=suggested_fix,
-                )
-            except RoomRateLimitedError:
-                record_fallback(payload.room_id)
-                ai_step = CrashAIStep(
-                    status="skipped",
-                    error_code="ROOM_RATE_LIMITED",
-                    explanation=None,
-                    suggested_fix=None,
-                )
-            except ConsentMissingError:
-                record_fallback(payload.room_id)
-                ai_step = CrashAIStep(
-                    status="skipped",
-                    error_code="CONSENT_MISSING",
-                    explanation=None,
-                    suggested_fix=None,
-                )
-            except AIDisabledError:
-                record_fallback(payload.room_id)
-                ai_step = CrashAIStep(
-                    status="skipped",
-                    error_code="AI_DISABLED",
-                    explanation=None,
-                    suggested_fix=None,
-                )
-            except CostCapReachedError:
-                logger.info("Crash explanation skipped: monthly AI cost cap reached (NFR7.2)")
-                record_fallback(payload.room_id)
-                ai_step = CrashAIStep(
-                    status="skipped",
-                    error_code="COST_CAP_REACHED",
-                    explanation=None,
-                    suggested_fix=None,
-                )
-            except LLMTimeoutError:
-                logger.warning("Crash explanation LLM call timed out")
-                record_fallback(payload.room_id)
-                ai_step = CrashAIStep(
-                    status="skipped",
-                    error_code="PROVIDER_TIMEOUT",
-                    explanation=None,
-                    suggested_fix=None,
-                )
-            except LLMRateLimitError:
-                logger.warning("Crash explanation LLM call rate limited")
-                record_fallback(payload.room_id)
-                ai_step = CrashAIStep(
-                    status="skipped",
-                    error_code="RATE_LIMITED_PROVIDER",
-                    explanation=None,
-                    suggested_fix=None,
-                )
-            except LLMProviderError as e:
-                logger.warning("Crash explanation LLM provider error: %s", e.code)
-                record_fallback(payload.room_id)
-                ai_step = CrashAIStep(
-                    status="skipped",
-                    error_code=e.code,
-                    explanation=None,
-                    suggested_fix=None,
-                )
-            except Exception as e:
-                logger.warning("Crash explanation LLM call failed: %s", type(e).__name__)
-                record_fallback(payload.room_id)
-                ai_step = CrashAIStep(
-                    status="skipped",
-                    error_code="PROVIDER_ERROR",
-                    explanation=None,
-                    suggested_fix=None,
-                )
-
-    request.state.error_code = ai_step.error_code
 
     return CrashExplanationResponse(
         request_id=payload.request_id,
