@@ -8,6 +8,13 @@ import { MonacoBinding } from 'y-monaco'
 import DisplayNamePrompt from './DisplayNamePrompt'
 import RunPanel from './RunPanel'
 import RunOutputPanel from './RunOutputPanel'
+import WorkspacePanel from './WorkspacePanel'
+import {
+  createModule,
+  listModules,
+  validateModuleName,
+  type WorkspaceModule,
+} from './workspaceApi'
 import {
   applyRosterNamesToAwareness,
   createAwareness,
@@ -148,6 +155,14 @@ export default function RoomPage(props: RoomPageProps = {}) {
   const [runOutput, setRunOutput] = useState<RunResponseData | null>(null)
   // Role from the server's `joined` or `roster` message (T-10 Host badge / US-27 Observer mode)
   const [roomMode, setRoomMode] = useState<{ mode: string; detail?: string } | null>(null)
+  // Open mode workspace modules (US-39, V2.6)
+  const [workspaceModules, setWorkspaceModules] = useState<WorkspaceModule[]>([])
+  const [activeModuleId, setActiveModuleId] = useState<string | null>(propDocId ?? null)
+  const activeModuleIdRef = useRef<string | null>(propDocId ?? null)
+  const [workspaceError, setWorkspaceError] = useState<string | null>(null)
+  const [isCreatingModule, setIsCreatingModule] = useState(false)
+  const [workspaceLanguage, setWorkspaceLanguage] = useState<string | undefined>(undefined)
+  const connRef = useRef<AwarenessWsConnection | null>(null)
   const [role, setRole] = useState<string | null>(null)
   const [myMemberId, setMyMemberId] = useState<string | null>(null)
   const [roster, setRoster] = useState<RosterMember[]>([])
@@ -419,12 +434,37 @@ export default function RoomPage(props: RoomPageProps = {}) {
           applyRole(joined.role)
           setMyCanRun(typeof joined.permissions?.can_run === 'boolean' ? joined.permissions.can_run : null)
           setMyRunDeniedReason(joined.permissions?.run_denied_reason ?? null)
-          // V2.3 joined carries mode and preset, but no Open workspace language.
-          // Do not infer it from creation state or the shared URL.
+          const openLang = typeof joined.language === 'string' ? joined.language : undefined
+          setWorkspaceLanguage(openLang)
+          if (openLang) {
+            setCurrentLanguage(openLang as SupportedLanguage)
+          }
           setRoomMode({
             mode: joined.mode,
-            detail: joined.mode === 'pair' ? joined.preset : undefined,
+            detail: joined.mode === 'pair' ? joined.preset : openLang,
           })
+          if (joined.mode === 'open') {
+            const syncBase = wsOptions?.syncWsUrl
+              ? wsOptions.syncWsUrl.replace(/^ws/, 'http').replace(/\/ws\/rooms.*$/, '')
+              : undefined
+            void listModules({
+              roomId,
+              sessionId,
+              baseUrl: syncBase,
+              fetchFn: wsOptions?.fetchFn,
+            }).then((res) => {
+              if (res.ok) {
+                setWorkspaceModules(res.data)
+                const approved = res.data.filter((m) => !m.pending)
+                if (approved.length > 0 && !activeModuleIdRef.current) {
+                  const entry = approved.find((m) => m.is_entry) ?? approved[0]
+                  setActiveModuleId(entry.module_id)
+                  activeModuleIdRef.current = entry.module_id
+                  conn.switchDoc?.(entry.module_id)
+                }
+              }
+            })
+          }
           const name = pendingNameRef.current
           if (!name) return
 
@@ -442,6 +482,39 @@ export default function RoomPage(props: RoomPageProps = {}) {
             try { sessionStorage.setItem(resumeNameKey, name) } catch { /* storage disabled */ }
           }
           onDisplayNameAcceptedRef.current?.(name, color)
+        },
+        onModuleUpdated: (msg) => {
+          if (msg.deleted) {
+            setWorkspaceModules((prev) => prev.filter((m) => m.module_id !== msg.module_id))
+            if (activeModuleIdRef.current === msg.module_id) {
+              setWorkspaceModules((current) => {
+                const remaining = current.filter((m) => m.module_id !== msg.module_id && !m.pending)
+                const next = remaining[0]?.module_id ?? null
+                setActiveModuleId(next)
+                activeModuleIdRef.current = next
+                if (next && conn.switchDoc) {
+                  conn.switchDoc(next)
+                }
+                return current.filter((m) => m.module_id !== msg.module_id)
+              })
+            }
+          } else {
+            setWorkspaceModules((prev) => {
+              const idx = prev.findIndex((m) => m.module_id === msg.module_id)
+              if (idx >= 0) {
+                const copy = [...prev]
+                copy[idx] = { ...copy[idx], ...msg }
+                return copy
+              } else {
+                return [...prev, msg]
+              }
+            })
+            if (!activeModuleIdRef.current && !msg.pending) {
+              setActiveModuleId(msg.module_id)
+              activeModuleIdRef.current = msg.module_id
+              conn.switchDoc?.(msg.module_id)
+            }
+          }
         },
         onRoster: (roster) => {
           rosterRef.current = roster.members ?? []
@@ -896,6 +969,54 @@ export default function RoomPage(props: RoomPageProps = {}) {
     }
   }
 
+  const handleSelectModule = useCallback((moduleId: string) => {
+    setActiveModuleId(moduleId)
+    activeModuleIdRef.current = moduleId
+    connRef.current?.switchDoc?.(moduleId)
+  }, [])
+
+  const handleCreateModule = useCallback(
+    async (name: string) => {
+      if (!roomId) return
+      const validation = validateModuleName(name, workspaceLanguage)
+      if (!validation.valid) {
+        setWorkspaceError(validation.error ?? 'Invalid module name.')
+        return
+      }
+      setWorkspaceError(null)
+      setIsCreatingModule(true)
+      const token = readOwnerToken(roomId)
+      const syncBase = wsOptions?.syncWsUrl
+        ? wsOptions.syncWsUrl.replace(/^ws/, 'http').replace(/\/ws\/rooms.*$/, '')
+        : undefined
+      const res = await createModule(
+        {
+          roomId,
+          sessionId: sessionIdRef.current,
+          ownerToken: token,
+          baseUrl: syncBase,
+          fetchFn: wsOptions?.fetchFn,
+        },
+        name,
+      )
+      setIsCreatingModule(false)
+      if (!res.ok) {
+        setWorkspaceError(res.error)
+      } else {
+        setWorkspaceModules((prev) => {
+          if (prev.some((m) => m.module_id === res.data.module_id)) return prev
+          return [...prev, res.data]
+        })
+        if (!activeModuleIdRef.current && !res.data.pending) {
+          setActiveModuleId(res.data.module_id)
+          activeModuleIdRef.current = res.data.module_id
+          connRef.current?.switchDoc?.(res.data.module_id)
+        }
+      }
+    },
+    [roomId, workspaceLanguage, wsOptions?.fetchFn, wsOptions?.syncWsUrl],
+  )
+
   // A run-result frame can carry a stale or untrusted display_name. Only the
   // server roster's member_id -> display_name mapping may label the runner.
   const runnerMember = runOutput?.runner?.member_id
@@ -999,6 +1120,19 @@ export default function RoomPage(props: RoomPageProps = {}) {
           </span>
         )}
       </header>
+      {roomMode?.mode === 'open' && (
+        <WorkspacePanel
+          roomId={roomId || ''}
+          isHost={isHost}
+          language={workspaceLanguage}
+          modules={workspaceModules}
+          activeModuleId={activeModuleId}
+          onSelectModule={handleSelectModule}
+          onCreateModule={handleCreateModule}
+          creationError={workspaceError}
+          isCreating={isCreatingModule}
+        />
+      )}
       <section className="room-participants" aria-label="Room participants">
         <h3>Participants ({roster.length})</h3>
 

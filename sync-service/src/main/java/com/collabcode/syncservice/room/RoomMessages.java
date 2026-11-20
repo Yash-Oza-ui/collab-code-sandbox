@@ -26,6 +26,9 @@ public final class RoomMessages {
         m.put("role", member.getRole().value());
         m.put("mode", room.getMode().value());
         m.put("preset", room.getPreset());
+        if (room.getLanguage() != null) {
+            m.put("language", room.getLanguage());
+        }
         m.put("permissions", permissions(room, member));
         return m;
     }

@@ -350,6 +350,20 @@ export interface RunResultMessage {
   [key: string]: unknown
 }
 
+export interface ModuleUpdatedMessage {
+  type: 'module-updated'
+  module_id: string
+  name: string
+  owner_member_id: string
+  writers?: string[]
+  runnable?: boolean
+  is_entry?: boolean
+  version?: number
+  pending?: boolean
+  deleted?: boolean
+  [key: string]: unknown
+}
+
 export interface ConnectAwarenessWsOptions {
   roomId: string
   displayName?: string
@@ -375,6 +389,8 @@ export interface ConnectAwarenessWsOptions {
   onEditRejected?: (msg: EditRejectedMessage) => void
   /** A run finished in this room (T-17 section 3.6); delivered to every participant. */
   onRunResult?: (msg: RunResultMessage) => void
+  /** A module was created, approved, updated or deleted in Open mode (V2.6, US-39). */
+  onModuleUpdated?: (msg: ModuleUpdatedMessage) => void
   onError?: (event: Event) => void
   onClose?: (event: CloseEvent) => void
   onDocError?: (event: Event) => void
@@ -390,6 +406,7 @@ export interface AwarenessWsConnection {
   /** Additional Open-mode module transports, indexed by opaque module ID. */
   moduleSockets: ReadonlyMap<string, WebSocket>
   join: (displayName: string, ownerToken?: string) => void
+  switchDoc?: (newDocId: string) => void
   destroy: () => void
 }
 
@@ -422,6 +439,7 @@ export function connectAwarenessWs(
     onHostGranted,
     onEditRejected,
     onRunResult,
+    onModuleUpdated,
     onError,
     onClose,
     onDocError,
@@ -443,6 +461,8 @@ export function connectAwarenessWs(
 
   let controlWs: WebSocket | null = null
   let docWs: WebSocket | null = null
+  let activeDocId: string | undefined = docId
+  let lastJoinedMsg: JoinedMessage | null = null
   const moduleSockets = new Map<string, WebSocket>()
   // Production RoomPage does not supply moduleDocs. Own inactive module docs here
   // so every approved Open-mode module can participate in Yjs resynchronization.
@@ -673,7 +693,7 @@ export function connectAwarenessWs(
   const openDocumentSocket = async (joinedMsg?: JoinedMessage) => {
     if (isDestroyed || docWs) return
 
-    let resolvedDocId = docId
+    let resolvedDocId = activeDocId ?? docId
     const roomMode = joinedMsg?.mode ? String(joinedMsg.mode).toLowerCase() : undefined
 
     if (roomMode === 'pair') {
@@ -892,6 +912,7 @@ export function connectAwarenessWs(
             clearJoinTimer()
             pendingJoin = null
             activeHandshake = null
+            lastJoinedMsg = msg as JoinedMessage
             onJoined?.(msg as JoinedMessage)
             waitingForDoc = true
             void openDocumentSocket(msg as JoinedMessage).catch(() => {
@@ -914,6 +935,8 @@ export function connectAwarenessWs(
             onEditRejected?.(msg as EditRejectedMessage)
           } else if (msg.type === 'run-result') {
             onRunResult?.(msg as RunResultMessage)
+          } else if (msg.type === 'module-updated') {
+            onModuleUpdated?.(msg as ModuleUpdatedMessage)
           }
         } catch {
           // ignore non-json control frames
@@ -1053,6 +1076,21 @@ export function connectAwarenessWs(
     }
   }
 
+  const switchDoc = (newDocId: string) => {
+    if (isDestroyed || !newDocId || newDocId === activeDocId) return
+    activeDocId = newDocId
+    if (moduleSockets.has(newDocId)) {
+      closeModuleSocket(newDocId)
+    }
+    closeDocumentSocket()
+    if (hasJoined) {
+      waitingForDoc = true
+      void openDocumentSocket(lastJoinedMsg ?? undefined).catch(() => {
+        if (!isDestroyed && waitingForDoc) scheduleReconnect()
+      })
+    }
+  }
+
   return {
     get controlWs() {
       return controlWs
@@ -1062,6 +1100,7 @@ export function connectAwarenessWs(
     },
     moduleSockets,
     join,
+    switchDoc,
     destroy,
   }
 }
