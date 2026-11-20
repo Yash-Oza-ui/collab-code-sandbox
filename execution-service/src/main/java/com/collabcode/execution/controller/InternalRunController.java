@@ -1,9 +1,11 @@
 package com.collabcode.execution.controller;
 
 import com.collabcode.execution.budget.RunBudget;
+import com.collabcode.execution.budget.RunBudgetExceededException;
 import com.collabcode.execution.budget.RunBudgetFactory;
 import com.collabcode.execution.controller.RunController.UnsupportedLanguageException;
 import com.collabcode.execution.exception.InvalidRequestException;
+import com.collabcode.execution.model.BatchRunSpec;
 import com.collabcode.execution.model.InternalRunRequest;
 import com.collabcode.execution.model.RunFile;
 import com.collabcode.execution.model.RunSpec;
@@ -225,31 +227,48 @@ public class InternalRunController {
             );
         }
 
-        List<Map<String, Object>> batchResults = new ArrayList<>(inputs.size());
-        for (int i = 0; i < inputs.size(); i++) {
-            String input = inputs.get(i);
-            RunSpec spec = new RunSpec(
-                    language,
-                    List.of(new RunFile(entryName, req.getCode())),
-                    entryName,
-                    input
-            );
-            ExecutionResult res = budget.execute(() -> codeRunner.execute(spec));
+        BatchRunSpec batchSpec = new BatchRunSpec(
+                language,
+                List.of(new RunFile(entryName, req.getCode())),
+                entryName,
+                inputs,
+                expectedOutputs
+        );
 
+        List<ExecutionResult> results;
+        try {
+            results = budget.executeInQueueGate(() -> codeRunner.executeBatch(batchSpec, budget));
+        } catch (RunBudgetExceededException ex) {
+            // US-71 / NFR14: Results of tests already run are preserved and returned in contract shape
+            List<Map<String, Object>> partialBatchResults = new ArrayList<>();
+            List<ExecutionResult> completed = ex.getCompletedResults();
+            for (int i = 0; i < completed.size(); i++) {
+                ExecutionResult res = completed.get(i);
+                String input = i < inputs.size() ? inputs.get(i) : "";
+                String expected = (expectedOutputs != null && i < expectedOutputs.size()) ? expectedOutputs.get(i) : null;
+                String status = classifyBatchStatus(res, expected);
+                partialBatchResults.add(formatBatchItem(input, status, res, expected));
+            }
+            throw new RunBudgetExceededException(
+                    ex.getRequestId(),
+                    ex.getLimitKind(),
+                    ex.getRunsCompleted(),
+                    ex.getMaxRuns(),
+                    ex.getElapsedTimeMs(),
+                    ex.getAggregateTimeBudgetMs(),
+                    ex.getRetryAfterSeconds(),
+                    ex.getCompletedResults(),
+                    partialBatchResults
+            );
+        }
+
+        List<Map<String, Object>> batchResults = new ArrayList<>(results.size());
+        for (int i = 0; i < results.size(); i++) {
+            ExecutionResult res = results.get(i);
+            String input = inputs.get(i);
             String expected = expectedOutputs != null ? expectedOutputs.get(i) : null;
             String status = classifyBatchStatus(res, expected);
-
-            Map<String, Object> item = new LinkedHashMap<>();
-            item.put("input", input);
-            item.put("status", status);
-            item.put("stdout", res.getStdout());
-            item.put("stderr", res.getStderr());
-            if (expectedOutputs != null) {
-                item.put("expected_output", expected);
-            }
-            item.put("exit_code", res.getExitCode());
-            item.put("execution_time_ms", res.getExecutionTimeMs());
-            batchResults.add(item);
+            batchResults.add(formatBatchItem(input, status, res, expected));
         }
 
         Map<String, Object> body = new LinkedHashMap<>();
@@ -257,6 +276,29 @@ public class InternalRunController {
         body.put("purpose", "test_batch");
         body.put("batch_results", batchResults);
         return body;
+    }
+
+    private static Map<String, Object> formatBatchItem(
+            String input,
+            String status,
+            ExecutionResult res,
+            String expectedOutput) {
+        Map<String, Object> item = new LinkedHashMap<>();
+        item.put("input", input);
+        item.put("status", status);
+        item.put("stdout", res != null ? res.getStdout() : "");
+        item.put("stderr", res != null ? res.getStderr() : "");
+        if (expectedOutput != null) {
+            item.put("expected_output", expectedOutput);
+        }
+        item.put("exit_code", res != null ? res.getExitCode() : 1);
+        item.put("execution_time_ms", res != null ? res.getExecutionTimeMs() : 0.0);
+        if (res != null) {
+            item.put("timed_out", res.isTimedOut());
+            item.put("oom_killed", res.isOomKilled());
+            item.put("output_truncated", res.isOutputTruncated());
+        }
+        return item;
     }
 
     private Map<String, Object> runSanitizer(
