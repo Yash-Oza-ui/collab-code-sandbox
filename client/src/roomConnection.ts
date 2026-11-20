@@ -10,6 +10,7 @@ export interface JoinedMessage {
   role?: string
   mode?: string
   preset?: string
+  language?: string
   permissions?: unknown
 }
 
@@ -163,6 +164,9 @@ export async function joinRoom(
             : {}),
           ...(typeof message.preset === 'string'
             ? { preset: message.preset }
+            : {}),
+          ...(typeof message.language === 'string'
+            ? { language: message.language }
             : {}),
           ...(message.permissions !== undefined
             ? { permissions: message.permissions }

@@ -8,6 +8,17 @@ import { MonacoBinding } from 'y-monaco'
 import DisplayNamePrompt from './DisplayNamePrompt'
 import RunPanel from './RunPanel'
 import RunOutputPanel from './RunOutputPanel'
+import WorkspacePanel from './WorkspacePanel'
+import {
+  approveModule,
+  createModule,
+  declineModule,
+  listModules,
+  listPendingModules,
+  requestModule,
+  validateModuleName,
+  type WorkspaceModule,
+} from './workspaceApi'
 import {
   applyRosterNamesToAwareness,
   createAwareness,
@@ -148,6 +159,13 @@ export default function RoomPage(props: RoomPageProps = {}) {
   const [runOutput, setRunOutput] = useState<RunResponseData | null>(null)
   // Role from the server's `joined` or `roster` message (T-10 Host badge / US-27 Observer mode)
   const [roomMode, setRoomMode] = useState<{ mode: string; detail?: string } | null>(null)
+  // Open mode workspace modules (US-39, V2.6)
+  const [workspaceModules, setWorkspaceModules] = useState<WorkspaceModule[]>([])
+  const [activeModuleId, setActiveModuleId] = useState<string | null>(propDocId ?? null)
+  const activeModuleIdRef = useRef<string | null>(propDocId ?? null)
+  const [workspaceError, setWorkspaceError] = useState<string | null>(null)
+  const [isCreatingModule, setIsCreatingModule] = useState(false)
+  const [workspaceLanguage, setWorkspaceLanguage] = useState<string | undefined>(undefined)
   const [role, setRole] = useState<string | null>(null)
   const [myMemberId, setMyMemberId] = useState<string | null>(null)
   const [roster, setRoster] = useState<RosterMember[]>([])
@@ -188,6 +206,30 @@ export default function RoomPage(props: RoomPageProps = {}) {
 
   const awarenessInstanceRef = useRef<Awareness | null>(null)
   const connRef = useRef<AwarenessWsConnection | null>(null)
+  const moduleDocsRef = useRef<Map<string, Y.Doc>>(new Map())
+
+  const getModuleDoc = useCallback(
+    (id: string): Y.Doc => {
+      if (moduleDocs?.has(id)) {
+        return moduleDocs.get(id)!
+      }
+      let existing = moduleDocsRef.current.get(id)
+      if (!existing) {
+        existing = new Y.Doc()
+        moduleDocsRef.current.set(id, existing)
+      }
+      return existing
+    },
+    [moduleDocs],
+  )
+
+  const getActiveDoc = useCallback((): Y.Doc | null => {
+    if (roomMode?.mode === 'open' && activeModuleIdRef.current) {
+      return getModuleDoc(activeModuleIdRef.current)
+    }
+    return docRef.current
+  }, [getModuleDoc, roomMode?.mode, docRef])
+
   const pendingNameRef = useRef<string | null>(null)
   // A room-specific name is safe to retain; the session ID remains stable separately.
   const resumeNameKey = roomId ? `collab_room_name:${roomId}:${wsOptions?.sessionId ?? getCollabSessionId()}` : null
@@ -203,7 +245,7 @@ export default function RoomPage(props: RoomPageProps = {}) {
 
   const renderRemoteCursorLabels = useCallback(() => {
     const editor = editorRef.current
-    const doc = docRef.current
+    const doc = getActiveDoc()
     const awareness = awarenessInstanceRef.current
     const model = editor?.getModel()
 
@@ -296,6 +338,26 @@ export default function RoomPage(props: RoomPageProps = {}) {
 
     setActivePresence(Array.from(seenByMemberId.values()))
   }, [])
+
+  const bindEditorToDoc = useCallback(
+    (targetDoc: Y.Doc | null) => {
+      if (!editorRef.current || !targetDoc || !awarenessInstanceRef.current) return
+      const model = editorRef.current.getModel()
+      if (!model) return
+
+      bindingRef.current?.destroy()
+      bindingRef.current = null
+
+      bindingRef.current = new MonacoBinding(
+        targetDoc.getText('monaco'),
+        model,
+        new Set([editorRef.current]),
+        awarenessInstanceRef.current,
+      )
+      renderRemoteCursorLabels()
+    },
+    [renderRemoteCursorLabels],
+  )
 
   // One place for role changes (joined, roster). A role that is not Host means any stored owner
   // token is retired, so the previous Host drops it after a transfer (V2.19) and the Host
@@ -419,12 +481,55 @@ export default function RoomPage(props: RoomPageProps = {}) {
           applyRole(joined.role)
           setMyCanRun(typeof joined.permissions?.can_run === 'boolean' ? joined.permissions.can_run : null)
           setMyRunDeniedReason(joined.permissions?.run_denied_reason ?? null)
-          // V2.3 joined carries mode and preset, but no Open workspace language.
-          // Do not infer it from creation state or the shared URL.
+          const openLang = typeof joined.language === 'string' ? joined.language : undefined
+          setWorkspaceLanguage(openLang)
+          if (openLang) {
+            setCurrentLanguage(openLang as SupportedLanguage)
+          }
           setRoomMode({
             mode: joined.mode,
-            detail: joined.mode === 'pair' ? joined.preset : undefined,
+            detail: joined.mode === 'pair' ? joined.preset : openLang,
           })
+          if (joined.mode === 'open') {
+            const syncBase = wsOptions?.syncWsUrl
+              ? wsOptions.syncWsUrl.replace(/^ws/, 'http').replace(/\/ws\/rooms.*$/, '')
+              : undefined
+            void listModules({
+              roomId,
+              sessionId,
+              baseUrl: syncBase,
+              fetchFn: wsOptions?.fetchFn,
+            }).then(async (res) => {
+              if (res.ok) {
+                let allMods = res.data
+                const token = readOwnerToken(roomId)
+                if (token || isHost) {
+                  const pendingRes = await listPendingModules({
+                    roomId,
+                    sessionId,
+                    ownerToken: token,
+                    baseUrl: syncBase,
+                    fetchFn: wsOptions?.fetchFn,
+                  })
+                  if (pendingRes.ok) {
+                    const existingIds = new Set(allMods.map((m) => m.module_id))
+                    const additions = pendingRes.data.filter((m) => !existingIds.has(m.module_id))
+                    allMods = [...allMods, ...additions]
+                  }
+                }
+                setWorkspaceModules(allMods)
+                const approved = allMods.filter((m) => !m.pending)
+                if (approved.length > 0 && !activeModuleIdRef.current) {
+                  const entry = approved.find((m) => m.is_entry) ?? approved[0]
+                  setActiveModuleId(entry.module_id)
+                  activeModuleIdRef.current = entry.module_id
+                  const targetDoc = getModuleDoc(entry.module_id)
+                  bindEditorToDoc(targetDoc)
+                  conn.switchDoc?.(entry.module_id, targetDoc)
+                }
+              }
+            })
+          }
           const name = pendingNameRef.current
           if (!name) return
 
@@ -442,6 +547,43 @@ export default function RoomPage(props: RoomPageProps = {}) {
             try { sessionStorage.setItem(resumeNameKey, name) } catch { /* storage disabled */ }
           }
           onDisplayNameAcceptedRef.current?.(name, color)
+        },
+        onModuleUpdated: (msg) => {
+          if (msg.deleted) {
+            setWorkspaceModules((prev) => prev.filter((m) => m.module_id !== msg.module_id))
+            if (activeModuleIdRef.current === msg.module_id) {
+              setWorkspaceModules((current) => {
+                const remaining = current.filter((m) => m.module_id !== msg.module_id && !m.pending)
+                const next = remaining[0]?.module_id ?? null
+                setActiveModuleId(next)
+                activeModuleIdRef.current = next
+                if (next) {
+                  const targetDoc = getModuleDoc(next)
+                  bindEditorToDoc(targetDoc)
+                  conn.switchDoc?.(next, targetDoc)
+                }
+                return current.filter((m) => m.module_id !== msg.module_id)
+              })
+            }
+          } else {
+            setWorkspaceModules((prev) => {
+              const idx = prev.findIndex((m) => m.module_id === msg.module_id)
+              if (idx >= 0) {
+                const copy = [...prev]
+                copy[idx] = { ...copy[idx], ...msg }
+                return copy
+              } else {
+                return [...prev, msg]
+              }
+            })
+            if (!activeModuleIdRef.current && !msg.pending) {
+              setActiveModuleId(msg.module_id)
+              activeModuleIdRef.current = msg.module_id
+              const targetDoc = getModuleDoc(msg.module_id)
+              bindEditorToDoc(targetDoc)
+              conn.switchDoc?.(msg.module_id, targetDoc)
+            }
+          }
         },
         onRoster: (roster) => {
           rosterRef.current = roster.members ?? []
@@ -896,6 +1038,163 @@ export default function RoomPage(props: RoomPageProps = {}) {
     }
   }
 
+  const handleSelectModule = useCallback(
+    (moduleId: string) => {
+      setActiveModuleId(moduleId)
+      activeModuleIdRef.current = moduleId
+      const targetDoc = getModuleDoc(moduleId)
+      bindEditorToDoc(targetDoc)
+      connRef.current?.switchDoc?.(moduleId, targetDoc)
+    },
+    [getModuleDoc, bindEditorToDoc],
+  )
+
+  const handleCreateModule = useCallback(
+    async (name: string) => {
+      if (!roomId) return
+      const validation = validateModuleName(name, workspaceLanguage)
+      if (!validation.valid) {
+        setWorkspaceError(validation.error ?? 'Invalid module name.')
+        return
+      }
+      setWorkspaceError(null)
+      setIsCreatingModule(true)
+      const token = readOwnerToken(roomId)
+      const currentSessionId = sessionIdRef.current ?? wsOptions?.sessionId ?? getCollabSessionId()
+      const syncBase = wsOptions?.syncWsUrl
+        ? wsOptions.syncWsUrl.replace(/^ws/, 'http').replace(/\/ws\/rooms.*$/, '')
+        : undefined
+      const res = await createModule(
+        {
+          roomId,
+          sessionId: currentSessionId,
+          ownerToken: token,
+          baseUrl: syncBase,
+          fetchFn: wsOptions?.fetchFn,
+        },
+        name,
+      )
+      setIsCreatingModule(false)
+      if (!res.ok) {
+        setWorkspaceError(res.error)
+      } else {
+        setWorkspaceModules((prev) => {
+          if (prev.some((m) => m.module_id === res.data.module_id)) return prev
+          return [...prev, res.data]
+        })
+        if (!activeModuleIdRef.current && !res.data.pending) {
+          setActiveModuleId(res.data.module_id)
+          activeModuleIdRef.current = res.data.module_id
+          const targetDoc = getModuleDoc(res.data.module_id)
+          bindEditorToDoc(targetDoc)
+          connRef.current?.switchDoc?.(res.data.module_id, targetDoc)
+        }
+      }
+    },
+    [roomId, workspaceLanguage, wsOptions?.fetchFn, wsOptions?.syncWsUrl, getModuleDoc, bindEditorToDoc],
+  )
+
+  const handleRequestModule = useCallback(
+    async (name: string) => {
+      if (!roomId) return
+      const validation = validateModuleName(name, workspaceLanguage)
+      if (!validation.valid) {
+        setWorkspaceError(validation.error ?? 'Invalid module name.')
+        return
+      }
+      setWorkspaceError(null)
+      setIsCreatingModule(true)
+      const currentSessionId = sessionIdRef.current ?? wsOptions?.sessionId ?? getCollabSessionId()
+      const syncBase = wsOptions?.syncWsUrl
+        ? wsOptions.syncWsUrl.replace(/^ws/, 'http').replace(/\/ws\/rooms.*$/, '')
+        : undefined
+      const res = await requestModule(
+        {
+          roomId,
+          sessionId: currentSessionId,
+          baseUrl: syncBase,
+          fetchFn: wsOptions?.fetchFn,
+        },
+        name,
+      )
+      setIsCreatingModule(false)
+      if (!res.ok) {
+        setWorkspaceError(res.error)
+      } else {
+        setWorkspaceModules((prev) => {
+          if (prev.some((m) => m.module_id === res.data.module_id)) return prev
+          return [...prev, res.data]
+        })
+      }
+    },
+    [roomId, workspaceLanguage, wsOptions?.fetchFn, wsOptions?.syncWsUrl],
+  )
+
+  const handleApproveModule = useCallback(
+    async (moduleId: string, ownerMemberId?: string) => {
+      if (!roomId) return
+      setWorkspaceError(null)
+      const token = readOwnerToken(roomId)
+      const currentSessionId = sessionIdRef.current ?? wsOptions?.sessionId ?? getCollabSessionId()
+      const syncBase = wsOptions?.syncWsUrl
+        ? wsOptions.syncWsUrl.replace(/^ws/, 'http').replace(/\/ws\/rooms.*$/, '')
+        : undefined
+      const res = await approveModule(
+        {
+          roomId,
+          sessionId: currentSessionId,
+          ownerToken: token,
+          baseUrl: syncBase,
+          fetchFn: wsOptions?.fetchFn,
+        },
+        moduleId,
+        ownerMemberId,
+      )
+      if (!res.ok) {
+        setWorkspaceError(res.error)
+      } else {
+        setWorkspaceModules((prev) => {
+          const idx = prev.findIndex((m) => m.module_id === moduleId)
+          if (idx >= 0) {
+            const copy = [...prev]
+            copy[idx] = res.data
+            return copy
+          }
+          return [...prev, res.data]
+        })
+      }
+    },
+    [roomId, wsOptions?.fetchFn, wsOptions?.syncWsUrl],
+  )
+
+  const handleDeclineModule = useCallback(
+    async (moduleId: string) => {
+      if (!roomId) return
+      setWorkspaceError(null)
+      const token = readOwnerToken(roomId)
+      const currentSessionId = sessionIdRef.current ?? wsOptions?.sessionId ?? getCollabSessionId()
+      const syncBase = wsOptions?.syncWsUrl
+        ? wsOptions.syncWsUrl.replace(/^ws/, 'http').replace(/\/ws\/rooms.*$/, '')
+        : undefined
+      const res = await declineModule(
+        {
+          roomId,
+          sessionId: currentSessionId,
+          ownerToken: token,
+          baseUrl: syncBase,
+          fetchFn: wsOptions?.fetchFn,
+        },
+        moduleId,
+      )
+      if (!res.ok) {
+        setWorkspaceError(res.error)
+      } else {
+        setWorkspaceModules((prev) => prev.filter((m) => m.module_id !== moduleId))
+      }
+    },
+    [roomId, wsOptions?.fetchFn, wsOptions?.syncWsUrl],
+  )
+
   // A run-result frame can carry a stale or untrusted display_name. Only the
   // server roster's member_id -> display_name mapping may label the runner.
   const runnerMember = runOutput?.runner?.member_id
@@ -999,6 +1298,25 @@ export default function RoomPage(props: RoomPageProps = {}) {
           </span>
         )}
       </header>
+      {roomMode?.mode === 'open' && (
+        <WorkspacePanel
+          roomId={roomId || ''}
+          isHost={isHost}
+          isObserver={isObserver}
+          language={workspaceLanguage}
+          modules={workspaceModules}
+          activeModuleId={activeModuleId}
+          onSelectModule={handleSelectModule}
+          onCreateModule={handleCreateModule}
+          onRequestModule={handleRequestModule}
+          onApproveModule={handleApproveModule}
+          onDeclineModule={handleDeclineModule}
+          creationError={workspaceError}
+          isCreating={isCreatingModule}
+          roster={roster}
+          myMemberId={myMemberId}
+        />
+      )}
       <section className="room-participants" aria-label="Room participants">
         <h3>Participants ({roster.length})</h3>
 
@@ -1184,7 +1502,7 @@ export default function RoomPage(props: RoomPageProps = {}) {
         onRunComplete={(result) => {
           if (result.ok) showRunResult(result.data)
         }}
-        getCode={() => docRef.current?.getText('monaco').toString() ?? ''}
+        getCode={() => getActiveDoc()?.getText('monaco').toString() ?? ''}
         initialLanguage={currentLanguage}
         onLanguageChange={(lang) => setCurrentLanguage(lang)}
         executionApiUrl={wsOptions?.executionApiUrl}
@@ -1204,20 +1522,8 @@ export default function RoomPage(props: RoomPageProps = {}) {
           onMount={(editor: MonacoEditor.IStandaloneCodeEditor) => {
             editorRef.current = editor
             editor.updateOptions({ readOnly: isObserver })
-            const doc = docRef.current
-            const awareness = awarenessInstanceRef.current
-            if (doc && awareness) {
-              const model = editor.getModel()
-              if (model) {
-                bindingRef.current = new MonacoBinding(
-                  doc.getText('monaco'),
-                  model,
-                  new Set([editor]),
-                  awareness,
-                )
-              }
-            }
-            renderRemoteCursorLabels()
+            const doc = getActiveDoc()
+            bindEditorToDoc(doc)
           }}
         />
       </div>

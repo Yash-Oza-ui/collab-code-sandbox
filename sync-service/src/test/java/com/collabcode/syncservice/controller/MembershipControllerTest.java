@@ -415,6 +415,39 @@ class MembershipControllerTest {
         assertThat(arr.get(0).get("owner_member_id").asText()).isNotBlank();
     }
 
+    @Test
+    void removeMember_dropsPendingModuleRequests() throws Exception {
+        String[] room = createOpenRoom();
+        roomService.join(room[0], HOST, "Host", room[1]);
+        String guestId = roomService.join(room[0], GUEST, "Lin", null).getMember().getMemberId();
+
+        // Guest requests a module (pending=true)
+        HttpRequest createReq = HttpRequest.newBuilder()
+                .uri(URI.create(base() + "/v1/rooms/" + room[0] + "/modules"))
+                .header("Content-Type", "application/json")
+                .header("X-Session-Id", GUEST)
+                .POST(HttpRequest.BodyPublishers.ofString("{\"name\":\"lin_algo.py\"}"))
+                .build();
+        HttpResponse<String> createRes = http.send(createReq, HttpResponse.BodyHandlers.ofString());
+        assertThat(createRes.statusCode()).isEqualTo(202);
+
+        // Host removes the guest
+        HttpResponse<String> removeRes = post("/v1/rooms/" + room[0] + "/members/" + guestId + "/remove", HOST, room[1]);
+        assertThat(removeRes.statusCode()).isEqualTo(200);
+
+        // Pending request for lin_algo.py is gone, so Host listing pending has 0 items
+        HttpRequest pendingReq = HttpRequest.newBuilder()
+                .uri(URI.create(base() + "/v1/rooms/" + room[0] + "/modules?pending=true"))
+                .header("X-Session-Id", HOST)
+                .header("X-Owner-Token", room[1])
+                .GET()
+                .build();
+        HttpResponse<String> pendingRes = http.send(pendingReq, HttpResponse.BodyHandlers.ofString());
+        assertThat(pendingRes.statusCode()).isEqualTo(200);
+        JsonNode arr = om.readTree(pendingRes.body());
+        assertThat(arr).isEmpty();
+    }
+
     private String awaitMemberId(String roomId, String sessionId) throws InterruptedException {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
         while (System.nanoTime() < deadline) {

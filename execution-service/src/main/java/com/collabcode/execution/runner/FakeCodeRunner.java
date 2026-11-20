@@ -1,10 +1,14 @@
 package com.collabcode.execution.runner;
 
+import com.collabcode.execution.budget.RunBudget;
+import com.collabcode.execution.model.BatchRunSpec;
 import com.collabcode.execution.model.RunFile;
 import com.collabcode.execution.model.RunSpec;
 import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Component;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
 
 /**
@@ -38,11 +42,12 @@ public class FakeCodeRunner implements CodeRunner {
         Double compileTime = isCompiled(language) ? 12.0 : null;
 
         // Case 0: simulate an out-of-memory kill (Decision 9).
-        boolean hasOom = spec.getFiles() != null && spec.getFiles().stream()
+        boolean hasOom = (spec.getFiles() != null && spec.getFiles().stream()
                 .filter(file -> file != null)
                 .map(RunFile::getContent)
                 .filter(content -> content != null)
-                .anyMatch(FakeCodeRunner::matchesOom);
+                .anyMatch(FakeCodeRunner::matchesOom))
+                || matchesOom(stdin);
 
         if (hasOom) {
             String failingModule = findFailingFile(spec, "oom");
@@ -251,7 +256,8 @@ public class FakeCodeRunner implements CodeRunner {
         }
 
         // Case 3: timeout / infinite loop simulation (US-13, NFR4.1)
-        if (code.contains("infinite_loop") || code.contains("while True: pass") || code.contains("while true")) {
+        if (code.contains("infinite_loop") || code.contains("while True: pass") || code.contains("while true")
+                || (stdin != null && (stdin.contains("infinite_loop") || stdin.contains("timeout")))) {
             return new ExecutionResult(
                     "",
                     "",
@@ -343,6 +349,34 @@ public class FakeCodeRunner implements CodeRunner {
                 compileTime,
                 null
         );
+    }
+
+    @Override
+    public List<ExecutionResult> executeBatch(BatchRunSpec spec, RunBudget budget) {
+        if (spec == null) {
+            throw new IllegalArgumentException("BatchRunSpec must not be null");
+        }
+        List<String> inputs = spec.getInputs();
+        List<ExecutionResult> results = new ArrayList<>(inputs.size());
+
+        for (String input : inputs) {
+            budget.checkBudgetBeforeNextRun();
+
+            RunSpec singleSpec = new RunSpec(
+                    spec.getLanguage(),
+                    spec.getFiles(),
+                    spec.getEntry(),
+                    input
+            );
+            long startNanos = System.nanoTime();
+            ExecutionResult res = this.execute(singleSpec);
+            double elapsedMs = Math.max(0.0, (System.nanoTime() - startNanos) / 1_000_000.0);
+
+            budget.recordRun(res, Math.max(elapsedMs, res.getExecutionTimeMs()));
+            results.add(res);
+        }
+
+        return results;
     }
 
     private ExecutionResult invalidRequest(String message) {

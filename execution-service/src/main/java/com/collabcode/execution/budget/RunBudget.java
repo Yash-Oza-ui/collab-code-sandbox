@@ -103,25 +103,27 @@ public class RunBudget {
         ExecutionResult result = runQueueGate.run(requestId, runWork);
         double wallElapsedMs = Math.max(0.0, (nanoClock.getAsLong() - startNanos) / 1_000_000.0);
 
-        double reportedMs = 0.0;
-        if (result != null) {
-            reportedMs = Math.max(0.0, result.getExecutionTimeMs());
-            if (result.getCompileTimeMs() != null && result.getCompileTimeMs() > 0.0) {
-                reportedMs += result.getCompileTimeMs();
-            }
-        }
-        double recordedMs = Math.max(wallElapsedMs, reportedMs);
-
-        runsCompleted++;
-        totalRunTimeMs += recordedMs;
-        if (result != null) {
-            completedResults.add(result);
-        }
+        recordRun(result, wallElapsedMs);
 
         return result;
     }
 
-    private void checkBudgetBeforeNextRun() {
+    /**
+     * Executes an entire batch under a single RunQueueGate slot (FR5.1, FR16, US-71).
+     *
+     * Acquires one slot from the shared queue gate for the batch, so the batch counts
+     * as one run at the queue gate while its tests execute inside a single container.
+     */
+    public <T> T executeInQueueGate(Supplier<T> batchWork) {
+        Objects.requireNonNull(batchWork, "batchWork must not be null");
+        return runQueueGate.run(requestId, batchWork);
+    }
+
+    /**
+     * Checks both the runs-per-request cap and aggregate time budget before running the next test.
+     * Throws {@link RunBudgetExceededException} if either limit has been reached.
+     */
+    public synchronized void checkBudgetBeforeNextRun() {
         if (runsCompleted >= maxRuns) {
             log.warn("run refused: request_id={} reason={} runs_completed={} max_runs={} elapsed_ms={}",
                     requestId, BudgetLimitKind.MAX_RUNS_PER_REQUEST.getReason(),
@@ -152,6 +154,26 @@ public class RunBudget {
                     retryAfterSeconds,
                     completedResults
             );
+        }
+    }
+
+    /**
+     * Records one completed test execution against this request's budget.
+     */
+    public synchronized void recordRun(ExecutionResult result, double wallElapsedMs) {
+        double reportedMs = 0.0;
+        if (result != null) {
+            reportedMs = Math.max(0.0, result.getExecutionTimeMs());
+            if (result.getCompileTimeMs() != null && result.getCompileTimeMs() > 0.0) {
+                reportedMs += result.getCompileTimeMs();
+            }
+        }
+        double recordedMs = Math.max(wallElapsedMs, reportedMs);
+
+        runsCompleted++;
+        totalRunTimeMs += recordedMs;
+        if (result != null) {
+            completedResults.add(result);
         }
     }
 

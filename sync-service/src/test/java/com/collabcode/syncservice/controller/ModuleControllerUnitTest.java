@@ -46,6 +46,7 @@ class ModuleControllerUnitTest {
 
     private static final String HOST_SESSION = "11111111-1111-4111-8111-111111111111";
     private static final String GUEST_SESSION = "22222222-2222-4222-8222-222222222222";
+    private static final String OBSERVER_SESSION = "33333333-3333-4333-8333-333333333333";
 
     @BeforeEach
     void setUp() {
@@ -64,6 +65,9 @@ class ModuleControllerUnitTest {
         // Join host and guest to open room
         roomService.join(OPEN_ROOM_ID, HOST_SESSION, "Host", OWNER_TOKEN);
         roomService.join(OPEN_ROOM_ID, GUEST_SESSION, "Guest", null);
+        roomService.join(OPEN_ROOM_ID, OBSERVER_SESSION, "Observer", null);
+        com.collabcode.syncservice.room.Member obs = roomService.findMemberBySession(OPEN_ROOM_ID, OBSERVER_SESSION);
+        obs.setRole(com.collabcode.syncservice.room.Role.OBSERVER);
 
         // Join host to pair room
         roomService.join(PAIR_ROOM_ID, HOST_SESSION, "Host", OWNER_TOKEN);
@@ -239,5 +243,157 @@ class ModuleControllerUnitTest {
                         .header("X-Session-Id", HOST_SESSION))
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.error.code").value("ROOM_NOT_FOUND"));
+    }
+
+    @Test
+    @DisplayName("Observer cannot request a module and returns 422 INVALID_REQUEST (FR21.1)")
+    void observerRequest_returns422() throws Exception {
+        mvc.perform(post("/v1/rooms/" + OPEN_ROOM_ID + "/modules")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .header("X-Session-Id", OBSERVER_SESSION)
+                        .content("{\"name\":\"obs.py\"}"))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.error.code").value("INVALID_REQUEST"))
+                .andExpect(jsonPath("$.error.message").value("Observers cannot request modules."));
+    }
+
+    @Test
+    @DisplayName("Host approval with optional new owner succeeds and broadcasts (FR21.2)")
+    void hostApprove_withNewOwner_succeeds() throws Exception {
+        Member guest = roomService.findMemberBySession(OPEN_ROOM_ID, GUEST_SESSION);
+        Member host = roomService.findMemberBySession(OPEN_ROOM_ID, HOST_SESSION);
+        ModuleRecord pending = moduleService.requestCreate(OPEN_ROOM_ID, guest, "reassign.py");
+
+        mvc.perform(post("/v1/rooms/" + OPEN_ROOM_ID + "/modules/" + pending.moduleId() + "/approve")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .header("X-Session-Id", HOST_SESSION)
+                        .header("X-Owner-Token", OWNER_TOKEN)
+                        .content("{\"owner_member_id\":\"" + host.getMemberId() + "\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.module_id").value(pending.moduleId()))
+                .andExpect(jsonPath("$.owner_member_id").value(host.getMemberId()))
+                .andExpect(jsonPath("$.pending").value(false));
+
+        assertThat(broadcasts).isNotEmpty();
+        Map<String, Object> last = broadcasts.get(broadcasts.size() - 1);
+        assertThat(last.get("owner_member_id")).isEqualTo(host.getMemberId());
+        assertThat(last.get("pending")).isEqualTo(false);
+    }
+
+    @Test
+    @DisplayName("Host approval with unknown member returns 404 MEMBER_NOT_FOUND (FR21.2)")
+    void hostApprove_unknownMember_returns404() throws Exception {
+        Member guest = roomService.findMemberBySession(OPEN_ROOM_ID, GUEST_SESSION);
+        ModuleRecord pending = moduleService.requestCreate(OPEN_ROOM_ID, guest, "bad-owner.py");
+
+        mvc.perform(post("/v1/rooms/" + OPEN_ROOM_ID + "/modules/" + pending.moduleId() + "/approve")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .header("X-Session-Id", HOST_SESSION)
+                        .header("X-Owner-Token", OWNER_TOKEN)
+                        .content("{\"owner_member_id\":\"m_nonexistent\"}"))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.error.code").value("MEMBER_NOT_FOUND"));
+    }
+
+    @Test
+    @DisplayName("Host approval with observer as owner returns 422 INVALID_REQUEST (FR21.2)")
+    void hostApprove_observer_returns422() throws Exception {
+        Member guest = roomService.findMemberBySession(OPEN_ROOM_ID, GUEST_SESSION);
+        Member obs = roomService.findMemberBySession(OPEN_ROOM_ID, OBSERVER_SESSION);
+        ModuleRecord pending = moduleService.requestCreate(OPEN_ROOM_ID, guest, "obs-owner2.py");
+
+        mvc.perform(post("/v1/rooms/" + OPEN_ROOM_ID + "/modules/" + pending.moduleId() + "/approve")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .header("X-Session-Id", HOST_SESSION)
+                        .header("X-Owner-Token", OWNER_TOKEN)
+                        .content("{\"owner_member_id\":\"" + obs.getMemberId() + "\"}"))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.error.code").value("INVALID_REQUEST"))
+                .andExpect(jsonPath("$.error.message").value("Observers cannot own modules."));
+    }
+
+    @Test
+    @DisplayName("Non-Host approval returns 403 NOT_OWNER (T-10)")
+    void nonHostApprove_returns403() throws Exception {
+        Member guest = roomService.findMemberBySession(OPEN_ROOM_ID, GUEST_SESSION);
+        ModuleRecord pending = moduleService.requestCreate(OPEN_ROOM_ID, guest, "perm.py");
+
+        mvc.perform(post("/v1/rooms/" + OPEN_ROOM_ID + "/modules/" + pending.moduleId() + "/approve")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .header("X-Session-Id", GUEST_SESSION)
+                        .content("{}"))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.error.code").value("NOT_OWNER"));
+    }
+
+    @Test
+    @DisplayName("Host decline removes module (200 OK) and broadcasts module-updated deleted=true (US-40)")
+    void hostDecline_returns200_andBroadcastsDeleted() throws Exception {
+        Member guest = roomService.findMemberBySession(OPEN_ROOM_ID, GUEST_SESSION);
+        ModuleRecord pending = moduleService.requestCreate(OPEN_ROOM_ID, guest, "todecline.py");
+        broadcasts.clear();
+
+        mvc.perform(post("/v1/rooms/" + OPEN_ROOM_ID + "/modules/" + pending.moduleId() + "/decline")
+                        .header("X-Session-Id", HOST_SESSION)
+                        .header("X-Owner-Token", OWNER_TOKEN))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.module_id").value(pending.moduleId()))
+                .andExpect(jsonPath("$.status").value("declined"));
+
+        assertThat(broadcasts).hasSize(1);
+        assertThat(broadcasts.get(0).get("type")).isEqualTo("module-updated");
+        assertThat(broadcasts.get(0).get("module_id")).isEqualTo(pending.moduleId());
+        assertThat(broadcasts.get(0).get("deleted")).isEqualTo(true);
+        assertThat(moduleService.find(OPEN_ROOM_ID, pending.moduleId())).isNull();
+    }
+
+    @Test
+    @DisplayName("Host decline of non-pending module returns 422 INVALID_REQUEST")
+    void decline_alreadyApproved_returns422() throws Exception {
+        Member host = roomService.findMemberBySession(OPEN_ROOM_ID, HOST_SESSION);
+        ModuleRecord approved = moduleService.createApprovedModule(OPEN_ROOM_ID, host, "approved.py");
+
+        mvc.perform(post("/v1/rooms/" + OPEN_ROOM_ID + "/modules/" + approved.moduleId() + "/decline")
+                        .header("X-Session-Id", HOST_SESSION)
+                        .header("X-Owner-Token", OWNER_TOKEN))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.error.code").value("INVALID_REQUEST"))
+                .andExpect(jsonPath("$.error.message").value("Module is not pending approval."));
+    }
+
+    @Test
+    @DisplayName("Non-Host decline returns 403 NOT_OWNER")
+    void nonHostDecline_returns403() throws Exception {
+        Member guest = roomService.findMemberBySession(OPEN_ROOM_ID, GUEST_SESSION);
+        ModuleRecord pending = moduleService.requestCreate(OPEN_ROOM_ID, guest, "no-auth-decline.py");
+
+        mvc.perform(post("/v1/rooms/" + OPEN_ROOM_ID + "/modules/" + pending.moduleId() + "/decline")
+                        .header("X-Session-Id", GUEST_SESSION))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.error.code").value("NOT_OWNER"));
+    }
+
+    @Test
+    @DisplayName("List pending modules as Host returns pending list (US-40)")
+    void listPending_asHost_returnsPendingModules() throws Exception {
+        Member guest = roomService.findMemberBySession(OPEN_ROOM_ID, GUEST_SESSION);
+        moduleService.requestCreate(OPEN_ROOM_ID, guest, "pending-query.py");
+
+        mvc.perform(get("/v1/rooms/" + OPEN_ROOM_ID + "/modules?pending=true")
+                        .header("X-Session-Id", HOST_SESSION)
+                        .header("X-Owner-Token", OWNER_TOKEN))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(1))
+                .andExpect(jsonPath("$[0].name").value("pending-query.py"))
+                .andExpect(jsonPath("$[0].pending").value(true));
+    }
+
+    @Test
+    @DisplayName("List pending modules as non-Host returns 403 NOT_OWNER")
+    void listPending_asNonHost_returns403() throws Exception {
+        mvc.perform(get("/v1/rooms/" + OPEN_ROOM_ID + "/modules?pending=true")
+                        .header("X-Session-Id", GUEST_SESSION))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.error.code").value("NOT_OWNER"));
     }
 }

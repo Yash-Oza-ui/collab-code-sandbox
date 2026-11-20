@@ -336,11 +336,13 @@ Transmits control messages and run execution results from backend services to ac
 
 ### 6.4 Execution History Retention (FR15 / US-30 / CR11)
 
-- Default retention is **86,400 seconds (about 24 hours)**. This is **provisional**, not the final FR15 decision; Sprint 6 will confirm the period. Override using `APP_RUN_HISTORY_RETENTION_SECONDS` in the host environment (positive integer).
-- The server sweeps old records every **60,000 ms (one minute)** by default; override `APP_RUN_HISTORY_SWEEP_INTERVAL_MS`. The sweep uses a clock-injectable implementation for deterministic tests and logs **record counts only**, never user content.
-- Runs older than the cutoff are removed from the same `RunRecordStore` used by both `GET /internal/rooms/{room_id}/runs` and the US-68 matching-`input_hash` slowdown baseline query. Room closure/deletion still removes **all** the room's run records immediately through the shared per-room deletion function, independent of age. Live room code and CRDT documents are untouched by the retention sweep.
-- **CR11 check:** US-68's slowdown baseline needs **at least 3 earlier runs with the same `input_hash`** (`docs/ai-ml-contract.md`, §16.2). A normal room session that executes the same input 3 or more times inside 24 hours retains those runs and supports the baseline. Sessions with fewer than 3 comparable runs will still be in baseline-establishing mode; sessions spanning more than 24 hours may lose earlier samples. This adequacy assumption must be reevaluated before the Sprint 6 period is finalized.
-- `ai-ml-service` has separate room-scoped measurements; **US-56** removes them via `DELETE /v1/rooms/{room_id}/state` on room deletion. US-30 intentionally does **not** add a second timer to ai-ml-service.
+- `sync-service` retains its **canonical run records** for **86,400 seconds (24 hours)** by default. This is a **provisional** FR15 value pending Sprint 6 review. Set `APP_RUN_HISTORY_RETENTION_SECONDS` to a positive number of seconds to override it per host; Docker Compose forwards this value from the host `.env` to the service.
+
+- The scheduled sweep runs every **60,000 ms** by default. Set `APP_RUN_HISTORY_SWEEP_INTERVAL_MS` to change the interval. The sweep logs record counts only, not code, input or other user content.
+
+- The sweep removes expired canonical `RunRecordStore` entries, including entries returned by `GET /internal/rooms/{room_id}/runs` and its optional `input_hash` filter. Room closure/deletion independently removes **all** canonical records for that room, regardless of their age. The sweep does not touch live room code or CRDT documents.
+
+- **CR11 / US-68:** The slowdown baseline needs **at least three earlier measurements with matching `input_hash`** (`docs/ai-ml-contract.md` §16.2). Those measurements are kept separately in `ai-ml-service`'s `room_histories[room_id][input_hash]` for the life of the room/session; **the sync-service retention sweep does not prune or reset that baseline**. The baseline is cleared during room teardown through the US-56 `DELETE /v1/rooms/{room_id}/state` flow. The canonical history retention window therefore does not impose a 24-hour window on the slowdown baseline.
 
 ---
 
