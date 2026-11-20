@@ -367,6 +367,20 @@ export interface AnalysisResultMessage {
   [key: string]: unknown
 }
 
+export interface ModuleUpdatedMessage {
+  type: 'module-updated'
+  module_id: string
+  name: string
+  owner_member_id: string
+  writers?: string[]
+  runnable?: boolean
+  is_entry?: boolean
+  version?: number
+  pending?: boolean
+  deleted?: boolean
+  [key: string]: unknown
+}
+
 export interface ConnectAwarenessWsOptions {
   roomId: string
   displayName?: string
@@ -394,6 +408,8 @@ export interface ConnectAwarenessWsOptions {
   onRunResult?: (msg: RunResultMessage) => void
   /** An AI analysis completed or fell back in this room (T-18 / US-78). */
   onAnalysisResult?: (msg: AnalysisResultMessage) => void
+  /** A module was created, approved, updated or deleted in Open mode (V2.6, US-39). */
+  onModuleUpdated?: (msg: ModuleUpdatedMessage) => void
   onError?: (event: Event) => void
   onClose?: (event: CloseEvent) => void
   onDocError?: (event: Event) => void
@@ -409,6 +425,7 @@ export interface AwarenessWsConnection {
   /** Additional Open-mode module transports, indexed by opaque module ID. */
   moduleSockets: ReadonlyMap<string, WebSocket>
   join: (displayName: string, ownerToken?: string) => void
+  switchDoc?: (newDocId: string, newDoc?: Y.Doc) => void
   destroy: () => void
 }
 
@@ -442,6 +459,7 @@ export function connectAwarenessWs(
     onEditRejected,
     onRunResult,
     onAnalysisResult,
+    onModuleUpdated,
     onError,
     onClose,
     onDocError,
@@ -463,6 +481,9 @@ export function connectAwarenessWs(
 
   let controlWs: WebSocket | null = null
   let docWs: WebSocket | null = null
+  let activeDocId: string | undefined = docId
+  let currentActiveDoc: Y.Doc | undefined = doc
+  let lastJoinedMsg: JoinedMessage | null = null
   const moduleSockets = new Map<string, WebSocket>()
   // Production RoomPage does not supply moduleDocs. Own inactive module docs here
   // so every approved Open-mode module can participate in Yjs resynchronization.
@@ -672,8 +693,8 @@ export function connectAwarenessWs(
       awareness.off('update', onDocAwarenessUpdate)
       onDocAwarenessUpdate = null
     }
-    if (doc && onDocUpdate) {
-      doc.off('update', onDocUpdate)
+    if (currentActiveDoc && onDocUpdate) {
+      currentActiveDoc.off('update', onDocUpdate)
       onDocUpdate = null
     }
     const old = docWs
@@ -693,7 +714,7 @@ export function connectAwarenessWs(
   const openDocumentSocket = async (joinedMsg?: JoinedMessage) => {
     if (isDestroyed || docWs) return
 
-    let resolvedDocId = docId
+    let resolvedDocId = activeDocId ?? docId
     const roomMode = joinedMsg?.mode ? String(joinedMsg.mode).toLowerCase() : undefined
 
     if (roomMode === 'pair') {
@@ -807,14 +828,14 @@ export function connectAwarenessWs(
       }
     }
 
-    if (doc) {
+    if (currentActiveDoc) {
       onDocUpdate = (update: Uint8Array, origin: unknown) => {
         if (origin === docWs) return
         if (docWs && docWs.readyState === WS_OPEN) {
           sendBinary(docWs, encodeDocUpdateMessage(update))
         }
       }
-      doc.on('update', onDocUpdate)
+      currentActiveDoc.on('update', onDocUpdate)
     }
 
     awareness.on('update', onDocAwarenessUpdate)
@@ -825,9 +846,9 @@ export function connectAwarenessWs(
       if (isDestroyed || docWs !== openedSocket) return
       waitingForDoc = false
       // 1. Send sync step 1 and step 2 to exchange initial state bidirectionally (US-02 / FR2)
-      if (doc) {
-        sendBinary(docWs!, encodeSyncStep1Message(doc))
-        sendBinary(docWs!, encodeSyncStep2Message(doc))
+      if (currentActiveDoc) {
+        sendBinary(docWs!, encodeSyncStep1Message(currentActiveDoc))
+        sendBinary(docWs!, encodeSyncStep2Message(currentActiveDoc))
       }
 
       // 2. Contract Rule 6: query awareness from existing participants upon connecting
@@ -855,9 +876,9 @@ export function connectAwarenessWs(
         const messageType = decoding.readVarUint(decoder)
 
         if (messageType === MESSAGE_SYNC) {
-          if (doc && docWs) {
+          if (currentActiveDoc && docWs) {
             const allowReverse = !hasSentReverseSync
-            const replies = handleIncomingSyncFrame(doc, uint8, docWs, {
+            const replies = handleIncomingSyncFrame(currentActiveDoc, uint8, docWs, {
               replyWithReverseSyncStep1: allowReverse,
             })
             if (allowReverse && replies.length > 1) {
@@ -912,6 +933,7 @@ export function connectAwarenessWs(
             clearJoinTimer()
             pendingJoin = null
             activeHandshake = null
+            lastJoinedMsg = msg as JoinedMessage
             onJoined?.(msg as JoinedMessage)
             waitingForDoc = true
             void openDocumentSocket(msg as JoinedMessage).catch(() => {
@@ -936,6 +958,8 @@ export function connectAwarenessWs(
             onRunResult?.(msg as RunResultMessage)
           } else if (msg.type === 'analysis-result') {
             onAnalysisResult?.(msg as AnalysisResultMessage)
+          } else if (msg.type === 'module-updated') {
+            onModuleUpdated?.(msg as ModuleUpdatedMessage)
           }
         } catch {
           // ignore non-json control frames
@@ -1075,6 +1099,27 @@ export function connectAwarenessWs(
     }
   }
 
+  const switchDoc = (newDocId: string, newDoc?: Y.Doc) => {
+    if (isDestroyed || !newDocId) return
+    if (newDocId === activeDocId && (newDoc === undefined || newDoc === currentActiveDoc)) return
+    activeDocId = newDocId
+    if (newDoc) {
+      currentActiveDoc = newDoc
+    } else {
+      currentActiveDoc = getModuleDoc(newDocId) ?? doc
+    }
+    if (moduleSockets.has(newDocId)) {
+      closeModuleSocket(newDocId)
+    }
+    closeDocumentSocket()
+    if (hasJoined) {
+      waitingForDoc = true
+      void openDocumentSocket(lastJoinedMsg ?? undefined).catch(() => {
+        if (!isDestroyed && waitingForDoc) scheduleReconnect()
+      })
+    }
+  }
+
   return {
     get controlWs() {
       return controlWs
@@ -1084,6 +1129,7 @@ export function connectAwarenessWs(
     },
     moduleSockets,
     join,
+    switchDoc,
     destroy,
   }
 }

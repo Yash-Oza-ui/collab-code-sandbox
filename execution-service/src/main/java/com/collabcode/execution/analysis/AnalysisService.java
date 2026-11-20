@@ -217,15 +217,22 @@ public class AnalysisService {
             String aiStatus = "ok";
             String errorCode = null;
 
+            // Extract AI-free deterministic findings & task results
+            Map<String, Object> resultPayload = extractResultPayload(respMap, task);
+
             if (rawAiStep instanceof Map<?, ?> aiMap) {
                 Object s = aiMap.get("status");
                 if (s instanceof String str) aiStatus = str;
                 Object e = aiMap.get("error_code");
                 if (e instanceof String errStr) errorCode = errStr;
-            }
 
-            // Extract AI-free deterministic findings & task results
-            Map<String, Object> resultPayload = extractResultPayload(respMap, task);
+                if (aiMap.containsKey("explanation")) {
+                    resultPayload.put("explanation", aiMap.get("explanation"));
+                }
+                if (aiMap.containsKey("suggested_fix")) {
+                    resultPayload.put("suggested_fix", aiMap.get("suggested_fix"));
+                }
+            }
 
             if ("skipped".equalsIgnoreCase(aiStatus) || errorCode != null) {
                 // Blocked AI step -> produce fallback message (FR40.5, US-78)
@@ -238,7 +245,7 @@ public class AnalysisService {
                 // AI step succeeded -> deliver ok status
                 String msg = (respMap.get("message") instanceof String s)
                         ? s
-                        : "Analysis completed successfully.";
+                        : (respMap.get("summary") instanceof String sum ? "Crash explained: " + sum : "Analysis completed successfully.");
 
                 AnalysisResultMessage message = new AnalysisResultMessage(
                         requestId,

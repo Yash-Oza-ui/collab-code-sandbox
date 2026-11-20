@@ -26,6 +26,9 @@ public final class RoomMessages {
         m.put("role", member.getRole().value());
         m.put("mode", room.getMode().value());
         m.put("preset", room.getPreset());
+        if (room.getLanguage() != null) {
+            m.put("language", room.getLanguage());
+        }
         m.put("permissions", permissions(room, member));
         return m;
     }
@@ -94,5 +97,24 @@ public final class RoomMessages {
         p.put("can_run", room.canRun(member));
         p.put("run_denied_reason", room.runDeniedReason(member));
         return p;
+    }
+
+    /**
+     * {@code module-updated} (T-17 V2.6): sent to all connections when a module
+     * is created, approved, updated, or removed/declined.
+     */
+    public static Map<String, Object> moduleUpdated(com.collabcode.syncservice.module.ModuleRecord module, boolean deleted) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("type", "module-updated");
+        payload.put("module_id", module.moduleId());
+        payload.put("name", module.name());
+        payload.put("owner_member_id", module.ownerMemberId());
+        payload.put("writers", new ArrayList<>(module.writers()));
+        payload.put("runnable", module.runnable());
+        payload.put("is_entry", module.isEntry());
+        payload.put("version", module.version());
+        payload.put("pending", module.pending());
+        payload.put("deleted", deleted);
+        return payload;
     }
 }

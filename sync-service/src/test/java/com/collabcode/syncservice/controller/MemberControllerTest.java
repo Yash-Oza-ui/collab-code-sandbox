@@ -86,6 +86,23 @@ class MemberControllerTest {
         return http.send(rb.build(), HttpResponse.BodyHandlers.ofString());
     }
 
+    private HttpResponse<String> patchEditAccess(String roomId, String memberId, String sessionId,
+                                                 String ownerToken, String bodyJson) throws Exception {
+        HttpRequest.Builder rb = HttpRequest.newBuilder()
+                .uri(URI.create(base() + "/v1/rooms/" + roomId + "/members/" + memberId + "/edit-access"))
+                .header("Content-Type", "application/json")
+                .method("PATCH", bodyJson == null
+                        ? HttpRequest.BodyPublishers.noBody()
+                        : HttpRequest.BodyPublishers.ofString(bodyJson));
+        if (sessionId != null) {
+            rb.header("X-Session-Id", sessionId);
+        }
+        if (ownerToken != null) {
+            rb.header("X-Owner-Token", ownerToken);
+        }
+        return http.send(rb.build(), HttpResponse.BodyHandlers.ofString());
+    }
+
     private String errorCode(HttpResponse<String> res) throws Exception {
         return om.readTree(res.body()).get("error").get("code").asText();
     }
@@ -179,6 +196,44 @@ class MemberControllerTest {
                     }
                 } catch (Exception ignored) {
                     // Ignore non-JSON or unrelated control messages.
+                }
+            }
+
+            return false;
+        }
+
+        boolean awaitRosterEditAccess(String displayName, boolean canEdit)
+                throws InterruptedException {
+
+            long deadline = System.nanoTime()
+                    + TimeUnit.SECONDS.toNanos(5);
+
+            while (System.nanoTime() < deadline) {
+                long remaining = deadline - System.nanoTime();
+
+                String message = messages.poll(
+                        remaining, TimeUnit.NANOSECONDS);
+
+                if (message == null) {
+                    return false;
+                }
+
+                try {
+                    JsonNode root = new ObjectMapper().readTree(message);
+
+                    if (!"roster".equals(root.path("type").asText())) {
+                        continue;
+                    }
+
+                    for (JsonNode member : root.path("members")) {
+                        if (displayName.equals(member.path("display_name").asText())) {
+                            JsonNode perms = member.path("permissions");
+                            if (perms.has("can_edit") && perms.path("can_edit").asBoolean() == canEdit) {
+                                return true;
+                            }
+                        }
+                    }
+                } catch (Exception ignored) {
                 }
             }
 
@@ -425,5 +480,193 @@ class MemberControllerTest {
                 guestSocket.close();
             }
         }
+    }
+
+    // =======================================================================
+    // US-36 (V2.21, FR19.1): Give and take back edit access in Pair mode
+    // =======================================================================
+
+    @Test
+    void hostGrantsAndWithdrawsEditAccess_inPairMode() throws Exception {
+        String[] room = createPairRoom(); // teach_interview: guest starts with can_edit=false
+        roomService.join(room[0], HOST, "Host", room[1]);
+        String guestId = roomService.join(room[0], GUEST, "Guest", null).getMember().getMemberId();
+
+        // Initially participant has can_edit=false
+        assertThat(store.get(room[0]).getMembers().get(guestId).isCanEdit()).isFalse();
+
+        // 1. Host grants edit access
+        HttpResponse<String> grantRes = patchEditAccess(room[0], guestId, HOST, room[1], "{\"can_edit\":true}");
+        assertThat(grantRes.statusCode()).isEqualTo(200);
+        JsonNode grantBody = om.readTree(grantRes.body());
+        assertThat(grantBody.get("member_id").asText()).isEqualTo(guestId);
+        assertThat(grantBody.get("role").asText()).isEqualTo("participant");
+        assertThat(grantBody.get("permissions").get("can_edit").asBoolean()).isTrue();
+        assertThat(store.get(room[0]).getMembers().get(guestId).isCanEdit()).isTrue();
+
+        // 2. Host withdraws edit access
+        HttpResponse<String> withdrawRes = patchEditAccess(room[0], guestId, HOST, room[1], "{\"can_edit\":false}");
+        assertThat(withdrawRes.statusCode()).isEqualTo(200);
+        JsonNode withdrawBody = om.readTree(withdrawRes.body());
+        assertThat(withdrawBody.get("permissions").get("can_edit").asBoolean()).isFalse();
+        assertThat(store.get(room[0]).getMembers().get(guestId).isCanEdit()).isFalse();
+    }
+
+    @Test
+    void editAccessChange_broadcastsUpdatedRosterToControlSockets() throws Exception {
+        String[] room = createPairRoom();
+
+        TestControlSocket hostSocket = connectControlSocket(room[0], HOST, "Host", room[1]);
+        TestControlSocket guestSocket = null;
+
+        try {
+            assertThat(hostSocket.awaitRoster("Host", "host")).isTrue();
+            guestSocket = connectControlSocket(room[0], GUEST, "Guest", null);
+            assertThat(hostSocket.awaitRoster("Guest", "participant")).isTrue();
+            assertThat(guestSocket.awaitRoster("Guest", "participant")).isTrue();
+
+            String guestId = roomService.findMemberBySession(room[0], GUEST).getMemberId();
+
+            // Host grants edit access
+            HttpResponse<String> res = patchEditAccess(room[0], guestId, HOST, room[1], "{\"can_edit\":true}");
+            assertThat(res.statusCode()).isEqualTo(200);
+
+            // Both control sockets receive the updated roster with can_edit=true
+            assertThat(hostSocket.awaitRosterEditAccess("Guest", true)).isTrue();
+            assertThat(guestSocket.awaitRosterEditAccess("Guest", true)).isTrue();
+        } finally {
+            hostSocket.close();
+            if (guestSocket != null) {
+                guestSocket.close();
+            }
+        }
+    }
+
+    @Test
+    void settingSameEditAccess_isOkAndDoesNotBroadcast() throws Exception {
+        String[] room = createPairRoom();
+        roomService.join(room[0], HOST, "Host", room[1]);
+        String guestId = roomService.join(room[0], GUEST, "Guest", null).getMember().getMemberId();
+
+        // Already false in teach_interview
+        HttpResponse<String> res = patchEditAccess(room[0], guestId, HOST, room[1], "{\"can_edit\":false}");
+        assertThat(res.statusCode()).isEqualTo(200);
+        JsonNode body = om.readTree(res.body());
+        assertThat(body.get("permissions").get("can_edit").asBoolean()).isFalse();
+    }
+
+    @Test
+    void openModeRoom_refusesEditAccess() throws Exception {
+        String[] room = createRoom("{\"mode\":\"open\",\"language\":\"python\"}");
+        roomService.join(room[0], HOST, "Host", room[1]);
+        String guestId = roomService.join(room[0], GUEST, "Guest", null).getMember().getMemberId();
+
+        HttpResponse<String> res = patchEditAccess(room[0], guestId, HOST, room[1], "{\"can_edit\":true}");
+        assertThat(res.statusCode()).isEqualTo(422);
+        assertThat(errorCode(res)).isEqualTo("INVALID_REQUEST");
+        assertThat(om.readTree(res.body()).get("error").get("message").asText())
+                .contains("Edit access controls apply only in Pair mode");
+    }
+
+    @Test
+    void nonHost_getsNotOwner() throws Exception {
+        String[] room = createPairRoom();
+        roomService.join(room[0], HOST, "Host", room[1]);
+        String guestId = roomService.join(room[0], GUEST, "Guest", null).getMember().getMemberId();
+        roomService.join(room[0], OTHER, "Other", null);
+
+        // Guest calls without token
+        HttpResponse<String> noToken = patchEditAccess(room[0], guestId, GUEST, null, "{\"can_edit\":true}");
+        assertThat(noToken.statusCode()).isEqualTo(403);
+        assertThat(errorCode(noToken)).isEqualTo("NOT_OWNER");
+
+        // Guest calls with invalid token
+        HttpResponse<String> badToken = patchEditAccess(room[0], guestId, GUEST, "wrong-token", "{\"can_edit\":true}");
+        assertThat(badToken.statusCode()).isEqualTo(403);
+        assertThat(errorCode(badToken)).isEqualTo("NOT_OWNER");
+    }
+
+    @Test
+    void hostTarget_cannotChangeOwnEditAccess() throws Exception {
+        String[] room = createPairRoom();
+        String hostId = roomService.join(room[0], HOST, "Host", room[1]).getMember().getMemberId();
+
+        HttpResponse<String> res = patchEditAccess(room[0], hostId, HOST, room[1], "{\"can_edit\":false}");
+        assertThat(res.statusCode()).isEqualTo(422);
+        assertThat(errorCode(res)).isEqualTo("INVALID_REQUEST");
+        assertThat(om.readTree(res.body()).get("error").get("message").asText())
+                .contains("The Host's edit access cannot be changed.");
+    }
+
+    @Test
+    void observerTarget_cannotHaveEditAccess() throws Exception {
+        String[] room = createPairRoom();
+        roomService.join(room[0], HOST, "Host", room[1]);
+        String guestId = roomService.join(room[0], GUEST, "Guest", null).getMember().getMemberId();
+        roomService.changeRole(room[0], guestId, Role.OBSERVER);
+
+        HttpResponse<String> res = patchEditAccess(room[0], guestId, HOST, room[1], "{\"can_edit\":true}");
+        assertThat(res.statusCode()).isEqualTo(422);
+        assertThat(errorCode(res)).isEqualTo("INVALID_REQUEST");
+        assertThat(om.readTree(res.body()).get("error").get("message").asText())
+                .contains("Observers cannot have edit access; make them a participant first.");
+    }
+
+    @Test
+    void missingOrNonBooleanCanEdit_isInvalidRequest() throws Exception {
+        String[] room = createPairRoom();
+        roomService.join(room[0], HOST, "Host", room[1]);
+        String guestId = roomService.join(room[0], GUEST, "Guest", null).getMember().getMemberId();
+
+        // Empty body
+        HttpResponse<String> emptyBody = patchEditAccess(room[0], guestId, HOST, room[1], null);
+        assertThat(emptyBody.statusCode()).isEqualTo(422);
+        assertThat(errorCode(emptyBody)).isEqualTo("INVALID_REQUEST");
+
+        // Non-boolean string
+        HttpResponse<String> stringBody = patchEditAccess(room[0], guestId, HOST, room[1], "{\"can_edit\":\"true\"}");
+        assertThat(stringBody.statusCode()).isEqualTo(422);
+        assertThat(errorCode(stringBody)).isEqualTo("INVALID_REQUEST");
+
+        // Missing field
+        HttpResponse<String> missingField = patchEditAccess(room[0], guestId, HOST, room[1], "{\"other\":true}");
+        assertThat(missingField.statusCode()).isEqualTo(422);
+        assertThat(errorCode(missingField)).isEqualTo("INVALID_REQUEST");
+    }
+
+    @Test
+    void unknownTargetMember_isNotFound() throws Exception {
+        String[] room = createPairRoom();
+        roomService.join(room[0], HOST, "Host", room[1]);
+
+        HttpResponse<String> res = patchEditAccess(room[0], "m_missing", HOST, room[1], "{\"can_edit\":true}");
+        assertThat(res.statusCode()).isEqualTo(404);
+        assertThat(errorCode(res)).isEqualTo("MEMBER_NOT_FOUND");
+    }
+
+    @Test
+    void unknownRoom_isNotFound() throws Exception {
+        HttpResponse<String> res = patchEditAccess("unknown_room", "m_1", HOST, "token", "{\"can_edit\":true}");
+        assertThat(res.statusCode()).isEqualTo(404);
+        assertThat(errorCode(res)).isEqualTo("ROOM_NOT_FOUND");
+    }
+
+    @Test
+    void editAccess_callerNotJoined_isSessionNotFound() throws Exception {
+        String[] room = createPairRoom();
+        String guestId = roomService.join(room[0], GUEST, "Guest", null).getMember().getMemberId();
+
+        HttpResponse<String> res = patchEditAccess(room[0], guestId, NOT_JOINED, room[1], "{\"can_edit\":true}");
+        assertThat(res.statusCode()).isEqualTo(404);
+        assertThat(errorCode(res)).isEqualTo("SESSION_NOT_FOUND");
+    }
+
+    @Test
+    void editAccess_malformedSessionId_isInvalidRequest() throws Exception {
+        String[] room = createPairRoom();
+
+        HttpResponse<String> res = patchEditAccess(room[0], "m_1", "not-a-uuid", room[1], "{\"can_edit\":true}");
+        assertThat(res.statusCode()).isEqualTo(422);
+        assertThat(errorCode(res)).isEqualTo("INVALID_REQUEST");
     }
 }

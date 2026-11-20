@@ -127,6 +127,10 @@ public class AnalysisController {
 
         Map<String, Object> taskPayload = new LinkedHashMap<>();
         taskPayload.put("code", code);
+        if ("crash_explanation".equalsIgnoreCase(req.getTask()) || "crash-explanation".equalsIgnoreCase(req.getTask())) {
+            taskPayload.put("code_snippet", code);
+            taskPayload.put("sanitizer_output", req.getStdin() != null ? req.getStdin() : "");
+        }
         if (req.getStdin() != null) {
             taskPayload.put("stdin", req.getStdin());
         }
