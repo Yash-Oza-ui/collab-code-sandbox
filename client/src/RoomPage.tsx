@@ -10,8 +10,12 @@ import RunPanel from './RunPanel'
 import RunOutputPanel from './RunOutputPanel'
 import WorkspacePanel from './WorkspacePanel'
 import {
+  approveModule,
   createModule,
+  declineModule,
   listModules,
+  listPendingModules,
+  requestModule,
   validateModuleName,
   type WorkspaceModule,
 } from './workspaceApi'
@@ -495,10 +499,26 @@ export default function RoomPage(props: RoomPageProps = {}) {
               sessionId,
               baseUrl: syncBase,
               fetchFn: wsOptions?.fetchFn,
-            }).then((res) => {
+            }).then(async (res) => {
               if (res.ok) {
-                setWorkspaceModules(res.data)
-                const approved = res.data.filter((m) => !m.pending)
+                let allMods = res.data
+                const token = readOwnerToken(roomId)
+                if (token || isHost) {
+                  const pendingRes = await listPendingModules({
+                    roomId,
+                    sessionId,
+                    ownerToken: token,
+                    baseUrl: syncBase,
+                    fetchFn: wsOptions?.fetchFn,
+                  })
+                  if (pendingRes.ok) {
+                    const existingIds = new Set(allMods.map((m) => m.module_id))
+                    const additions = pendingRes.data.filter((m) => !existingIds.has(m.module_id))
+                    allMods = [...allMods, ...additions]
+                  }
+                }
+                setWorkspaceModules(allMods)
+                const approved = allMods.filter((m) => !m.pending)
                 if (approved.length > 0 && !activeModuleIdRef.current) {
                   const entry = approved.find((m) => m.is_entry) ?? approved[0]
                   setActiveModuleId(entry.module_id)
@@ -1074,6 +1094,107 @@ export default function RoomPage(props: RoomPageProps = {}) {
     [roomId, workspaceLanguage, wsOptions?.fetchFn, wsOptions?.syncWsUrl, getModuleDoc, bindEditorToDoc],
   )
 
+  const handleRequestModule = useCallback(
+    async (name: string) => {
+      if (!roomId) return
+      const validation = validateModuleName(name, workspaceLanguage)
+      if (!validation.valid) {
+        setWorkspaceError(validation.error ?? 'Invalid module name.')
+        return
+      }
+      setWorkspaceError(null)
+      setIsCreatingModule(true)
+      const currentSessionId = sessionIdRef.current ?? wsOptions?.sessionId ?? getCollabSessionId()
+      const syncBase = wsOptions?.syncWsUrl
+        ? wsOptions.syncWsUrl.replace(/^ws/, 'http').replace(/\/ws\/rooms.*$/, '')
+        : undefined
+      const res = await requestModule(
+        {
+          roomId,
+          sessionId: currentSessionId,
+          baseUrl: syncBase,
+          fetchFn: wsOptions?.fetchFn,
+        },
+        name,
+      )
+      setIsCreatingModule(false)
+      if (!res.ok) {
+        setWorkspaceError(res.error)
+      } else {
+        setWorkspaceModules((prev) => {
+          if (prev.some((m) => m.module_id === res.data.module_id)) return prev
+          return [...prev, res.data]
+        })
+      }
+    },
+    [roomId, workspaceLanguage, wsOptions?.fetchFn, wsOptions?.syncWsUrl],
+  )
+
+  const handleApproveModule = useCallback(
+    async (moduleId: string, ownerMemberId?: string) => {
+      if (!roomId) return
+      setWorkspaceError(null)
+      const token = readOwnerToken(roomId)
+      const currentSessionId = sessionIdRef.current ?? wsOptions?.sessionId ?? getCollabSessionId()
+      const syncBase = wsOptions?.syncWsUrl
+        ? wsOptions.syncWsUrl.replace(/^ws/, 'http').replace(/\/ws\/rooms.*$/, '')
+        : undefined
+      const res = await approveModule(
+        {
+          roomId,
+          sessionId: currentSessionId,
+          ownerToken: token,
+          baseUrl: syncBase,
+          fetchFn: wsOptions?.fetchFn,
+        },
+        moduleId,
+        ownerMemberId,
+      )
+      if (!res.ok) {
+        setWorkspaceError(res.error)
+      } else {
+        setWorkspaceModules((prev) => {
+          const idx = prev.findIndex((m) => m.module_id === moduleId)
+          if (idx >= 0) {
+            const copy = [...prev]
+            copy[idx] = res.data
+            return copy
+          }
+          return [...prev, res.data]
+        })
+      }
+    },
+    [roomId, wsOptions?.fetchFn, wsOptions?.syncWsUrl],
+  )
+
+  const handleDeclineModule = useCallback(
+    async (moduleId: string) => {
+      if (!roomId) return
+      setWorkspaceError(null)
+      const token = readOwnerToken(roomId)
+      const currentSessionId = sessionIdRef.current ?? wsOptions?.sessionId ?? getCollabSessionId()
+      const syncBase = wsOptions?.syncWsUrl
+        ? wsOptions.syncWsUrl.replace(/^ws/, 'http').replace(/\/ws\/rooms.*$/, '')
+        : undefined
+      const res = await declineModule(
+        {
+          roomId,
+          sessionId: currentSessionId,
+          ownerToken: token,
+          baseUrl: syncBase,
+          fetchFn: wsOptions?.fetchFn,
+        },
+        moduleId,
+      )
+      if (!res.ok) {
+        setWorkspaceError(res.error)
+      } else {
+        setWorkspaceModules((prev) => prev.filter((m) => m.module_id !== moduleId))
+      }
+    },
+    [roomId, wsOptions?.fetchFn, wsOptions?.syncWsUrl],
+  )
+
   // A run-result frame can carry a stale or untrusted display_name. Only the
   // server roster's member_id -> display_name mapping may label the runner.
   const runnerMember = runOutput?.runner?.member_id
@@ -1181,13 +1302,19 @@ export default function RoomPage(props: RoomPageProps = {}) {
         <WorkspacePanel
           roomId={roomId || ''}
           isHost={isHost}
+          isObserver={isObserver}
           language={workspaceLanguage}
           modules={workspaceModules}
           activeModuleId={activeModuleId}
           onSelectModule={handleSelectModule}
           onCreateModule={handleCreateModule}
+          onRequestModule={handleRequestModule}
+          onApproveModule={handleApproveModule}
+          onDeclineModule={handleDeclineModule}
           creationError={workspaceError}
           isCreating={isCreatingModule}
+          roster={roster}
+          myMemberId={myMemberId}
         />
       )}
       <section className="room-participants" aria-label="Room participants">

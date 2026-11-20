@@ -190,3 +190,192 @@ export async function createModule(
     }
   }
 }
+
+/**
+ * Requests creation of a module by a participant (US-40, FR21.1).
+ */
+export async function requestModule(
+  ctx: WorkspaceApiContext,
+  name: string,
+): Promise<WorkspaceApiResult<WorkspaceModule>> {
+  return createModule({ ...ctx, ownerToken: undefined }, name)
+}
+
+/**
+ * Host approves a pending module (US-40, FR21.2).
+ */
+export async function approveModule(
+  ctx: WorkspaceApiContext,
+  moduleId: string,
+  ownerMemberId?: string,
+): Promise<WorkspaceApiResult<WorkspaceModule>> {
+  const fetchFn = ctx.fetchFn ?? fetch
+  const base = (
+    ctx.baseUrl ??
+    config.syncWsUrl.replace(/^ws/, 'http').replace(/\/ws\/rooms.*$/, '')
+  ).replace(/\/$/, '')
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'X-Session-Id': ctx.sessionId,
+  }
+  if (ctx.ownerToken) {
+    headers['X-Owner-Token'] = ctx.ownerToken
+  }
+
+  const body = ownerMemberId ? JSON.stringify({ owner_member_id: ownerMemberId }) : '{}'
+
+  try {
+    const res = await fetchFn(
+      `${base}/v1/rooms/${encodeURIComponent(ctx.roomId)}/modules/${encodeURIComponent(moduleId)}/approve`,
+      {
+        method: 'POST',
+        headers,
+        body,
+      },
+    )
+
+    if (!res.ok) {
+      let code: string | undefined
+      let message: string | undefined
+      try {
+        const data = (await res.json()) as { error?: { code?: string; message?: string } }
+        code = data?.error?.code
+        message = data?.error?.message
+      } catch {
+        // non-json
+      }
+      return {
+        ok: false,
+        status: res.status,
+        code,
+        error: message || code || `Failed to approve module (HTTP ${res.status}).`,
+      }
+    }
+
+    const data = (await res.json()) as WorkspaceModule
+    return { ok: true, data }
+  } catch (err) {
+    return {
+      ok: false,
+      status: 0,
+      error: err instanceof Error ? err.message : 'Network error while approving module.',
+    }
+  }
+}
+
+/**
+ * Host declines a pending module (US-40, FR21.2).
+ */
+export async function declineModule(
+  ctx: WorkspaceApiContext,
+  moduleId: string,
+): Promise<WorkspaceApiResult<{ module_id: string; status: string }>> {
+  const fetchFn = ctx.fetchFn ?? fetch
+  const base = (
+    ctx.baseUrl ??
+    config.syncWsUrl.replace(/^ws/, 'http').replace(/\/ws\/rooms.*$/, '')
+  ).replace(/\/$/, '')
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'X-Session-Id': ctx.sessionId,
+  }
+  if (ctx.ownerToken) {
+    headers['X-Owner-Token'] = ctx.ownerToken
+  }
+
+  try {
+    const res = await fetchFn(
+      `${base}/v1/rooms/${encodeURIComponent(ctx.roomId)}/modules/${encodeURIComponent(moduleId)}/decline`,
+      {
+        method: 'POST',
+        headers,
+      },
+    )
+
+    if (!res.ok) {
+      let code: string | undefined
+      let message: string | undefined
+      try {
+        const data = (await res.json()) as { error?: { code?: string; message?: string } }
+        code = data?.error?.code
+        message = data?.error?.message
+      } catch {
+        // non-json
+      }
+      return {
+        ok: false,
+        status: res.status,
+        code,
+        error: message || code || `Failed to decline module (HTTP ${res.status}).`,
+      }
+    }
+
+    const data = (await res.json()) as { module_id: string; status: string }
+    return { ok: true, data }
+  } catch (err) {
+    return {
+      ok: false,
+      status: 0,
+      error: err instanceof Error ? err.message : 'Network error while declining module.',
+    }
+  }
+}
+
+/**
+ * Lists pending module requests for Host (US-40).
+ */
+export async function listPendingModules(
+  ctx: WorkspaceApiContext,
+): Promise<WorkspaceApiResult<WorkspaceModule[]>> {
+  const fetchFn = ctx.fetchFn ?? fetch
+  const base = (
+    ctx.baseUrl ??
+    config.syncWsUrl.replace(/^ws/, 'http').replace(/\/ws\/rooms.*$/, '')
+  ).replace(/\/$/, '')
+
+  const headers: Record<string, string> = {
+    'X-Session-Id': ctx.sessionId,
+  }
+  if (ctx.ownerToken) {
+    headers['X-Owner-Token'] = ctx.ownerToken
+  }
+
+  try {
+    const res = await fetchFn(
+      `${base}/v1/rooms/${encodeURIComponent(ctx.roomId)}/modules?pending=true`,
+      {
+        method: 'GET',
+        headers,
+      },
+    )
+
+    if (!res.ok) {
+      let code: string | undefined
+      let message: string | undefined
+      try {
+        const body = (await res.json()) as { error?: { code?: string; message?: string } }
+        code = body?.error?.code
+        message = body?.error?.message
+      } catch {
+        // non-json
+      }
+      return {
+        ok: false,
+        status: res.status,
+        code,
+        error: message || code || `Failed to list pending modules (HTTP ${res.status}).`,
+      }
+    }
+
+    const data = (await res.json()) as WorkspaceModule[]
+    return { ok: true, data: Array.isArray(data) ? data : [] }
+  } catch (err) {
+    return {
+      ok: false,
+      status: 0,
+      error: err instanceof Error ? err.message : 'Network error while listing pending modules.',
+    }
+  }
+}

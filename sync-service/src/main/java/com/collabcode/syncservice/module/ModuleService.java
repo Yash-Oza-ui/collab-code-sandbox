@@ -49,6 +49,11 @@ public class ModuleService {
             throw new IllegalArgumentException("INVALID_REQUEST");
         }
 
+        Member owner = room.getMembers().get(ownerMemberId);
+        if (owner != null && owner.getRole() == Role.OBSERVER) {
+            throw new IllegalArgumentException("OBSERVERS_CANNOT_REQUEST_MODULES");
+        }
+
         // Validate language-appropriate extension and plain file name rules (DR4)
         ModuleFileNameValidator.validate(name, room.getLanguage());
 
@@ -116,8 +121,86 @@ public class ModuleService {
         if (module == null) {
             throw new IllegalStateException("MODULE_NOT_FOUND");
         }
-        module.approve(optionalNewOwnerId);
+
+        String targetOwnerId = (optionalNewOwnerId != null && !optionalNewOwnerId.isBlank())
+                ? optionalNewOwnerId
+                : module.ownerMemberId();
+
+        Member target = room.getMembers().get(targetOwnerId);
+        if (target == null && !room.getMembers().isEmpty()) {
+            throw new IllegalArgumentException("MEMBER_NOT_FOUND");
+        }
+        if (target != null && target.getRole() == Role.OBSERVER) {
+            throw new IllegalArgumentException("OBSERVER_CANNOT_OWN");
+        }
+
+        module.approve(targetOwnerId);
         return module;
+    }
+
+    /**
+     * Host declines a pending module request (US-40, FR21.2).
+     */
+    public synchronized ModuleRecord decline(String roomId, String moduleId, Member caller, String ownerToken) {
+        Room room = requireOpenRoom(roomId);
+        if (caller == null) {
+            throw new IllegalArgumentException("SESSION_NOT_FOUND");
+        }
+        if (caller.getRole() != Role.HOST) {
+            throw new SecurityException("NOT_OWNER");
+        }
+        if (!OwnerTokens.matches(ownerToken, room.getOwnerTokenHash())) {
+            throw new SecurityException("NOT_OWNER");
+        }
+        ModuleRecord module = find(roomId, moduleId);
+        if (module == null) {
+            throw new IllegalStateException("MODULE_NOT_FOUND");
+        }
+        if (!module.pending()) {
+            throw new IllegalArgumentException("MODULE_NOT_PENDING");
+        }
+        Map<String, ModuleRecord> modules = byRoom.get(roomId);
+        if (modules != null) {
+            modules.remove(moduleId);
+        }
+        return module;
+    }
+
+    /**
+     * Removes all pending module requests authored by the specified member (US-40).
+     * Used when a requester leaves or is removed from the room.
+     */
+    public synchronized List<ModuleRecord> removePendingRequestsForMember(String roomId, String memberId) {
+        Map<String, ModuleRecord> modules = byRoom.get(roomId);
+        if (modules == null || memberId == null) {
+            return List.of();
+        }
+        List<ModuleRecord> removed = new java.util.ArrayList<>();
+        modules.entrySet().removeIf(entry -> {
+            ModuleRecord m = entry.getValue();
+            if (m.pending() && memberId.equals(m.ownerMemberId())) {
+                removed.add(m);
+                return true;
+            }
+            return false;
+        });
+        return removed;
+    }
+
+    /** Returns pending module requests awaiting Host approval (US-40). */
+    public synchronized List<ModuleRecord> listPending(String roomId, Member requester) {
+        requireOpenRoom(roomId);
+        if (requester == null) {
+            throw new IllegalArgumentException("SESSION_NOT_FOUND");
+        }
+        Map<String, ModuleRecord> modules = byRoom.get(roomId);
+        if (modules == null) {
+            return List.of();
+        }
+        return modules.values().stream()
+                .filter(ModuleRecord::pending)
+                .sorted(Comparator.comparing(ModuleRecord::moduleId))
+                .toList();
     }
 
     /** Returns a stable snapshot of approved modules for a joined room member. */

@@ -1,7 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
+  approveModule,
   createModule,
+  declineModule,
   listModules,
+  listPendingModules,
+  requestModule,
   validateModuleName,
 } from './workspaceApi'
 
@@ -172,5 +176,162 @@ describe('createModule', () => {
       expect(res.status).toBe(422)
       expect(res.error).toContain("File name 'foo.txt' does not match language 'python'.")
     }
+  })
+})
+
+describe('requestModule', () => {
+  it('requests module without X-Owner-Token (US-40, FR21.1)', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 202,
+      json: async () => ({
+        module_id: 'mod_part',
+        name: 'task.py',
+        owner_member_id: 'm_part',
+        pending: true,
+      }),
+    })
+
+    const res = await requestModule(
+      {
+        roomId: 'room-123',
+        sessionId: 'sess-part',
+        fetchFn: fetchMock as unknown as typeof fetch,
+        baseUrl: 'http://localhost:8081',
+      },
+      'task.py',
+    )
+
+    expect(res.ok).toBe(true)
+    if (res.ok) {
+      expect(res.data.pending).toBe(true)
+      expect(res.data.owner_member_id).toBe('m_part')
+    }
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://localhost:8081/v1/rooms/room-123/modules',
+      expect.objectContaining({
+        method: 'POST',
+        headers: expect.not.objectContaining({ 'X-Owner-Token': expect.anything() }),
+      }),
+    )
+  })
+})
+
+describe('approveModule', () => {
+  it('approves module with optional new owner (US-40, FR21.2)', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        module_id: 'mod_1',
+        name: 'task.py',
+        owner_member_id: 'm_new_owner',
+        pending: false,
+      }),
+    })
+
+    const res = await approveModule(
+      {
+        roomId: 'room-123',
+        sessionId: 'sess-host',
+        ownerToken: 'token-secret',
+        fetchFn: fetchMock as unknown as typeof fetch,
+        baseUrl: 'http://localhost:8081',
+      },
+      'mod_1',
+      'm_new_owner',
+    )
+
+    expect(res.ok).toBe(true)
+    if (res.ok) {
+      expect(res.data.owner_member_id).toBe('m_new_owner')
+      expect(res.data.pending).toBe(false)
+    }
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://localhost:8081/v1/rooms/room-123/modules/mod_1/approve',
+      expect.objectContaining({
+        method: 'POST',
+        headers: expect.objectContaining({
+          'X-Session-Id': 'sess-host',
+          'X-Owner-Token': 'token-secret',
+        }),
+        body: JSON.stringify({ owner_member_id: 'm_new_owner' }),
+      }),
+    )
+  })
+})
+
+describe('declineModule', () => {
+  it('declines module sending POST to decline endpoint (US-40, FR21.2)', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        module_id: 'mod_1',
+        status: 'declined',
+      }),
+    })
+
+    const res = await declineModule(
+      {
+        roomId: 'room-123',
+        sessionId: 'sess-host',
+        ownerToken: 'token-secret',
+        fetchFn: fetchMock as unknown as typeof fetch,
+        baseUrl: 'http://localhost:8081',
+      },
+      'mod_1',
+    )
+
+    expect(res.ok).toBe(true)
+    if (res.ok) {
+      expect(res.data.status).toBe('declined')
+    }
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://localhost:8081/v1/rooms/room-123/modules/mod_1/decline',
+      expect.objectContaining({
+        method: 'POST',
+        headers: expect.objectContaining({
+          'X-Session-Id': 'sess-host',
+          'X-Owner-Token': 'token-secret',
+        }),
+      }),
+    )
+  })
+})
+
+describe('listPendingModules', () => {
+  it('fetches pending modules with ?pending=true (US-40)', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => [
+        { module_id: 'mod_p', name: 'draft.py', owner_member_id: 'm_part', pending: true },
+      ],
+    })
+
+    const res = await listPendingModules({
+      roomId: 'room-123',
+      sessionId: 'sess-host',
+      ownerToken: 'token-secret',
+      fetchFn: fetchMock as unknown as typeof fetch,
+      baseUrl: 'http://localhost:8081',
+    })
+
+    expect(res.ok).toBe(true)
+    if (res.ok) {
+      expect(res.data).toHaveLength(1)
+      expect(res.data[0].pending).toBe(true)
+    }
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://localhost:8081/v1/rooms/room-123/modules?pending=true',
+      expect.objectContaining({
+        method: 'GET',
+        headers: expect.objectContaining({
+          'X-Session-Id': 'sess-host',
+          'X-Owner-Token': 'token-secret',
+        }),
+      }),
+    )
   })
 })
