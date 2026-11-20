@@ -47,6 +47,7 @@ import {
   readmitMember,
   regenerateLink,
   removeMember,
+  setEditAccess,
   type BlockedMember,
   type HostApiResult,
   type HostCallContext,
@@ -188,7 +189,6 @@ export default function RoomPage(props: RoomPageProps = {}) {
          (activeModule.writers || []).includes(myMemberId || ''))
       )
     : true
-  const isEditorReadOnly = isObserver || (roomMode?.mode === 'open' && !isModuleWriter)
   // Run permission (US-60, V2.20): the server's answer for this member, from joined / roster.
   // Unknown (older server) is treated as allowed; the server still checks every run (FR41.4).
   const [myCanRun, setMyCanRun] = useState<boolean | null>(null)
@@ -197,7 +197,15 @@ export default function RoomPage(props: RoomPageProps = {}) {
   const [runControlError, setRunControlError] = useState<string | null>(null)
   const [changingRunFor, setChangingRunFor] = useState<string | null>(null)
   const [changingHostOnly, setChangingHostOnly] = useState(false)
+  // Edit permission in Pair mode (US-36, V2.21): from joined / roster.
+  const [myCanEdit, setMyCanEdit] = useState<boolean | null>(null)
+  const [changingEditFor, setChangingEditFor] = useState<string | null>(null)
+  const [editAccessError, setEditAccessError] = useState<string | null>(null)
   const isHost = role?.toLowerCase() === 'host'
+  const isEditorReadOnly =
+    isObserver ||
+    (roomMode?.mode === 'pair' && !isHost && myCanEdit === false) ||
+    (roomMode?.mode === 'open' && !isModuleWriter)
   const runDisabled = isObserver || myCanRun === false
   const runDisabledReason = runDisabled
     ? isObserver
@@ -396,7 +404,7 @@ export default function RoomPage(props: RoomPageProps = {}) {
     onDisplayNameAcceptedRef.current = onDisplayNameAccepted
   }, [onDisplayNameAccepted])
 
-  // Dynamically update Monaco Editor readOnly state if role or write access changes (US-27, US-43)
+  // Dynamically update Monaco Editor readOnly state if role, edit permissions (Pair, US-36), or write access (Open, US-43) change while editor is mounted
   useEffect(() => {
     if (editorRef.current) {
       editorRef.current.updateOptions({ readOnly: isEditorReadOnly })
@@ -494,6 +502,7 @@ export default function RoomPage(props: RoomPageProps = {}) {
           applyRole(joined.role)
           setMyCanRun(typeof joined.permissions?.can_run === 'boolean' ? joined.permissions.can_run : null)
           setMyRunDeniedReason(joined.permissions?.run_denied_reason ?? null)
+          setMyCanEdit(typeof joined.permissions?.can_edit === 'boolean' ? joined.permissions.can_edit : null)
           const openLang = typeof joined.language === 'string' ? joined.language : undefined
           setWorkspaceLanguage(openLang)
           if (openLang) {
@@ -629,6 +638,9 @@ export default function RoomPage(props: RoomPageProps = {}) {
             if (me?.permissions && typeof me.permissions.can_run === 'boolean') {
               setMyCanRun(me.permissions.can_run)
               setMyRunDeniedReason(me.permissions.run_denied_reason ?? null)
+            }
+            if (me?.permissions && typeof me.permissions.can_edit === 'boolean') {
+              setMyCanEdit(me.permissions.can_edit)
             }
           }
           setHostOnlyRun(roster.host_only_run === true)
@@ -1051,6 +1063,25 @@ export default function RoomPage(props: RoomPageProps = {}) {
     }
   }
 
+  async function handleToggleEditAccess(member: RosterMember, allow: boolean) {
+    if (!roomId || !isHost) return
+    setEditAccessError(null)
+    setChangingEditFor(member.member_id)
+    try {
+      const ctx = getHostContext()
+      if (!ctx) {
+        setEditAccessError('Missing Host credentials. Please rejoin the room.')
+        return
+      }
+      const result = await setEditAccess(ctx, member.member_id, allow)
+      if (!result.ok) {
+        setEditAccessError(result.error)
+      }
+    } finally {
+      setChangingEditFor(null)
+    }
+  }
+
   const handleSelectModule = useCallback(
     (moduleId: string) => {
       setActiveModuleId(moduleId)
@@ -1440,6 +1471,28 @@ export default function RoomPage(props: RoomPageProps = {}) {
 
                   {isMemberObserver && <span>Read-only</span>}
 
+                  {roomMode?.mode === 'pair' && isHost && !isSelf && !isMemberObserver && member.role.toLowerCase() === 'participant' && (
+                    member.permissions?.can_edit ? (
+                      <button
+                        type="button"
+                        data-testid={`toggle-edit-access-${member.member_id}`}
+                        onClick={() => void handleToggleEditAccess(member, false)}
+                        disabled={changingEditFor === member.member_id}
+                      >
+                        {changingEditFor === member.member_id ? 'Changing...' : 'Revoke Edit'}
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        data-testid={`toggle-edit-access-${member.member_id}`}
+                        onClick={() => void handleToggleEditAccess(member, true)}
+                        disabled={changingEditFor === member.member_id}
+                      >
+                        {changingEditFor === member.member_id ? 'Changing...' : 'Grant Edit'}
+                      </button>
+                    )
+                  )}
+
                   {isHost && !isSelf && !isMemberObserver && member.role.toLowerCase() !== 'host' && (
                     member.permissions?.run_denied_reason === 'run_revoked' ? (
                       <button
@@ -1539,6 +1592,12 @@ export default function RoomPage(props: RoomPageProps = {}) {
         {runControlError && (
           <p role="alert" data-testid="run-control-error">
             {runControlError}
+          </p>
+        )}
+
+        {editAccessError && (
+          <p role="alert" data-testid="edit-access-error">
+            {editAccessError}
           </p>
         )}
 

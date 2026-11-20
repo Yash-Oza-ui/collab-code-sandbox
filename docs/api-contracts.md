@@ -1440,7 +1440,7 @@ A malformed `audience` (V2.10) is also `INVALID_MESSAGE`. The new internal calls
 
 **Not decided in version 2.** These are listed so that nobody assumes they are covered:
 
-- Host controls other than modules, the Observer role (V2.17) and remove / re-admit / regenerate link (V2.18) have no message or endpoint yet: edit access and requests in Pair mode (FR19.1, FR19.3), join approval (FR9.3), the AI switch (FR35.1), transferring the Host role (FR31.1), the audit log (FR34), export (FR33) and deleting a room (FR32). They need a contract entry before the stories that build them.
+- Host controls other than modules, the Observer role (V2.17), remove / re-admit / regenerate link (V2.18), Run control (V2.20) and Pair edit access (V2.21) have no message or endpoint yet: edit requests in Pair mode (FR19.3), join approval (FR9.3), the AI switch (FR35.1), transferring the Host role (FR31.1), the audit log (FR34), export (FR33) and deleting a room (FR32). They need a contract entry before the stories that build them.
 - Reassigning the modules a removed member owned, and pruning a retired `member_id` from `writers` (V2.6, V2.18). Deferred to US-42.
 - What a run does with a module that has never been saved (FR24.1, FR25.1).
 - A joiner syncs from a connected writer: a read-only peer's sync step 2 is dropped (V2.12). If no writer is connected, a late joiner receives nothing. To be checked when the relay is built.
@@ -1780,6 +1780,68 @@ The audit log (FR34, US-58, Sprint 5) is not built here. The two state changes a
 
 ---
 
+## V2.21 Give and take back edit access in Pair mode (US-36) — Proposed
+
+Added so that US-36 (and US-37, US-38) has a contract to build on (FR19.1). In a Pair mode room, the Host can give edit access to one or several participants and take it back at any time. Several participants can hold edit access concurrently, and their changes merge (US-02). Enforcement on binary frames is already active from US-35 (`can_edit` flag on the server, `edit-rejected` with reason `no_edit_access`); this section defines the Host's control endpoint and roster update.
+
+```
+PATCH http://localhost:8081/v1/rooms/{room_id}/members/{member_id}/edit-access
+Content-Type: application/json
+X-Session-Id: <caller-session-id>
+X-Owner-Token: <owner-token>
+```
+
+A Host-only action following the caller-identity rule of V2.6: the Host's `X-Session-Id` plus a valid `X-Owner-Token`. Without a valid owner token the answer is `403 NOT_OWNER`.
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `can_edit` | boolean | Yes | `true` grants edit access; `false` withdraws edit access. Must be a JSON boolean: `"false"` or `null` is `INVALID_REQUEST`. |
+
+```json
+{
+  "can_edit": true
+}
+```
+
+Response `200`: the member as it appears in `roster` (V2.4, V2.17; `docs/examples/v2-edit-access-response.json`):
+
+```json
+{
+  "member_id": "m_4b19d2",
+  "display_name": "Lin",
+  "role": "participant",
+  "permissions": {
+    "can_edit": true,
+    "can_run": true,
+    "run_denied_reason": null
+  }
+}
+```
+
+Rules:
+
+1. Only the Host can call it (`403 NOT_OWNER` otherwise, with the same order of checks as V2.17 / V2.20: `INVALID_REQUEST` for a bad `X-Session-Id`, `ROOM_NOT_FOUND`, `SESSION_NOT_FOUND`, then `NOT_OWNER`).
+2. **Pair mode only.** Edit access controls apply only in Pair mode. An Open mode room refuses the call with `422 INVALID_REQUEST` (`"Edit access controls apply only in Pair mode; Open mode uses per-module write access."`; write access there is per module, US-43).
+3. The target must be a current **participant**.
+   - An unknown `member_id` is `404 MEMBER_NOT_FOUND`.
+   - The Host cannot withdraw or change the Host's own access (`422 INVALID_REQUEST`: `"The Host's edit access cannot be changed."`; the Host always keeps edit access).
+   - An Observer cannot have edit access (`422 INVALID_REQUEST`: `"Observers cannot have edit access; make them a participant first."`; the Observer's role wins, FR9.4, until made a participant, US-27).
+4. Setting the value a member already has is `200` and changes nothing (no new `roster`).
+5. The change takes effect at once for the person concerned on every one of their connections:
+   - After a withdrawal, their next edit change frame is dropped with `edit-rejected` (reason `no_edit_access`, V2.12).
+   - After a grant, their next change goes through.
+   - No reload is needed: their editor switches dynamically between read-only and editable.
+6. Several participants can have edit access at once, and their edits merge concurrently (US-02).
+7. On a change, the server broadcasts an updated `roster` to the whole room (V2.4), so all clients reflect the current edit permissions.
+8. Role changes (V2.17) reset permissions to the room's preset default. Host transfer (V2.19) grants the new Host edit access and resets the previous Host to participant default.
+9. Errors (V2.12): `404 ROOM_NOT_FOUND`, `404 SESSION_NOT_FOUND` (the caller has not joined), `404 MEMBER_NOT_FOUND`, `403 NOT_OWNER`, `422 INVALID_REQUEST`.
+
+### Audit (US-58)
+
+Edit access changes are made in one place in sync-service (`RoomService.setEditAccess`), so the audit log of US-58 (FR34, Sprint 5) records change events from there.
+
+---
+
 ## Changes
 
 | Version | Date | Change |
@@ -1797,6 +1859,7 @@ The audit log (FR34, US-58, Sprint 5) is not built here. The two state changes a
 | v2 (remove / re-admit, review) | 18 Nov 2026 | Review fixes (#144): `member_id` retired on removal, a re-admit returns a new id while an ordinary reconnect keeps it (V2.3, V2.18); modules a removed member owned deferred to US-42; new `GET /v1/rooms/{room_id}/members/blocked` lists removed members; the block is recorded atomically before the sockets close (CR04); client no-reconnect rule for `USER_BLOCKED`/`4403`/`4404`/`4411` with a `USER_BLOCKED` example; regenerate preserves `member_id`s, module ownership/writers and documents, and the old id answers `404` on every interface and is never reissued; stale "removing a user" item dropped from V2.15 and `MEMBER_NOT_FOUND` widened for the block list (V2.12); 22-char regenerate example id. |
 | v2 (host transfer) | 17 Nov 2026 | V2.19 added (US-54): `POST /v1/rooms/{room_id}/members/{member_id}/make-host` transfers the Host role (FR31.1). The server issues a new owner token to the new Host (old token invalidated), delivered over their control socket as a new `host-granted` message; exactly one Host at all times. (Numbered V2.19 to follow US-28's V2.18; merge that contract first.) |
 | v2 (run permission) | 19 Nov 2026 | V2.20 added (US-60): `PATCH /v1/rooms/{room_id}/members/{member_id}/run-permission` takes Run away from a participant and gives it back (FR41.2), and `PATCH /v1/rooms/{room_id}/run-policy` switches Host-only running (FR41.3), both Host-only (`NOT_OWNER` otherwise). The reasons `observer`, `run_revoked`, `host_only` are those of V2.12 and the lookup (V2.11) is unchanged in shape. `roster` and `joined` gain `permissions.run_denied_reason`, and `roster` gains `host_only_run` (V2.4). Restricting Run removed from the undecided list in V2.15. |
+| v2 (edit access) | Nov 2026 | V2.21 added (US-36): `PATCH /v1/rooms/{room_id}/members/{member_id}/edit-access` gives or takes back edit access in Pair mode (FR19.1). Edit access controls apply only in Pair mode (Open mode refuses with `422 INVALID_REQUEST`). Host access cannot be changed (`422`) and Observers cannot have edit access (`422`). Broadcasts updated roster on change. |
 
 ### Runner infrastructure error (v1 proposal addition)
 

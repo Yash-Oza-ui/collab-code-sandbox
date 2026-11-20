@@ -971,6 +971,138 @@ class SocketsAndEditCheckIntegrationTest {
     }
 
     // -----------------------------------------------------------------------
+    // US-36 (V2.21, FR19.1): Give and take back edit access in Pair mode
+    // -----------------------------------------------------------------------
+
+    @Test
+    void editAccess_grantAndWithdraw_takesEffectImmediatelyOnNextFrame() throws Exception {
+        Map<String, Object> room = createRoom("pair", "teach_interview", null);
+        String roomId = (String) room.get("room_id");
+        String ownerToken = (String) room.get("owner_token");
+
+        try (WsClient ctrlA = connectControl(roomId, SESSION_A);
+             WsClient ctrlB = connectControl(roomId, SESSION_B)) {
+
+            sendJoin(ctrlA, "Alice", ownerToken);
+            sendJoin(ctrlB, "Bob", null);
+            drainText(ctrlA, 2);
+            drainText(ctrlB, 2);
+
+            Member bob = roomService.findMemberBySession(roomId, SESSION_B);
+            assertThat(bob).isNotNull();
+            assertThat(bob.isCanEdit()).isFalse();
+
+            try (WsClient docA = connectDoc(roomId, "main", SESSION_A);
+                 WsClient docB = connectDoc(roomId, "main", SESSION_B)) {
+
+                // 1. Before grant: Bob's update is dropped with edit-rejected (no_edit_access)
+                byte[] forbiddenFrame = {0x00, 0x02, 0x11, 0x22};
+                docB.sendBinary(forbiddenFrame);
+                assertThat(docA.pollBinary(500, TimeUnit.MILLISECONDS))
+                        .as("Before grant, Bob's frame is not forwarded to Alice")
+                        .isNull();
+
+                String rejected = pollControlMessage(ctrlB, "edit-rejected", 3, TimeUnit.SECONDS);
+                assertThat(rejected)
+                        .contains("\"type\":\"edit-rejected\"")
+                        .contains("\"doc_id\":\"main\"")
+                        .contains("\"reason\":\"no_edit_access\"");
+
+                // 2. Host grants edit access over REST
+                assertThat(patchEditAccess(roomId, bob.getMemberId(), SESSION_A, ownerToken, true))
+                        .isEqualTo(200);
+
+                // Control sockets receive roster with can_edit=true
+                String rosterA = pollControlMessage(ctrlA, "roster", 3, TimeUnit.SECONDS);
+                assertThat(rosterA).contains("\"can_edit\":true");
+
+                // 3. Next change goes through immediately to Alice
+                byte[] permittedFrame = {0x00, 0x02, 0x33, 0x44};
+                docB.sendBinary(permittedFrame);
+                assertThat(docA.pollBinary(3, TimeUnit.SECONDS))
+                        .as("After grant, Bob's frame is forwarded to Alice")
+                        .isEqualTo(permittedFrame);
+
+                // 4. Host withdraws edit access over REST
+                assertThat(patchEditAccess(roomId, bob.getMemberId(), SESSION_A, ownerToken, false))
+                        .isEqualTo(200);
+
+                // 5. Very next change is dropped and edit-rejected sent
+                byte[] revokedFrame = {0x00, 0x02, 0x55, 0x66};
+                docB.sendBinary(revokedFrame);
+                assertThat(docA.pollBinary(500, TimeUnit.MILLISECONDS))
+                        .as("After withdrawal, Bob's frame is dropped")
+                        .isNull();
+
+                String rejected2 = pollControlMessage(ctrlB, "edit-rejected", 3, TimeUnit.SECONDS);
+                assertThat(rejected2)
+                        .contains("\"type\":\"edit-rejected\"")
+                        .contains("\"doc_id\":\"main\"")
+                        .contains("\"reason\":\"no_edit_access\"");
+            }
+        }
+    }
+
+    @Test
+    void editAccess_multipleParticipantsCanEditConcurrently() throws Exception {
+        Map<String, Object> room = createRoom("pair", "teach_interview", null);
+        String roomId = (String) room.get("room_id");
+        String ownerToken = (String) room.get("owner_token");
+
+        try (WsClient ctrlA = connectControl(roomId, SESSION_A);
+             WsClient ctrlB = connectControl(roomId, SESSION_B);
+             WsClient ctrlC = connectControl(roomId, SESSION_C)) {
+
+            sendJoin(ctrlA, "Alice", ownerToken);
+            sendJoin(ctrlB, "Bob", null);
+            sendJoin(ctrlC, "Charlie", null);
+            drainText(ctrlA, 3);
+            drainText(ctrlB, 3);
+            drainText(ctrlC, 3);
+
+            Member bob = roomService.findMemberBySession(roomId, SESSION_B);
+            Member charlie = roomService.findMemberBySession(roomId, SESSION_C);
+            assertThat(bob).isNotNull();
+            assertThat(charlie).isNotNull();
+
+            // Host grants edit access to BOTH Bob and Charlie
+            assertThat(patchEditAccess(roomId, bob.getMemberId(), SESSION_A, ownerToken, true)).isEqualTo(200);
+            assertThat(patchEditAccess(roomId, charlie.getMemberId(), SESSION_A, ownerToken, true)).isEqualTo(200);
+
+            try (WsClient docA = connectDoc(roomId, "main", SESSION_A);
+                 WsClient docB = connectDoc(roomId, "main", SESSION_B);
+                 WsClient docC = connectDoc(roomId, "main", SESSION_C)) {
+
+                byte[] frameFromBob = {0x00, 0x02, 0x11, 0x11};
+                docB.sendBinary(frameFromBob);
+                assertThat(docA.pollBinary(3, TimeUnit.SECONDS)).isEqualTo(frameFromBob);
+                assertThat(docC.pollBinary(3, TimeUnit.SECONDS)).isEqualTo(frameFromBob);
+
+                byte[] frameFromCharlie = {0x00, 0x02, 0x22, 0x22};
+                docC.sendBinary(frameFromCharlie);
+                assertThat(docA.pollBinary(3, TimeUnit.SECONDS)).isEqualTo(frameFromCharlie);
+                assertThat(docB.pollBinary(3, TimeUnit.SECONDS)).isEqualTo(frameFromCharlie);
+            }
+        }
+    }
+
+    private int patchEditAccess(String roomId, String memberId, String sessionId, String ownerToken, boolean canEdit) throws Exception {
+        java.net.http.HttpClient client = java.net.http.HttpClient.newHttpClient();
+        java.net.http.HttpRequest.Builder rb = java.net.http.HttpRequest.newBuilder()
+                .uri(java.net.URI.create("http://localhost:" + port + "/v1/rooms/" + roomId + "/members/" + memberId + "/edit-access"))
+                .header("Content-Type", "application/json")
+                .method("PATCH", java.net.http.HttpRequest.BodyPublishers.ofString("{\"can_edit\":" + canEdit + "}"));
+        if (sessionId != null) {
+            rb.header("X-Session-Id", sessionId);
+        }
+        if (ownerToken != null) {
+            rb.header("X-Owner-Token", ownerToken);
+        }
+        java.net.http.HttpResponse<String> res = client.send(rb.build(), java.net.http.HttpResponse.BodyHandlers.ofString());
+        return res.statusCode();
+    }
+
+    // -----------------------------------------------------------------------
     // Inner helpers
     // -----------------------------------------------------------------------
 

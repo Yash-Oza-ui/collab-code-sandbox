@@ -1,6 +1,6 @@
 import { config } from './config'
 
-// Host-only REST calls for the participant list (US-28 / V2.18, US-54 / V2.19).
+// Host-only REST calls for the participant list (US-28 / V2.18, US-54 / V2.19, US-36 / V2.21).
 // The server is the enforcement (NFR13): every call sends the caller's session id and the
 // owner token, and a non-Host gets 403 NOT_OWNER. Hiding a button is never the gate.
 // Nothing here logs or returns the owner token.
@@ -27,6 +27,17 @@ export interface BlockedMember {
   removed_at: string
 }
 
+export interface EditAccessResponse {
+  member_id: string
+  display_name: string
+  role: string
+  permissions: {
+    can_edit?: boolean
+    can_run: boolean
+    run_denied_reason?: string | null
+  }
+}
+
 const ROOM_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/
 
 /** Plain-words text for an error code of V2.12; the server message is the fallback. */
@@ -47,17 +58,26 @@ function errorText(code: string | undefined, serverMessage: string | undefined, 
 
 async function hostRequest<T>(
   ctx: HostCallContext,
-  method: 'GET' | 'POST',
+  method: 'GET' | 'POST' | 'PATCH',
   path: string,
   parse: (raw: unknown) => T | null,
+  requestBody?: unknown,
 ): Promise<HostApiResult<T>> {
   const fetchFn = ctx.fetchFn ?? fetch
   const base = ctx.baseUrl ?? config.platformApiUrl
   let response: Response
   try {
+    const headers: Record<string, string> = {
+      'X-Session-Id': ctx.sessionId,
+      'X-Owner-Token': ctx.ownerToken,
+    }
+    if (requestBody !== undefined) {
+      headers['Content-Type'] = 'application/json'
+    }
     response = await fetchFn(`${base}/v1/rooms/${encodeURIComponent(ctx.roomId)}${path}`, {
       method,
-      headers: { 'X-Session-Id': ctx.sessionId, 'X-Owner-Token': ctx.ownerToken },
+      headers,
+      body: requestBody !== undefined ? JSON.stringify(requestBody) : undefined,
     })
   } catch {
     return { ok: false, status: 0, code: 'NETWORK', error: 'Could not connect to the room server. Please try again.' }
@@ -135,5 +155,19 @@ export function makeHost(ctx: HostCallContext, memberId: string) {
     isObject(raw) && raw.status === 'transferred' && typeof raw.host_member_id === 'string'
       ? { host_member_id: raw.host_member_id }
       : null,
+  )
+}
+
+/** Give or take back edit access for a participant in Pair mode (US-36 / V2.21). */
+export function setEditAccess(ctx: HostCallContext, memberId: string, canEdit: boolean) {
+  return hostRequest<EditAccessResponse>(
+    ctx,
+    'PATCH',
+    `/members/${encodeURIComponent(memberId)}/edit-access`,
+    (raw) => {
+      if (!isObject(raw) || typeof raw.member_id !== 'string') return null
+      return raw as unknown as EditAccessResponse
+    },
+    { can_edit: canEdit },
   )
 }
