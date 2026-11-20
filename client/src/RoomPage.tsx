@@ -202,6 +202,30 @@ export default function RoomPage(props: RoomPageProps = {}) {
 
   const awarenessInstanceRef = useRef<Awareness | null>(null)
   const connRef = useRef<AwarenessWsConnection | null>(null)
+  const moduleDocsRef = useRef<Map<string, Y.Doc>>(new Map())
+
+  const getModuleDoc = useCallback(
+    (id: string): Y.Doc => {
+      if (moduleDocs?.has(id)) {
+        return moduleDocs.get(id)!
+      }
+      let existing = moduleDocsRef.current.get(id)
+      if (!existing) {
+        existing = new Y.Doc()
+        moduleDocsRef.current.set(id, existing)
+      }
+      return existing
+    },
+    [moduleDocs],
+  )
+
+  const getActiveDoc = useCallback((): Y.Doc | null => {
+    if (roomMode?.mode === 'open' && activeModuleIdRef.current) {
+      return getModuleDoc(activeModuleIdRef.current)
+    }
+    return docRef.current
+  }, [getModuleDoc, roomMode?.mode, docRef])
+
   const pendingNameRef = useRef<string | null>(null)
   // A room-specific name is safe to retain; the session ID remains stable separately.
   const resumeNameKey = roomId ? `collab_room_name:${roomId}:${wsOptions?.sessionId ?? getCollabSessionId()}` : null
@@ -217,7 +241,7 @@ export default function RoomPage(props: RoomPageProps = {}) {
 
   const renderRemoteCursorLabels = useCallback(() => {
     const editor = editorRef.current
-    const doc = docRef.current
+    const doc = getActiveDoc()
     const awareness = awarenessInstanceRef.current
     const model = editor?.getModel()
 
@@ -310,6 +334,26 @@ export default function RoomPage(props: RoomPageProps = {}) {
 
     setActivePresence(Array.from(seenByMemberId.values()))
   }, [])
+
+  const bindEditorToDoc = useCallback(
+    (targetDoc: Y.Doc | null) => {
+      if (!editorRef.current || !targetDoc || !awarenessInstanceRef.current) return
+      const model = editorRef.current.getModel()
+      if (!model) return
+
+      bindingRef.current?.destroy()
+      bindingRef.current = null
+
+      bindingRef.current = new MonacoBinding(
+        targetDoc.getText('monaco'),
+        model,
+        new Set([editorRef.current]),
+        awarenessInstanceRef.current,
+      )
+      renderRemoteCursorLabels()
+    },
+    [renderRemoteCursorLabels],
+  )
 
   // One place for role changes (joined, roster). A role that is not Host means any stored owner
   // token is retired, so the previous Host drops it after a transfer (V2.19) and the Host
@@ -459,7 +503,9 @@ export default function RoomPage(props: RoomPageProps = {}) {
                   const entry = approved.find((m) => m.is_entry) ?? approved[0]
                   setActiveModuleId(entry.module_id)
                   activeModuleIdRef.current = entry.module_id
-                  conn.switchDoc?.(entry.module_id)
+                  const targetDoc = getModuleDoc(entry.module_id)
+                  bindEditorToDoc(targetDoc)
+                  conn.switchDoc?.(entry.module_id, targetDoc)
                 }
               }
             })
@@ -491,8 +537,10 @@ export default function RoomPage(props: RoomPageProps = {}) {
                 const next = remaining[0]?.module_id ?? null
                 setActiveModuleId(next)
                 activeModuleIdRef.current = next
-                if (next && conn.switchDoc) {
-                  conn.switchDoc(next)
+                if (next) {
+                  const targetDoc = getModuleDoc(next)
+                  bindEditorToDoc(targetDoc)
+                  conn.switchDoc?.(next, targetDoc)
                 }
                 return current.filter((m) => m.module_id !== msg.module_id)
               })
@@ -511,7 +559,9 @@ export default function RoomPage(props: RoomPageProps = {}) {
             if (!activeModuleIdRef.current && !msg.pending) {
               setActiveModuleId(msg.module_id)
               activeModuleIdRef.current = msg.module_id
-              conn.switchDoc?.(msg.module_id)
+              const targetDoc = getModuleDoc(msg.module_id)
+              bindEditorToDoc(targetDoc)
+              conn.switchDoc?.(msg.module_id, targetDoc)
             }
           }
         },
@@ -968,11 +1018,16 @@ export default function RoomPage(props: RoomPageProps = {}) {
     }
   }
 
-  const handleSelectModule = useCallback((moduleId: string) => {
-    setActiveModuleId(moduleId)
-    activeModuleIdRef.current = moduleId
-    connRef.current?.switchDoc?.(moduleId)
-  }, [])
+  const handleSelectModule = useCallback(
+    (moduleId: string) => {
+      setActiveModuleId(moduleId)
+      activeModuleIdRef.current = moduleId
+      const targetDoc = getModuleDoc(moduleId)
+      bindEditorToDoc(targetDoc)
+      connRef.current?.switchDoc?.(moduleId, targetDoc)
+    },
+    [getModuleDoc, bindEditorToDoc],
+  )
 
   const handleCreateModule = useCallback(
     async (name: string) => {
@@ -1010,11 +1065,13 @@ export default function RoomPage(props: RoomPageProps = {}) {
         if (!activeModuleIdRef.current && !res.data.pending) {
           setActiveModuleId(res.data.module_id)
           activeModuleIdRef.current = res.data.module_id
-          connRef.current?.switchDoc?.(res.data.module_id)
+          const targetDoc = getModuleDoc(res.data.module_id)
+          bindEditorToDoc(targetDoc)
+          connRef.current?.switchDoc?.(res.data.module_id, targetDoc)
         }
       }
     },
-    [roomId, workspaceLanguage, wsOptions?.fetchFn, wsOptions?.syncWsUrl],
+    [roomId, workspaceLanguage, wsOptions?.fetchFn, wsOptions?.syncWsUrl, getModuleDoc, bindEditorToDoc],
   )
 
   // A run-result frame can carry a stale or untrusted display_name. Only the
@@ -1318,7 +1375,7 @@ export default function RoomPage(props: RoomPageProps = {}) {
         onRunComplete={(result) => {
           if (result.ok) showRunResult(result.data)
         }}
-        getCode={() => docRef.current?.getText('monaco').toString() ?? ''}
+        getCode={() => getActiveDoc()?.getText('monaco').toString() ?? ''}
         initialLanguage={currentLanguage}
         onLanguageChange={(lang) => setCurrentLanguage(lang)}
         executionApiUrl={wsOptions?.executionApiUrl}
@@ -1338,20 +1395,8 @@ export default function RoomPage(props: RoomPageProps = {}) {
           onMount={(editor: MonacoEditor.IStandaloneCodeEditor) => {
             editorRef.current = editor
             editor.updateOptions({ readOnly: isObserver })
-            const doc = docRef.current
-            const awareness = awarenessInstanceRef.current
-            if (doc && awareness) {
-              const model = editor.getModel()
-              if (model) {
-                bindingRef.current = new MonacoBinding(
-                  doc.getText('monaco'),
-                  model,
-                  new Set([editor]),
-                  awareness,
-                )
-              }
-            }
-            renderRemoteCursorLabels()
+            const doc = getActiveDoc()
+            bindEditorToDoc(doc)
           }}
         />
       </div>

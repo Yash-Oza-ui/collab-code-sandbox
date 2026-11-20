@@ -2,16 +2,38 @@
 import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import * as Y from 'yjs'
 import RoomPage from './RoomPage'
 import { ownerTokenKey } from './createRoom'
 
+const activeBindings: Array<{ ytext: any; model: any }> = []
+
 vi.mock('@monaco-editor/react', () => ({
-  default: () => <div data-testid="mock-monaco-editor" />,
+  default: ({ onMount }: any) => {
+    setTimeout(() => {
+      onMount?.({
+        getModel: () => ({}),
+        updateOptions: vi.fn(),
+        deltaDecorations: vi.fn().mockReturnValue([]),
+      })
+    }, 0)
+    return <div data-testid="mock-monaco-editor" />
+  },
 }))
 
 vi.mock('y-monaco', () => ({
   MonacoBinding: class {
-    destroy() {}
+    ytext: any
+    model: any
+    constructor(ytext: any, model: any) {
+      this.ytext = ytext
+      this.model = model
+      activeBindings.push(this)
+    }
+    destroy() {
+      const idx = activeBindings.indexOf(this)
+      if (idx >= 0) activeBindings.splice(idx, 1)
+    }
   },
 }))
 
@@ -87,6 +109,7 @@ describe('RoomPage Workspace integration (US-39)', () => {
     container = document.createElement('div')
     document.body.appendChild(container)
     MockWs.instances = []
+    activeBindings.length = 0
     window.history.pushState({}, '', `/room/${ROOM_ID}`)
     localStorage.setItem(ownerTokenKey(ROOM_ID), OWNER_TOKEN)
   })
@@ -95,6 +118,7 @@ describe('RoomPage Workspace integration (US-39)', () => {
     document.body.removeChild(container)
     localStorage.clear()
     sessionStorage.clear()
+    activeBindings.length = 0
   })
 
   it('does NOT render workspace panel in Pair mode', async () => {
@@ -112,7 +136,6 @@ describe('RoomPage Workspace integration (US-39)', () => {
       )
     })
 
-    // Submit display name
     const input = container.querySelector('input') as HTMLInputElement
     const button = container.querySelector('button') as HTMLButtonElement
     act(() => {
@@ -241,7 +264,6 @@ describe('RoomPage Workspace integration (US-39)', () => {
     const form = container.querySelector('[data-testid="create-module-form"]') as HTMLFormElement
     act(() => {
       newModInput.value = 'beta.py'
-      newModInput.dispatchEvent(new Event('input', { bubbles: true }))
       form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
     })
 
@@ -249,7 +271,7 @@ describe('RoomPage Workspace integration (US-39)', () => {
       expect(container.querySelector('[data-testid="module-mod_beta"]')).not.toBeNull()
     })
 
-    // Now simulate incoming module-updated push on control socket
+    // Simulate incoming module-updated push on control socket
     const controlWs = MockWs.instances[0]
     act(() => {
       controlWs.onmessage?.(
@@ -291,6 +313,103 @@ describe('RoomPage Workspace integration (US-39)', () => {
     await vi.waitFor(() => {
       expect(container.querySelector('[data-testid="module-mod_gamma"]')).toBeNull()
     })
+
+    act(() => {
+      root.unmount()
+    })
+  })
+
+  it('switches the editor to the selected module Y.Doc and preserves independent contents', async () => {
+    MockWs.mode = 'open'
+    MockWs.language = 'python'
+
+    const alphaDoc = new Y.Doc()
+    const betaDoc = new Y.Doc()
+    alphaDoc.getText('monaco').insert(0, '# Alpha code: print("hello alpha")')
+    betaDoc.getText('monaco').insert(0, '# Beta code: print("hello beta")')
+
+    const moduleDocs = new Map([
+      ['mod_alpha', alphaDoc],
+      ['mod_beta', betaDoc],
+    ])
+
+    const fetchMock = vi.fn().mockImplementation(async (url: string) => {
+      if (url.includes('/modules')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => [
+            { module_id: 'mod_alpha', name: 'alpha.py', owner_member_id: 'm_host', is_entry: true, pending: false },
+            { module_id: 'mod_beta', name: 'beta.py', owner_member_id: 'm_host', is_entry: false, pending: false },
+          ],
+        }
+      }
+      return { ok: true, status: 200, json: async () => ({}) }
+    })
+
+    const root = createRoot(container)
+    act(() => {
+      root.render(
+        <RoomPage
+          moduleDocs={moduleDocs}
+          wsOptions={{
+            WebSocketClass: MockWs as unknown as typeof WebSocket,
+            fetchFn: fetchMock as unknown as typeof fetch,
+          }}
+        />,
+      )
+    })
+
+    const nameInput = container.querySelector('input') as HTMLInputElement
+    const joinBtn = container.querySelector('button') as HTMLButtonElement
+    act(() => {
+      nameInput.value = 'Host User'
+      nameInput.dispatchEvent(new Event('input', { bubbles: true }))
+      joinBtn.click()
+    })
+
+    await vi.waitFor(() => {
+      expect(container.querySelector('[data-testid="module-mod_alpha"]')).not.toBeNull()
+      expect(container.querySelector('[data-testid="module-mod_beta"]')).not.toBeNull()
+      expect(activeBindings.length).toBeGreaterThan(0)
+    })
+
+    // Initially bound to alphaDoc
+    const initialBinding = activeBindings[activeBindings.length - 1]
+    expect(initialBinding.ytext.toString()).toBe('# Alpha code: print("hello alpha")')
+
+    // Switch to beta module
+    const betaButton = container.querySelector('[data-testid="select-module-mod_beta"]') as HTMLButtonElement
+    act(() => {
+      betaButton.click()
+    })
+
+    await vi.waitFor(() => {
+      const currentBinding = activeBindings[activeBindings.length - 1]
+      expect(currentBinding.ytext.toString()).toBe('# Beta code: print("hello beta")')
+    })
+
+    // Mutate beta module content
+    betaDoc.getText('monaco').insert(betaDoc.getText('monaco').length, '\ndef beta_func(): return 42')
+
+    // Verify alpha content was preserved and not corrupted by beta edits
+    expect(alphaDoc.getText('monaco').toString()).toBe('# Alpha code: print("hello alpha")')
+    expect(betaDoc.getText('monaco').toString()).toBe('# Beta code: print("hello beta")\ndef beta_func(): return 42')
+
+    // Switch back to alpha module
+    const alphaButton = container.querySelector('[data-testid="select-module-mod_alpha"]') as HTMLButtonElement
+    act(() => {
+      alphaButton.click()
+    })
+
+    await vi.waitFor(() => {
+      const currentBinding = activeBindings[activeBindings.length - 1]
+      expect(currentBinding.ytext.toString()).toBe('# Alpha code: print("hello alpha")')
+    })
+
+    // Alpha content is still pristine
+    expect(alphaDoc.getText('monaco').toString()).toBe('# Alpha code: print("hello alpha")')
+    expect(betaDoc.getText('monaco').toString()).toContain('def beta_func()')
 
     act(() => {
       root.unmount()
