@@ -20,7 +20,7 @@ Covers all 15 core verification scenarios plus admission-reservation changes (US
 """
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import logging
 import sys
@@ -47,6 +47,7 @@ from app.counters import (
     get_total_usage,
     get_tracker,
     is_cost_cap_reached,
+    prune_stale_reservations,
     record_cache_hit,
     record_fallback,
     record_model_call,
@@ -1990,3 +1991,62 @@ async def test_us77_explicit_max_tokens_parameter_governs_payload_and_admission(
         )
 
         assert captured_payloads[0]["generationConfig"]["maxOutputTokens"] == 150
+
+
+def test_stale_reservation_pruned_after_ttl_expires():
+    """Verify orphaned reservations are auto-expired after TTL to prevent leaked headroom (US-24)."""
+    tracker = get_tracker()
+    tracker.monthly_budget_usd = 10.0
+    tracker.token_cost_per_token = 0.001
+
+    base_time = datetime(2026, 11, 20, 12, 0, 0, tzinfo=timezone.utc)
+    current_time = base_time
+    tracker.set_clock(lambda: current_time)
+
+    res = tracker.reserve_call(estimated_tokens=500)
+    assert tracker.get_active_reservations_tokens() == 500
+    assert tracker.get_active_reservations_count() == 1
+
+    # Advance time by 5 seconds (less than 2 * 10s TTL): reservation must remain active
+    current_time = base_time + timedelta(seconds=5)
+    assert tracker.get_active_reservations_tokens() == 500
+
+    # Advance time by 25 seconds (exceeds 2 * 10s = 20s TTL): reservation must be evicted
+    current_time = base_time + timedelta(seconds=25)
+    assert tracker.get_active_reservations_tokens() == 0
+    assert tracker.get_active_reservations_count() == 0
+
+    # Even if late commit is called on the stale reservation, tokens are not decremented below zero
+    res.commit(tokens=300, room_id="room-stale")
+    assert tracker.get_active_reservations_tokens() == 0
+    assert tracker.monthly_tokens_used == 300
+
+
+def test_auto_prune_on_reserve_restores_headroom():
+    """Verify that new reserve_call automatically prunes stale reservations and reclaims headroom."""
+    tracker = get_tracker()
+    tracker.monthly_budget_usd = 0.60
+    tracker.token_cost_per_token = 0.001  # Budget = 600 tokens ($0.60)
+
+    base_time = datetime(2026, 11, 20, 12, 0, 0, tzinfo=timezone.utc)
+    current_time = base_time
+    tracker.set_clock(lambda: current_time)
+
+    # Reserve 500 tokens (headroom remaining: 100 tokens)
+    res1 = tracker.reserve_call(estimated_tokens=500)
+    assert tracker.get_active_reservations_tokens() == 500
+
+    # A second reservation of 200 tokens would exceed budget (500 + 200 = 700 >= 600) -> blocked
+    with pytest.raises(CostCapReachedError):
+        tracker.reserve_call(estimated_tokens=200)
+
+    # Advance clock past TTL (25s > 20s)
+    current_time = base_time + timedelta(seconds=25)
+
+    # Now reserve_call should automatically prune res1 and admit the new reservation!
+    res2 = tracker.reserve_call(estimated_tokens=200)
+    assert res2.reserved_tokens == 200
+    assert tracker.get_active_reservations_tokens() == 200
+    assert tracker.get_active_reservations_count() == 1
+    res2.release()
+    assert tracker.get_active_reservations_tokens() == 0

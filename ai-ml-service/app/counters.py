@@ -19,7 +19,7 @@ Supports per-room teardown (clear_room) for room lifecycle management (FR32, US-
 
 import atexit
 import concurrent.futures
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import logging
 import math
@@ -224,6 +224,7 @@ class UsageTracker:
         self._active_reservations_tokens: int = 0
         self._next_reservation_id: int = 1
         self._reservations: dict[int, int] = {}
+        self._reservation_created_at: dict[int, datetime] = {}
 
     def set_clock(self, clock: Optional[Callable[[], datetime]]) -> None:
         """Configure custom clock function for testing UTC month transitions."""
@@ -380,20 +381,59 @@ class UsageTracker:
             self._check_month_rollover()
             tokens = self._monthly_tokens_used
             if include_reservations:
+                self._prune_stale_reservations()
                 tokens += self._active_reservations_tokens
             cost_dec = Decimal(str(self.token_cost_per_token))
             budget_dec = Decimal(str(self.monthly_budget_usd))
             spend_dec = Decimal(tokens) * cost_dec
             return spend_dec >= budget_dec
 
+    def _prune_stale_reservations(self, ttl_seconds: Optional[float] = None) -> int:
+        """Evict active reservations older than TTL to prevent leaked headroom (US-24, NFR7.2).
+
+        Default TTL is 2 * settings.LLM_TIMEOUT_SECONDS.
+        Must be called inside self._lock.
+        Returns the number of pruned reservations.
+        """
+        if ttl_seconds is None:
+            timeout = float(getattr(settings, "LLM_TIMEOUT_SECONDS", 10.0))
+            ttl_seconds = 2.0 * timeout
+
+        now = self._get_utc_now()
+        pruned_count = 0
+        stale_ids = [
+            res_id
+            for res_id, created in self._reservation_created_at.items()
+            if (now - created).total_seconds() > ttl_seconds
+        ]
+        for res_id in stale_ids:
+            reserved = self._reservations.pop(res_id, 0)
+            self._reservation_created_at.pop(res_id, None)
+            self._active_reservations_tokens = max(0, self._active_reservations_tokens - reserved)
+            pruned_count += 1
+            logger.warning(
+                "Evicted stale reservation %d (%d tokens) exceeding TTL of %.1fs (US-24)",
+                res_id,
+                reserved,
+                ttl_seconds,
+            )
+        return pruned_count
+
+    def prune_stale_reservations(self, ttl_seconds: Optional[float] = None) -> int:
+        """Evict active reservations older than TTL (thread-safe)."""
+        with self._lock:
+            return self._prune_stale_reservations(ttl_seconds=ttl_seconds)
+
     def get_active_reservations_count(self) -> int:
         """Return the number of currently active in-flight reservations (observability)."""
         with self._lock:
+            self._prune_stale_reservations()
             return len(self._reservations)
 
     def get_active_reservations_tokens(self) -> int:
         """Return the total token count across all active in-flight reservations (observability)."""
         with self._lock:
+            self._prune_stale_reservations()
             return self._active_reservations_tokens
 
     def _send_80_percent_alert(
@@ -442,6 +482,7 @@ class UsageTracker:
         token_est = max(1, int(estimated_tokens))
         with self._lock:
             self._check_month_rollover()
+            self._prune_stale_reservations()
             budget_dec = Decimal(str(self.monthly_budget_usd))
             cost_dec = Decimal(str(self.token_cost_per_token))
 
@@ -467,7 +508,9 @@ class UsageTracker:
 
             res_id = self._next_reservation_id
             self._next_reservation_id += 1
+            now = self._get_utc_now()
             self._reservations[res_id] = token_est
+            self._reservation_created_at[res_id] = now
             self._active_reservations_tokens += token_est
 
             return CallReservation(self, res_id, token_est)
@@ -489,6 +532,7 @@ class UsageTracker:
             self._check_month_rollover()
             if reservation_id in self._reservations:
                 reserved = self._reservations.pop(reservation_id)
+                self._reservation_created_at.pop(reservation_id, None)
                 self._active_reservations_tokens = max(0, self._active_reservations_tokens - reserved)
 
             self._total_model_calls += 1
@@ -524,6 +568,7 @@ class UsageTracker:
         with self._lock:
             if reservation_id in self._reservations:
                 reserved = self._reservations.pop(reservation_id)
+                self._reservation_created_at.pop(reservation_id, None)
                 self._active_reservations_tokens = max(0, self._active_reservations_tokens - reserved)
 
     def _ensure_room(self, room_id: str) -> dict[str, int]:
@@ -703,6 +748,7 @@ class UsageTracker:
             self._last_alert_future = None
             self._active_reservations_tokens = 0
             self._reservations.clear()
+            self._reservation_created_at.clear()
 
     def wait_for_alert_webhook(self, timeout: float = 5.0) -> None:
         """Wait for any in-flight alert webhook delivery to complete (useful in tests and shutdown)."""
@@ -792,3 +838,8 @@ def shutdown_alert_webhook_worker(wait: bool = True) -> None:
 def wait_for_alert_webhook(timeout: float = 5.0) -> None:
     """Wait for any in-flight alert webhook delivery to complete."""
     _default_tracker.wait_for_alert_webhook(timeout=timeout)
+
+
+def prune_stale_reservations(ttl_seconds: Optional[float] = None) -> int:
+    """Evict active reservations older than TTL (US-24, NFR7.2)."""
+    return _default_tracker.prune_stale_reservations(ttl_seconds=ttl_seconds)
