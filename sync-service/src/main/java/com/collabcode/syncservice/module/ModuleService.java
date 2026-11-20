@@ -219,6 +219,104 @@ public class ModuleService {
                 .toList();
     }
 
+    /**
+     * Grant write access to a member for a module (US-43, FR22.1).
+     *
+     * <p>Only the module owner or the Host may grant write access.
+     * When called by the Host, a valid {@code X-Owner-Token} is required.
+     */
+    public synchronized ModuleRecord grantWriteAccess(
+            String roomId,
+            String moduleId,
+            Member caller,
+            String ownerToken,
+            String targetMemberId) {
+
+        Room room = requireOpenRoom(roomId);
+        if (caller == null) {
+            throw new IllegalArgumentException("SESSION_NOT_FOUND");
+        }
+        if (targetMemberId == null || targetMemberId.isBlank()) {
+            throw new IllegalArgumentException("INVALID_REQUEST");
+        }
+
+        ModuleRecord module = find(roomId, moduleId);
+        if (module == null) {
+            throw new IllegalStateException("MODULE_NOT_FOUND");
+        }
+
+        boolean isOwner = caller.getMemberId().equals(module.ownerMemberId());
+        boolean isHost = caller.getRole() == Role.HOST;
+
+        if (!isOwner && !isHost) {
+            throw new SecurityException("NOT_MODULE_OWNER");
+        }
+        if (!isOwner && isHost) {
+            if (!OwnerTokens.matches(ownerToken, room.getOwnerTokenHash())) {
+                throw new SecurityException("NOT_OWNER");
+            }
+        }
+
+        Member target = room.getMembers().get(targetMemberId);
+        if (target == null) {
+            throw new IllegalArgumentException("MEMBER_NOT_FOUND");
+        }
+
+        module.addWriter(targetMemberId);
+        return module;
+    }
+
+    /**
+     * Revoke write access from a member for a module (US-43, FR22.1).
+     *
+     * <p>Only the module owner or the Host may revoke write access.
+     * The module owner always keeps write access (cannot be revoked).
+     */
+    public synchronized ModuleRecord revokeWriteAccess(
+            String roomId,
+            String moduleId,
+            Member caller,
+            String ownerToken,
+            String targetMemberId) {
+
+        Room room = requireOpenRoom(roomId);
+        if (caller == null) {
+            throw new IllegalArgumentException("SESSION_NOT_FOUND");
+        }
+        if (targetMemberId == null || targetMemberId.isBlank()) {
+            throw new IllegalArgumentException("INVALID_REQUEST");
+        }
+
+        ModuleRecord module = find(roomId, moduleId);
+        if (module == null) {
+            throw new IllegalStateException("MODULE_NOT_FOUND");
+        }
+
+        boolean isOwner = caller.getMemberId().equals(module.ownerMemberId());
+        boolean isHost = caller.getRole() == Role.HOST;
+
+        if (!isOwner && !isHost) {
+            throw new SecurityException("NOT_MODULE_OWNER");
+        }
+        if (!isOwner && isHost) {
+            if (!OwnerTokens.matches(ownerToken, room.getOwnerTokenHash())) {
+                throw new SecurityException("NOT_OWNER");
+            }
+        }
+
+        if (targetMemberId.equals(module.ownerMemberId())) {
+            throw new IllegalArgumentException("OWNER_CANNOT_LOSE_WRITE_ACCESS");
+        }
+
+        Member target = room.getMembers().get(targetMemberId);
+        if (target == null) {
+            throw new IllegalArgumentException("MEMBER_NOT_FOUND");
+        }
+
+        module.removeWriter(targetMemberId);
+        return module;
+    }
+
     /** A socket may address only an approved module. */
     public boolean isActive(String roomId, String moduleId) {
         ModuleRecord module = find(roomId, moduleId);
@@ -226,8 +324,11 @@ public class ModuleService {
     }
 
     public boolean canEdit(String roomId, String moduleId, Member member) {
+        if (member == null || member.getRole() == Role.OBSERVER) {
+            return false;
+        }
         ModuleRecord module = find(roomId, moduleId);
-        return member != null && module != null && module.canEdit(member.getMemberId());
+        return module != null && module.canEdit(member.getMemberId());
     }
 
     /**

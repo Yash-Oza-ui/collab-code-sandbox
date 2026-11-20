@@ -3,9 +3,11 @@ import {
   approveModule,
   createModule,
   declineModule,
+  grantWriteAccess,
   listModules,
   listPendingModules,
   requestModule,
+  revokeWriteAccess,
   validateModuleName,
 } from './workspaceApi'
 
@@ -335,3 +337,139 @@ describe('listPendingModules', () => {
     )
   })
 })
+
+describe('grantWriteAccess', () => {
+  it('sends POST /v1/rooms/{roomId}/modules/{moduleId}/writers with member_id (US-43)', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        module_id: 'mod_1',
+        name: 'main.py',
+        owner_member_id: 'm_owner',
+        writers: ['m_part'],
+        pending: false,
+      }),
+    })
+
+    const res = await grantWriteAccess(
+      {
+        roomId: 'room-123',
+        sessionId: 'sess-owner',
+        fetchFn: fetchMock as unknown as typeof fetch,
+        baseUrl: 'http://localhost:8081',
+      },
+      'mod_1',
+      'm_part',
+    )
+
+    expect(res.ok).toBe(true)
+    if (res.ok) {
+      expect(res.data.writers).toContain('m_part')
+    }
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://localhost:8081/v1/rooms/room-123/modules/mod_1/writers',
+      expect.objectContaining({
+        method: 'POST',
+        headers: expect.objectContaining({
+          'Content-Type': 'application/json',
+          'X-Session-Id': 'sess-owner',
+        }),
+        body: JSON.stringify({ member_id: 'm_part' }),
+      }),
+    )
+  })
+
+  it('handles error when not owner (US-43)', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 403,
+      json: async () => ({
+        error: { code: 'NOT_MODULE_OWNER', message: 'Only module owner or Host can grant write access.' },
+      }),
+    })
+
+    const res = await grantWriteAccess(
+      {
+        roomId: 'room-123',
+        sessionId: 'sess-rando',
+        fetchFn: fetchMock as unknown as typeof fetch,
+        baseUrl: 'http://localhost:8081',
+      },
+      'mod_1',
+      'm_part',
+    )
+
+    expect(res.ok).toBe(false)
+    if (!res.ok) {
+      expect(res.code).toBe('NOT_MODULE_OWNER')
+    }
+  })
+})
+
+describe('revokeWriteAccess', () => {
+  it('sends DELETE /v1/rooms/{roomId}/modules/{moduleId}/writers/{memberId} (US-43)', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        module_id: 'mod_1',
+        name: 'main.py',
+        owner_member_id: 'm_owner',
+        writers: [],
+        pending: false,
+      }),
+    })
+
+    const res = await revokeWriteAccess(
+      {
+        roomId: 'room-123',
+        sessionId: 'sess-owner',
+        fetchFn: fetchMock as unknown as typeof fetch,
+        baseUrl: 'http://localhost:8081',
+      },
+      'mod_1',
+      'm_part',
+    )
+
+    expect(res.ok).toBe(true)
+    if (res.ok) {
+      expect(res.data.writers).toEqual([])
+    }
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://localhost:8081/v1/rooms/room-123/modules/mod_1/writers/m_part',
+      expect.objectContaining({
+        method: 'DELETE',
+        headers: expect.objectContaining({
+          'X-Session-Id': 'sess-owner',
+        }),
+      }),
+    )
+  })
+
+  it('handles error when trying to revoke owner (US-43)', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 422,
+      json: async () => ({
+        error: { code: 'INVALID_REQUEST', message: 'Cannot revoke write access from module owner.' },
+      }),
+    })
+
+    const res = await revokeWriteAccess(
+      {
+        roomId: 'room-123',
+        sessionId: 'sess-owner',
+        fetchFn: fetchMock as unknown as typeof fetch,
+        baseUrl: 'http://localhost:8081',
+      },
+      'mod_1',
+      'm_owner',
+    )
+
+    expect(res.ok).toBe(false)
+    if (!res.ok) {
+      expect(res.code).toBe('INVALID_REQUEST')
+    }
+  })
+}))
