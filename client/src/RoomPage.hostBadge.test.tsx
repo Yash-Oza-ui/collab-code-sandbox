@@ -282,10 +282,13 @@ describe('RoomPage Host indicator and owner token (T-10, FR9.5)', () => {
 
     localStorage.setItem(ownerTokenKey(ROOM_ID), OWNER_TOKEN)
 
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      status: 200,
-    })
+    // The Host also reads the removed-members list (US-28, GET .../members/blocked) on joining;
+    // this test is about the PATCH, so that read gets an empty list.
+    const fetchMock = vi.fn().mockImplementation(async (_url: string, init?: RequestInit) =>
+      init?.method === 'GET'
+        ? { ok: true, status: 200, json: async () => ({ blocked: [] }) }
+        : { ok: true, status: 200 },
+    )
     vi.stubGlobal('fetch', fetchMock)
 
     await joinAs('Alice')
@@ -300,9 +303,10 @@ describe('RoomPage Host indicator and owner token (T-10, FR9.5)', () => {
       makeObserverButton?.click()
     })
 
-    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const patchCalls = fetchMock.mock.calls.filter(([, init]) => (init as RequestInit)?.method === 'PATCH')
+    expect(patchCalls).toHaveLength(1)
 
-    const [url, options] = fetchMock.mock.calls[0] as [
+    const [url, options] = patchCalls[0] as [
       string,
       RequestInit,
     ]

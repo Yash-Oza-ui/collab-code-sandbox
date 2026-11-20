@@ -22,8 +22,22 @@ import {
   type JoinedMessage,
   type RosterMember,
   type RunDeniedReason,
+  CLOSE_LINK_REGENERATED,
+  CLOSE_REMOVED,
+  CLOSE_ROOM_CLOSED,
+  CLOSE_UNKNOWN_ROOM,
 } from './awarenessWs'
 import { ownerTokenKey } from './createRoom'
+import {
+  listBlockedMembers,
+  makeHost,
+  readmitMember,
+  regenerateLink,
+  removeMember,
+  type BlockedMember,
+  type HostApiResult,
+  type HostCallContext,
+} from './hostApi'
 import { getRoomIdFromPath } from './roomId'
 import { useRoomDoc } from './roomDoc'
 import { parseRunResultFrame, runNotAllowedMessage } from './runCode'
@@ -66,6 +80,11 @@ export interface RoomPageProps {
     executionApiUrl?: string
     fetchFn?: typeof fetch
   }
+  /**
+   * Opens another page (default: a full page load). Used after the Host regenerates the link
+   * (US-28); a test can pass a spy instead.
+   */
+  navigate?: (path: string) => void
 }
 
 export type RoomJoinStatus = 'prompt' | 'joining' | 'joined' | 'refused' | 'error'
@@ -79,6 +98,28 @@ function readOwnerToken(roomId: string): string | undefined {
   }
 }
 
+function writeOwnerToken(roomId: string, token: string): boolean {
+  try {
+    localStorage.setItem(ownerTokenKey(roomId), token)
+    return true
+  } catch {
+    return false
+  }
+}
+
+function dropOwnerToken(roomId: string): void {
+  try {
+    localStorage.removeItem(ownerTokenKey(roomId))
+  } catch {
+    // Storage access may be disabled; there is nothing stored to drop.
+  }
+}
+
+// Messages for the signals that end a session for good (V2.18, "Client reconnect").
+const REMOVED_MESSAGE = 'The Host has removed you from this room.'
+const LINK_REGENERATED_MESSAGE =
+  'The Host changed the room link. Ask the Host for the new link to rejoin.'
+
 // Reads the room id from the URL (T-06 section 3.2: /room/{room_id}).
 // Manages the Y.Doc lifecycle inside effect setup/cleanup (T-01).
 // Manages the Yjs Awareness lifecycle and user presence colour assignment (US-05 / FR14).
@@ -91,6 +132,7 @@ export default function RoomPage(props: RoomPageProps = {}) {
     moduleDocs,
     resolveDocId,
     wsOptions,
+    navigate = (path: string) => window.location.assign(path),
   } = props
   const roomId = getRoomIdFromPath(window.location.pathname)
   const isInvalidRoomId = !roomId || !/^[A-Za-z0-9_-]{1,64}$/.test(roomId)
@@ -131,6 +173,15 @@ export default function RoomPage(props: RoomPageProps = {}) {
       ? 'Observers cannot run code' // unchanged US-27 wording
       : runNotAllowedMessage(myRunDeniedReason ?? undefined)
     : undefined
+  // Host controls (US-28 remove / re-admit / regenerate link, US-54 make Host).
+  const [blocked, setBlocked] = useState<BlockedMember[]>([])
+  const [hostActionError, setHostActionError] = useState<string | null>(null)
+  const [busyHostAction, setBusyHostAction] = useState<string | null>(null)
+  // Bumped to reload the removed-members list (after a change, or once new credentials arrive).
+  const [hostDataVersion, setHostDataVersion] = useState(0)
+  const roleRef = useRef<string | null>(null)
+  // Set while this tab is the one moving the room to a new link, so its own 4411 close is not an error.
+  const regeneratingRef = useRef(false)
 
   // One Y.Doc is created inside effect setup and destroyed in its cleanup (T-01).
   const { docRef } = useRoomDoc(roomId, { docRef: externalDocRef })
@@ -246,6 +297,18 @@ export default function RoomPage(props: RoomPageProps = {}) {
     setActivePresence(Array.from(seenByMemberId.values()))
   }, [])
 
+  // One place for role changes (joined, roster). A role that is not Host means any stored owner
+  // token is retired, so the previous Host drops it after a transfer (V2.19) and the Host
+  // controls follow the role.
+  const applyRole = useCallback(
+    (nextRole: string) => {
+      roleRef.current = nextRole
+      setRole(nextRole)
+      if (roomId && nextRole.toLowerCase() !== 'host') dropOwnerToken(roomId)
+    },
+    [roomId],
+  )
+
   const showRunResult = useCallback((data: RunResponseData) => {
     const shown = shownRunIdsRef.current
     if (shown.includes(data.request_id)) return
@@ -353,7 +416,7 @@ export default function RoomPage(props: RoomPageProps = {}) {
         onJoined: (joined) => {
           myMemberIdRef.current = joined.member_id ?? null
           setMyMemberId(joined.member_id ?? null)
-          setRole(joined.role)
+          applyRole(joined.role)
           setMyCanRun(typeof joined.permissions?.can_run === 'boolean' ? joined.permissions.can_run : null)
           setMyRunDeniedReason(joined.permissions?.run_denied_reason ?? null)
           // V2.3 joined carries mode and preset, but no Open workspace language.
@@ -389,7 +452,7 @@ export default function RoomPage(props: RoomPageProps = {}) {
           if (myMemberIdRef.current) {
             const me = roster.members?.find((m) => m.member_id === myMemberIdRef.current)
             if (me?.role) {
-              setRole(me.role)
+              applyRole(me.role)
             }
             // The roster (V2.4), not the submitted name or awareness, is
             // authoritative for what teammates see. This also handles a
@@ -415,9 +478,26 @@ export default function RoomPage(props: RoomPageProps = {}) {
           }
           setHostOnlyRun(roster.host_only_run === true)
         },
+        onHostGranted: (granted) => {
+          // V2.19: only the new Host gets this. Store the new token; it replaces the old one
+          // for every owner action. The token is never logged or shown.
+          if (!roomId || granted.member_id !== myMemberIdRef.current) return
+          if (typeof granted.owner_token !== 'string' || granted.owner_token === '') return
+          if (!writeOwnerToken(roomId, granted.owner_token)) {
+            setHostActionError('Could not save the Host credentials in this browser.')
+            return
+          }
+          roleRef.current = 'host'
+          setRole('host')
+          setHostActionError(null)
+          setHostDataVersion((v) => v + 1)
+        },
         onJoinRefused: (msg) => {
           let message = msg.message
-          if (!message) {
+          if (msg.reason === 'USER_BLOCKED') {
+            // V2.18: the exact wording, and no retry (the socket layer already stopped).
+            message = REMOVED_MESSAGE
+          } else if (!message) {
             if (msg.reason === 'NAME_TAKEN') {
               message = `The display name "${pendingNameRef.current ?? ''}" is already taken in this room. Please choose another name.`
             } else if (msg.reason === 'ROOM_FULL') {
@@ -449,17 +529,25 @@ export default function RoomPage(props: RoomPageProps = {}) {
           }
         },
         onClose: (event) => {
-          if ([4403, 4404, 4410].includes(event.code)) {
+          if ([CLOSE_REMOVED, CLOSE_UNKNOWN_ROOM, CLOSE_ROOM_CLOSED, CLOSE_LINK_REGENERATED].includes(event.code)) {
+            // None of these can ever succeed on a retry (V2.18); the socket layer has stopped.
+            if (event.code === CLOSE_LINK_REGENERATED && regeneratingRef.current) return
             setReconnecting(false)
             setServerError(
-              event.code === 4403
-                ? 'Access to this room was denied.'
-                : event.code === 4404
+              event.code === CLOSE_REMOVED
+                ? REMOVED_MESSAGE
+                : event.code === CLOSE_UNKNOWN_ROOM
                   ? 'Room not found (4404). Please verify the room link.'
-                  : 'This room has been closed.',
+                  : event.code === CLOSE_LINK_REGENERATED
+                    ? LINK_REGENERATED_MESSAGE
+                    : 'This room has been closed.',
             )
             setJoinStatus('error')
             joinStatusRef.current = 'error'
+            if (event.code !== CLOSE_UNKNOWN_ROOM && event.code !== CLOSE_ROOM_CLOSED && resumeNameKey) {
+              // No automatic rejoin of the old id on the next load.
+              try { sessionStorage.removeItem(resumeNameKey) } catch { /* storage disabled */ }
+            }
             return
           }
           if (joinStatusRef.current === 'refused') {
@@ -572,7 +660,8 @@ export default function RoomPage(props: RoomPageProps = {}) {
         delete (window as unknown as { awareness?: Awareness }).awareness
       }
     }
-  }, [roomId, isInvalidRoomId, docRef, externalAwarenessRef, propDocId, moduleDocs, resolveDocId, wsOptions, showRunResult, resumeNameKey, renderRemoteCursorLabels, updateActivePresence])
+  }, [roomId, isInvalidRoomId, docRef, externalAwarenessRef, propDocId, moduleDocs, resolveDocId, wsOptions, showRunResult, applyRole, resumeNameKey, renderRemoteCursorLabels, updateActivePresence])
+
   // Keep presence updated in awareness whenever displayName and userColor are set or change
   useEffect(() => {
     const awareness = awarenessInstanceRef.current
@@ -595,6 +684,105 @@ export default function RoomPage(props: RoomPageProps = {}) {
     joinStatusRef.current = 'joining'
 
     connRef.current?.join(name, roomId ? readOwnerToken(roomId) : undefined)
+  }
+
+  // Host credentials for a REST call, or null if this browser has no session or owner token.
+  const getHostContext = useCallback((): HostCallContext | null => {
+    if (!roomId) return null
+    const sessionId = sessionIdRef.current
+    const ownerToken = readOwnerToken(roomId)
+    if (!sessionId || !ownerToken) return null
+    return { roomId, sessionId, ownerToken, fetchFn: wsOptions?.fetchFn }
+  }, [roomId, wsOptions?.fetchFn])
+
+  // Keep the removed-members list (the re-admit UI) current for the Host, also after a refresh.
+  useEffect(() => {
+    if (!isHost) return // the list is only rendered for the Host
+    const ctx = getHostContext()
+    if (!ctx) return // credentials not stored yet (host-granted reloads this)
+    let cancelled = false
+    void listBlockedMembers(ctx).then((result) => {
+      if (cancelled) return
+      if (result.ok) setBlocked(result.data)
+      else setHostActionError(result.error)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [isHost, getHostContext, hostDataVersion])
+
+  async function runHostAction<T>(
+    key: string,
+    call: (ctx: HostCallContext) => Promise<HostApiResult<T>>,
+    onSuccess?: (data: T) => void,
+  ) {
+    if (!isHost) return
+    setHostActionError(null)
+    setBusyHostAction(key)
+    try {
+      const ctx = getHostContext()
+      if (!ctx) {
+        setHostActionError('Missing Host credentials. Please rejoin the room.')
+        return
+      }
+      const result = await call(ctx)
+      if (!result.ok) {
+        setHostActionError(result.error)
+        return
+      }
+      onSuccess?.(result.data)
+    } finally {
+      setBusyHostAction(null)
+    }
+  }
+
+  function handleRemove(member: RosterMember) {
+    if (member.member_id === myMemberIdRef.current) return
+    // The roster follows from the server; the blocked list is reloaded for the re-admit UI.
+    void runHostAction(`remove:${member.member_id}`, (ctx) => removeMember(ctx, member.member_id), () =>
+      setHostDataVersion((v) => v + 1),
+    )
+  }
+
+  function handleReadmit(entry: BlockedMember) {
+    void runHostAction(`readmit:${entry.member_id}`, (ctx) => readmitMember(ctx, entry.member_id), () =>
+      setHostDataVersion((v) => v + 1),
+    )
+  }
+
+  function handleMakeHost(member: RosterMember) {
+    if (member.member_id === myMemberIdRef.current) return
+    if (member.role.toLowerCase() !== 'participant') return
+    if (!window.confirm(`Make ${member.display_name} the Host? You will lose the Host controls.`)) return
+    // No role change here: the new roster says who is Host, and this browser drops its token then.
+    void runHostAction(`make-host:${member.member_id}`, (ctx) => makeHost(ctx, member.member_id))
+  }
+
+  function handleRegenerateLink() {
+    if (!roomId) return
+    if (
+      !window.confirm(
+        'Regenerate the room link? The old link stops working for everyone, and you will have to share the new link yourself.',
+      )
+    ) {
+      return
+    }
+    void runHostAction('regenerate', (ctx) => regenerateLink(ctx), ({ room_id: newRoomId }) => {
+      // The Host keeps the same owner token; only the room id changes (V2.18). Carry the token and
+      // the name over, then open the new link, so this tab returns with the same member_id.
+      const token = readOwnerToken(roomId)
+      if (token) writeOwnerToken(newRoomId, token)
+      dropOwnerToken(roomId)
+      if (displayName && sessionIdRef.current) {
+        try {
+          sessionStorage.setItem(`collab_room_name:${newRoomId}:${sessionIdRef.current}`, displayName)
+        } catch {
+          // Storage disabled: the Host is asked for the name again on the new link.
+        }
+      }
+      regeneratingRef.current = true
+      navigate(`/room/${encodeURIComponent(newRoomId)}`)
+    })
   }
 
   async function handleMakeObserver(member: RosterMember) {
@@ -866,6 +1054,28 @@ export default function RoomPage(props: RoomPageProps = {}) {
                       </button>
                     )
                   )}
+
+                  {isHost && !isSelf && member.role.toLowerCase() === 'participant' && (
+                    <button
+                      type="button"
+                      data-testid={`make-host-${member.member_id}`}
+                      onClick={() => handleMakeHost(member)}
+                      disabled={busyHostAction !== null}
+                    >
+                      {busyHostAction === `make-host:${member.member_id}` ? 'Changing...' : 'Make Host'}
+                    </button>
+                  )}
+
+                  {isHost && !isSelf && member.role.toLowerCase() !== 'host' && (
+                    <button
+                      type="button"
+                      data-testid={`remove-${member.member_id}`}
+                      onClick={() => handleRemove(member)}
+                      disabled={busyHostAction !== null}
+                    >
+                      {busyHostAction === `remove:${member.member_id}` ? 'Removing...' : 'Remove'}
+                    </button>
+                  )}
                 </li>
               )
             })}
@@ -922,6 +1132,45 @@ export default function RoomPage(props: RoomPageProps = {}) {
         {runControlError && (
           <p role="alert" data-testid="run-control-error">
             {runControlError}
+          </p>
+        )}
+
+        {isHost && blocked.length > 0 && (
+          <div data-testid="blocked-members" aria-label="Removed members">
+            <h4>Removed ({blocked.length})</h4>
+            <ul>
+              {blocked.map((entry) => (
+                <li key={entry.member_id} data-testid={`blocked-${entry.member_id}`}>
+                  <span>{entry.display_name}</span>
+                  <button
+                    type="button"
+                    data-testid={`readmit-${entry.member_id}`}
+                    onClick={() => handleReadmit(entry)}
+                    disabled={busyHostAction !== null}
+                  >
+                    {busyHostAction === `readmit:${entry.member_id}` ? 'Re-admitting...' : 'Re-admit'}
+                  </button>
+                </li>
+              ))}
+            </ul>
+            <p>A re-admitted person can open the room link again to rejoin.</p>
+          </div>
+        )}
+
+        {isHost && (
+          <button
+            type="button"
+            data-testid="regenerate-link-button"
+            onClick={handleRegenerateLink}
+            disabled={busyHostAction !== null}
+          >
+            {busyHostAction === 'regenerate' ? 'Regenerating...' : 'Regenerate link'}
+          </button>
+        )}
+
+        {hostActionError && (
+          <p role="alert" data-testid="host-action-error">
+            {hostActionError}
           </p>
         )}
       </section>

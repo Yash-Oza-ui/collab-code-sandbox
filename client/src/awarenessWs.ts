@@ -26,10 +26,14 @@ export const WS_CLOSED = 3
 /**
  * T-20 Close codes (docs/api-contracts.md & sync-service).
  */
+/** A removed session that was already connected (V2.3, V2.18). Terminal: never retry. */
+export const CLOSE_REMOVED = 4403
 export const CLOSE_UNKNOWN_ROOM = 4404
 export const CLOSE_UNKNOWN_DOC = 4405
 export const CLOSE_NOT_JOINED = 4406
 export const CLOSE_ROOM_CLOSED = 4410
+/** The Host regenerated the link (V2.18). Terminal for the old id: rejoin only with the new link. */
+export const CLOSE_LINK_REGENERATED = 4411
 
 /** Default join-handshake timeout in milliseconds. */
 export const DEFAULT_JOIN_TIMEOUT_MS = 5000
@@ -321,6 +325,17 @@ export interface RosterMessage {
   [key: string]: unknown
 }
 
+/**
+ * Sent only to the new Host after a transfer (V2.19). Carries the new owner token: store it,
+ * never log or display it.
+ */
+export interface HostGrantedMessage {
+  type: 'host-granted'
+  member_id: string
+  owner_token: string
+  [key: string]: unknown
+}
+
 export interface EditRejectedMessage {
   type: 'edit-rejected'
   doc_id?: string
@@ -355,6 +370,8 @@ export interface ConnectAwarenessWsOptions {
   onJoined?: (msg: JoinedMessage) => void
   onJoinRefused?: (msg: JoinRefusedMessage) => void
   onRoster?: (msg: RosterMessage) => void
+  /** The Host role was handed to this member (V2.19); the message holds the new owner token. */
+  onHostGranted?: (msg: HostGrantedMessage) => void
   onEditRejected?: (msg: EditRejectedMessage) => void
   /** A run finished in this room (T-17 section 3.6); delivered to every participant. */
   onRunResult?: (msg: RunResultMessage) => void
@@ -402,6 +419,7 @@ export function connectAwarenessWs(
     onJoined,
     onJoinRefused,
     onRoster,
+    onHostGranted,
     onEditRejected,
     onRunResult,
     onError,
@@ -513,7 +531,8 @@ export function connectAwarenessWs(
   let terminal = false
   let lastJoin: { name: string; token?: string } | null =
     displayName ? { name: displayName, token: ownerToken } : null
-  const terminalCodes = new Set([4403, CLOSE_UNKNOWN_ROOM, CLOSE_ROOM_CLOSED])
+  // A retry on any of these can never succeed (V2.18, "Client reconnect").
+  const terminalCodes = new Set([CLOSE_REMOVED, CLOSE_UNKNOWN_ROOM, CLOSE_ROOM_CLOSED, CLOSE_LINK_REGENERATED])
 
   const clearReconnectTimer = () => {
     if (reconnectTimer !== null) {
@@ -889,6 +908,8 @@ export function connectAwarenessWs(
             onJoinRefused?.(msg as JoinRefusedMessage)
           } else if (msg.type === 'roster') {
             onRoster?.(msg as RosterMessage)
+          } else if (msg.type === 'host-granted') {
+            onHostGranted?.(msg as HostGrantedMessage)
           } else if (msg.type === 'edit-rejected') {
             onEditRejected?.(msg as EditRejectedMessage)
           } else if (msg.type === 'run-result') {
