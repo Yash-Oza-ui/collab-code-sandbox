@@ -15,6 +15,11 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.net.http.WebSocket;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -83,6 +88,111 @@ class MemberControllerTest {
 
     private String errorCode(HttpResponse<String> res) throws Exception {
         return om.readTree(res.body()).get("error").get("code").asText();
+    }
+
+    private TestControlSocket connectControlSocket(
+            String roomId,
+            String sessionId,
+            String displayName,
+            String ownerToken) {
+
+        TestControlSocket listener = new TestControlSocket();
+
+        String url = "ws://localhost:" + port
+                + "/ws/rooms/" + roomId
+                + "?session_id=" + sessionId;
+
+        WebSocket socket = http.newWebSocketBuilder()
+                .buildAsync(URI.create(url), listener)
+                .join();
+
+        String joinMessage = ownerToken == null
+                ? "{\"type\":\"join\",\"display_name\":\"" + displayName + "\"}"
+                : "{\"type\":\"join\",\"display_name\":\"" + displayName
+                        + "\",\"owner_token\":\"" + ownerToken + "\"}";
+
+        socket.sendText(joinMessage, true).join();
+        return listener;
+    }
+
+    private static class TestControlSocket implements WebSocket.Listener {
+
+        private final LinkedBlockingQueue<String> messages =
+                new LinkedBlockingQueue<>();
+
+        private final StringBuilder fragments = new StringBuilder();
+
+        private volatile WebSocket socket;
+
+        @Override
+        public void onOpen(WebSocket webSocket) {
+            this.socket = webSocket;
+            webSocket.request(1);
+        }
+
+        @Override
+        public CompletionStage<?> onText(
+                WebSocket webSocket,
+                CharSequence data,
+                boolean last) {
+
+            fragments.append(data);
+
+            if (last) {
+                messages.offer(fragments.toString());
+                fragments.setLength(0);
+            }
+
+            webSocket.request(1);
+            return CompletableFuture.completedFuture(null);
+        }
+
+        boolean awaitRoster(String displayName, String role)
+                throws InterruptedException {
+
+            long deadline = System.nanoTime()
+                    + TimeUnit.SECONDS.toNanos(5);
+
+            while (System.nanoTime() < deadline) {
+                long remaining = deadline - System.nanoTime();
+
+                String message = messages.poll(
+                        remaining, TimeUnit.NANOSECONDS);
+
+                if (message == null) {
+                    return false;
+                }
+
+                try {
+                    JsonNode root = new ObjectMapper().readTree(message);
+
+                    if (!"roster".equals(root.path("type").asText())) {
+                        continue;
+                    }
+
+                    for (JsonNode member : root.path("members")) {
+                        if (displayName.equals(
+                                member.path("display_name").asText())
+                                && role.equals(member.path("role").asText())) {
+                            return true;
+                        }
+                    }
+                } catch (Exception ignored) {
+                    // Ignore non-JSON or unrelated control messages.
+                }
+            }
+
+            return false;
+        }
+
+        void close() {
+            WebSocket current = socket;
+
+            if (current != null && !current.isOutputClosed()) {
+                current.sendClose(
+                        WebSocket.NORMAL_CLOSURE, "test complete").join();
+            }
+        }
     }
 
     @Test
@@ -277,5 +387,43 @@ class MemberControllerTest {
         JsonNode p = om.readTree(res.body()).get("permissions");
         assertThat(p.has("can_run")).isTrue();
         assertThat(p.has("can_edit")).isFalse(); // Open mode omits can_edit
+    }
+
+    @Test
+    void hostRoleChange_broadcastsUpdatedRosterToConnectedControlSockets() throws Exception {
+        String[] room = createPairRoom();
+
+        TestControlSocket hostSocket = connectControlSocket(
+                room[0], HOST, "Host", room[1]);
+        TestControlSocket guestSocket = null;
+
+        try {
+            // Wait until the Host has joined successfully.
+            assertThat(hostSocket.awaitRoster("Host", "host")).isTrue();
+
+            guestSocket = connectControlSocket(
+                    room[0], GUEST, "Guest", null);
+
+            // Both clients must receive the roster containing the Guest.
+            assertThat(hostSocket.awaitRoster("Guest", "participant")).isTrue();
+            assertThat(guestSocket.awaitRoster("Guest", "participant")).isTrue();
+
+            String guestId = roomService.findMemberBySession(room[0], GUEST)
+                    .getMemberId();
+
+            HttpResponse<String> response = patch(
+                    room[0], guestId, HOST, room[1], "{\"role\":\"observer\"}");
+
+            assertThat(response.statusCode()).isEqualTo(200);
+
+            // The role-change broadcast must reach both existing control sockets.
+            assertThat(hostSocket.awaitRoster("Guest", "observer")).isTrue();
+            assertThat(guestSocket.awaitRoster("Guest", "observer")).isTrue();
+        } finally {
+            hostSocket.close();
+            if (guestSocket != null) {
+                guestSocket.close();
+            }
+        }
     }
 }

@@ -4,9 +4,11 @@ import com.collabcode.syncservice.run.RunRecordStore;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
+import java.text.Normalizer;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 
 /**
  * Join and roster logic (T-17 V2.3, V2.4; FR42).
@@ -58,15 +60,16 @@ public class RoomService {
             return JoinOutcome.joined(existing);
         }
 
+        // FR42: uniqueness is case-insensitive, across different sessions only.
+        // Check before approval: a taken name must not enter an approval queue.
+        if (findByName(room, displayName) != null) {
+            return JoinOutcome.refused("NAME_TAKEN");
+        }
+
         // FR9.3 / US-26: if the room requires Host approval, the join is held as
         // APPROVAL_PENDING. The control socket must remain open (V2.3 review 2).
         if (room.isRequiresApproval()) {
             return JoinOutcome.refused("APPROVAL_PENDING");
-        }
-
-        // A display name already used by a DIFFERENT session is refused (FR42).
-        if (findByName(room, displayName) != null) {
-            return JoinOutcome.refused("NAME_TAKEN");
         }
 
         Role role = isOwner(room, ownerToken) ? Role.HOST : Role.PARTICIPANT;
@@ -180,6 +183,12 @@ public class RoomService {
     }
 
     /**
+     * Remove a disconnected member from the room roster without blocking them.
+     * Frees their display_name for future joins while keeping US-28 block
+     * semantics exclusive to removeMember().
+     */
+
+    /**
      * Re-admit a member (US-28, V2.18): remove the one block entry with this
      * member_id. Returns false if no block entry matches (404 MEMBER_NOT_FOUND).
      */
@@ -289,11 +298,21 @@ public class RoomService {
 
     private Member findByName(Room room, String displayName) {
         for (Member m : room.getMembers().values()) {
-            if (m.getDisplayName().equals(displayName)) {
+            if (nameKey(m.getDisplayName()).equals(nameKey(displayName))) {
                 return m;
             }
         }
         return null;
+    }
+
+    /**
+     * Comparison key only: keep the display spelling unchanged in the roster.
+     * Locale-independent case matching also treats full-width Unicode variants
+     * like "Ａｄａ" as the same name as "Ada".
+     */
+    private static String nameKey(String name) {
+        return Normalizer.normalize(name.strip(), Normalizer.Form.NFKC)
+                .toLowerCase(Locale.ROOT);
     }
 
     /**

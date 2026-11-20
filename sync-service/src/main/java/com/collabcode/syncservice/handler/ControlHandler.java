@@ -224,13 +224,19 @@ public class ControlHandler extends AbstractWebSocketHandler {
         }
 
         JsonNode nameNode = root.get("display_name");
-        if (nameNode == null || nameNode.asText().isBlank()) {
+        if (nameNode == null || !nameNode.isTextual() || nameNode.asText().isBlank()) {
             sendText(session, objectMapper.writeValueAsString(
                     RoomMessages.joinRefused("INVALID_MESSAGE", "display_name is required")));
             closeSessionQuietly(session);
             return;
         }
-        String displayName = nameNode.asText().trim();
+        String displayName = nameNode.asText().strip();
+        if (displayName.length() > 50) {
+            sendText(session, objectMapper.writeValueAsString(
+                    RoomMessages.joinRefused("INVALID_MESSAGE", "display_name must be 50 characters or fewer")));
+            closeSessionQuietly(session);
+            return;
+        }
 
         // owner_token is optional — present for the Host only
         String ownerToken = root.has("owner_token") ? root.get("owner_token").asText(null) : null;
@@ -243,7 +249,8 @@ public class ControlHandler extends AbstractWebSocketHandler {
             String reason = outcome.getRefusedReason();
             String humanMessage;
             if ("NAME_TAKEN".equals(reason)) {
-                humanMessage = "The display name '" + displayName + "' is already taken in this room.";
+                humanMessage = "The display name '" + displayName
+                        + "' is already taken in this room. Please choose another name.";
             } else if ("USER_BLOCKED".equals(reason)) {
                 humanMessage = "The Host has removed you from this room.";
             } else {
@@ -272,12 +279,32 @@ public class ControlHandler extends AbstractWebSocketHandler {
 
         // 2. Broadcast updated roster to every session in the room (including the new member)
         String rosterJson = objectMapper.writeValueAsString(RoomMessages.roster(room));
-        for (WebSocketSession target : registry.getAll(roomId)) {
+        for (WebSocketSession target : registry.getJoinedControlSessions(roomId)) {
             sendText(target, rosterJson);
         }
 
         log.info("Control: joined room={} member={} role={}",
                 roomId, member.getMemberId(), member.getRole());
+    }
+
+    /**
+     * Broadcast the current server-authoritative roster to every control socket
+     * in the room. Called after a successful member role change.
+     */
+    public void broadcastRoster(String roomId) {
+        Room room = roomStore.get(roomId);
+        if (room == null) {
+            return;
+        }
+
+        try {
+            String rosterJson = objectMapper.writeValueAsString(RoomMessages.roster(room));
+            for (WebSocketSession target : registry.getJoinedControlSessions(roomId)) {
+                sendText(target, rosterJson);
+            }
+        } catch (Exception e) {
+            log.error("Control: failed to broadcast roster for room={}: {}", roomId, e.getMessage());
+        }
     }
 
     // -----------------------------------------------------------------------

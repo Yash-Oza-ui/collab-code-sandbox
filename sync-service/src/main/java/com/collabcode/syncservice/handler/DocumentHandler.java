@@ -168,6 +168,9 @@ public class DocumentHandler extends AbstractWebSocketHandler {
      */
     private final boolean editCheckDisabled;
 
+    private final Map<String, Map<Long, String>> awarenessClientOwners =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
     public DocumentHandler(RoomStore roomStore,
                            RoomService roomService,
                            ModuleService moduleService,
@@ -359,6 +362,16 @@ public class DocumentHandler extends AbstractWebSocketHandler {
         // --- v0 relay rules with document-level isolation ---
         boolean isAwareness = bytes.length > 0 && bytes[0] == AWARENESS_BYTE;
 
+        if (isAwareness) {
+            String clientSessionId = (String) session.getAttributes().get(ATTR_SESSION_ID);
+            Member sender = roomService.findMemberBySession(roomId, clientSessionId);
+            if (sender != null) {
+                bytes = sanitizeAwarenessFrame(roomId, clientSessionId, sender, bytes);
+                if (bytes == null) {
+                    return;
+                }
+            }
+        }
         // Forward only to sessions in the SAME room subscribed to the SAME doc_id
         List<WebSocketSession> others = registry.getOthers(roomId, session);
         for (WebSocketSession target : others) {
@@ -495,5 +508,116 @@ public class DocumentHandler extends AbstractWebSocketHandler {
             }
         }
         return null;
+    }
+
+    private byte[] sanitizeAwarenessFrame(String roomId,
+                                          String sessionId,
+                                          Member sender,
+                                          byte[] frame) {
+        try {
+            int[] pos = new int[] { 0 };
+            long msgType = readVarUint(frame, pos);
+            if (msgType != AWARENESS_BYTE) {
+                return frame;
+            }
+            int payloadLen = (int) readVarUint(frame, pos);
+            if (payloadLen < 0 || pos[0] + payloadLen > frame.length) {
+                return frame;
+            }
+            byte[] payload = java.util.Arrays.copyOfRange(frame, pos[0], pos[0] + payloadLen);
+            int[] pPos = new int[] { 0 };
+            int count = (int) readVarUint(payload, pPos);
+            if (count <= 0) {
+                return frame;
+            }
+
+            Map<Long, String> owners = awarenessClientOwners.computeIfAbsent(
+                    roomId, k -> new java.util.concurrent.ConcurrentHashMap<>());
+
+            java.io.ByteArrayOutputStream outPayload = new java.io.ByteArrayOutputStream();
+            java.io.ByteArrayOutputStream entriesOut = new java.io.ByteArrayOutputStream();
+            int kept = 0;
+
+            for (int i = 0; i < count; i++) {
+                long clientId = readVarUint(payload, pPos);
+                long clock = readVarUint(payload, pPos);
+                String stateJson = readVarString(payload, pPos);
+
+                String existingOwner = owners.putIfAbsent(clientId, sessionId);
+                if (existingOwner != null && !existingOwner.equals(sessionId)) {
+                    log.warn("Doc: dropped forged awareness clientId={} room={}", clientId, roomId);
+                    continue;
+                }
+
+                String sanitizedJson = stateJson;
+                if (stateJson != null && !"null".equals(stateJson)) {
+                    com.fasterxml.jackson.databind.JsonNode root = objectMapper.readTree(stateJson);
+                    if (root.isObject() && root.has("user") && root.get("user").isObject()) {
+                        com.fasterxml.jackson.databind.node.ObjectNode userNode =
+                                (com.fasterxml.jackson.databind.node.ObjectNode) root.get("user");
+                        userNode.put("member_id", sender.getMemberId());
+                        userNode.put("name", sender.getDisplayName());
+                        userNode.remove("role");
+                        sanitizedJson = objectMapper.writeValueAsString(root);
+                    }
+                }
+
+                writeVarUint(entriesOut, clientId);
+                writeVarUint(entriesOut, clock);
+                writeVarString(entriesOut, sanitizedJson);
+                kept++;
+            }
+
+            if (kept == 0) {
+                return null;
+            }
+            writeVarUint(outPayload, kept);
+            outPayload.write(entriesOut.toByteArray());
+            byte[] newPayload = outPayload.toByteArray();
+
+            java.io.ByteArrayOutputStream outFrame = new java.io.ByteArrayOutputStream();
+            writeVarUint(outFrame, AWARENESS_BYTE);
+            writeVarUint(outFrame, newPayload.length);
+            outFrame.write(newPayload);
+            return outFrame.toByteArray();
+        } catch (Exception e) {
+            return frame;
+        }
+    }
+
+    private static long readVarUint(byte[] buf, int[] pos) {
+        long num = 0;
+        int mult = 1;
+        while (pos[0] < buf.length) {
+            int b = buf[pos[0]++] & 0xff;
+            num += (long) (b & 0x7f) * mult;
+            if (b < 0x80) return num;
+            mult *= 128;
+        }
+        throw new IllegalArgumentException("Truncated varUint");
+    }
+
+    private static String readVarString(byte[] buf, int[] pos) {
+        int len = (int) readVarUint(buf, pos);
+        if (len < 0 || pos[0] + len > buf.length) {
+            throw new IllegalArgumentException("Truncated varString");
+        }
+        String s = new String(buf, pos[0], len, java.nio.charset.StandardCharsets.UTF_8);
+        pos[0] += len;
+        return s;
+    }
+
+    private static void writeVarUint(java.io.ByteArrayOutputStream out, long num) {
+        while (num > 0x7f) {
+            out.write((int) (0x80 | (num & 0x7f)));
+            num >>>= 7;
+        }
+        out.write((int) num);
+    }
+
+    private static void writeVarString(java.io.ByteArrayOutputStream out, String s) {
+        byte[] bytes = s.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        writeVarUint(out, bytes.length);
+        out.write(bytes, 0, bytes.length);
     }
 }

@@ -743,14 +743,25 @@ describe('T-20 WebSocket connection and multi-client awareness synchronization',
     conn.destroy()
   })
 
-  it('Open mode connects to registered module docId and handles 4405 close on unknown module', async () => {
+  it('Open mode falls back to an approved module when the requested docId is unknown', async () => {
     const relay = new TestRelay()
     relay.roomModes.set('test-open-room', 'open')
     relay.roomModules.set('test-open-room', new Set(['mod_registered_101']))
 
-    // 1. Connection with unregistered module triggers 4405 close
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      json: async () => [
+        {
+          module_id: 'mod_registered_101',
+          is_entry: true,
+          pending: false,
+        },
+      ],
+    })))
+
     const docUnregistered = new Y.Doc()
     const awarenessUnregistered = createAwareness(docUnregistered)
+    let openedDocWsUrl = ''
     let docCloseCode = 0
 
     const connUnregistered = connectAwarenessWs({
@@ -761,7 +772,11 @@ describe('T-20 WebSocket connection and multi-client awareness synchronization',
       syncWsUrl: 'ws://localhost:8081/ws/rooms',
       sessionId: '88888888-8888-4888-8888-888888888888',
       WebSocketClass: function (url: string) {
-        return relay.createClient(url)
+        const client = relay.createClient(url)
+        if (url.includes('/docs/')) {
+          openedDocWsUrl = url
+        }
+        return client
       } as unknown as typeof WebSocket,
       onDocClose: (ev) => {
         docCloseCode = ev.code
@@ -769,13 +784,23 @@ describe('T-20 WebSocket connection and multi-client awareness synchronization',
     })
 
     await new Promise((r) => setTimeout(r, 30))
-    expect(docCloseCode).toBe(CLOSE_UNKNOWN_DOC) // 4405
-    connUnregistered.destroy()
 
-    // 2. Connection with registered module connects successfully
+    // An unknown requested module must fall back to the approved entry module.
+    expect(openedDocWsUrl).toContain('/docs/mod_registered_101')
+    expect(connUnregistered.docWs).not.toBeNull()
+    expect(docCloseCode).toBe(0)
+
+    expect([...relay.docClients.values()].map((entry) => entry.docId))
+      .toContain('mod_registered_101')
+
+    connUnregistered.destroy()
+    awarenessUnregistered.destroy()
+    docUnregistered.destroy()
+
+    // An explicitly requested registered module should also connect successfully.
     const docRegistered = new Y.Doc()
     const awarenessRegistered = createAwareness(docRegistered)
-    let openedDocWsUrl = ''
+    let registeredDocWsUrl = ''
 
     const connRegistered = connectAwarenessWs({
       roomId: 'test-open-room',
@@ -787,16 +812,22 @@ describe('T-20 WebSocket connection and multi-client awareness synchronization',
       WebSocketClass: function (url: string) {
         const client = relay.createClient(url)
         if (url.includes('/docs/')) {
-          openedDocWsUrl = url
+          registeredDocWsUrl = url
         }
         return client
       } as unknown as typeof WebSocket,
     })
 
     await new Promise((r) => setTimeout(r, 30))
-    expect(openedDocWsUrl).toContain('/docs/mod_registered_101')
+
+    expect(registeredDocWsUrl).toContain('/docs/mod_registered_101')
     expect(connRegistered.docWs).not.toBeNull()
+
     connRegistered.destroy()
+    awarenessRegistered.destroy()
+    docRegistered.destroy()
+
+    vi.unstubAllGlobals()
   })
 
   it('queues join request when socket is CONNECTING and sends exactly one join message upon open', async () => {

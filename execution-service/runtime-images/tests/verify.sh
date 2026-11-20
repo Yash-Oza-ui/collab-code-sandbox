@@ -375,6 +375,93 @@ verify_language "java"       "collab-sandbox-java:0.1.0"       "true"
 verify_language "javascript" "collab-sandbox-javascript:0.1.0" "false"
 
 # -----------------------------------------------------------------------------
+# US-12 Sandbox Isolation Verification Checks (NFR3.1 - NFR3.4)
+# -----------------------------------------------------------------------------
+echo "============================================================"
+echo " US-12 Sandbox Isolation Verification (NFR3.1 - NFR3.4)"
+echo "============================================================"
+echo ""
+
+# Probe program verification: user_id_probe.py (NFR3.2)
+echo "[isolation] Non-root user probe (NFR3.2)..."
+UID_OUT=$(docker run --rm --network none \
+  -v "$(pwd)/execution-service/runtime-images/python/samples:/sandbox/code:ro" \
+  "collab-sandbox-python:0.2.0" python /sandbox/code/user_id_probe.py 2>/dev/null; echo "exit:$?") \
+  || true
+UID_EXIT=$(echo "$UID_OUT" | grep -o 'exit:[0-9]*' | cut -d: -f2)
+UID_STDOUT=$(echo "$UID_OUT" | grep -v 'exit:')
+
+if [ "$UID_EXIT" = "0" ] && echo "$UID_STDOUT" | grep -q "NON-ROOT USER"; then
+  check_pass "Non-root user probe — user_id_probe.py confirmed UID != 0 (NFR3.2)"
+else
+  check_fail "Non-root user probe (NFR3.2)" "Unexpected exit=$UID_EXIT stdout='$UID_STDOUT'"
+fi
+echo ""
+
+# Read-only code directory (NFR3.3)
+echo "[isolation] Read-only code directory (NFR3.3)..."
+WROUT=$(docker run --rm --network none \
+  -v "$(pwd)/execution-service/runtime-images/python/samples:/sandbox/code:ro" \
+  "collab-sandbox-python:0.2.0" python /sandbox/code/write_code_dir_probe.py 2>/dev/null; echo "exit:$?") \
+  || true
+WR_EXIT=$(echo "$WROUT" | grep -o 'exit:[0-9]*' | cut -d: -f2)
+WR_STDOUT=$(echo "$WROUT" | grep -v 'exit:')
+
+if [ "$WR_EXIT" = "1" ] && echo "$WR_STDOUT" | grep -q "WRITE BLOCKED"; then
+  check_pass "Read-only code mount — writing to /sandbox/code rejected as expected (NFR3.3)"
+elif [ "$WR_EXIT" = "2" ]; then
+  check_fail "Read-only code mount (NFR3.3)" "Write SUCCEEDED — code directory is not read-only"
+else
+  check_fail "Read-only code mount (NFR3.3)" "Unexpected exit=$WR_EXIT stdout='$WR_STDOUT'"
+fi
+echo ""
+
+# Read-only root filesystem (NFR3.3)
+echo "[isolation] Read-only root filesystem (NFR3.3)..."
+FS_EXIT=0
+docker run --rm --network none --read-only --tmpfs /tmp:rw,noexec,nosuid,size=16m \
+  -v "$(pwd)/execution-service/runtime-images/python/samples:/sandbox/code:ro" \
+  "collab-sandbox-python:0.2.0" sh -c 'touch /etc/test_ro 2>/dev/null' || FS_EXIT=$?
+if [ "$FS_EXIT" != "0" ]; then
+  check_pass "Read-only root filesystem — modifying root directories rejected (NFR3.3)"
+else
+  check_fail "Read-only root filesystem (NFR3.3)" "Write outside /tmp succeeded under --read-only"
+fi
+echo ""
+
+# Host filesystem isolation (NFR3.4)
+echo "[isolation] Host filesystem isolation (NFR3.4)..."
+HOST_OUT=$(docker run --rm --network none \
+  -v "$(pwd)/execution-service/runtime-images/python/samples:/sandbox/code:ro" \
+  "collab-sandbox-python:0.2.0" python /sandbox/code/list_root_probe.py 2>/dev/null; echo "exit:$?") \
+  || true
+HOST_EXIT=$(echo "$HOST_OUT" | grep -o 'exit:[0-9]*' | cut -d: -f2)
+HOST_STDOUT=$(echo "$HOST_OUT" | grep -v 'exit:')
+
+if [ "$HOST_EXIT" = "0" ] && echo "$HOST_STDOUT" | grep -q "ROOT ISOLATED"; then
+  check_pass "Host filesystem isolation — no host paths or sensitive files accessible (NFR3.4)"
+else
+  check_fail "Host filesystem isolation (NFR3.4)" "Unexpected exit=$HOST_EXIT stdout='$HOST_STDOUT'"
+fi
+echo ""
+
+# Cross-run isolation (NFR3.4)
+echo "[isolation] Cross-run isolation (NFR3.4)..."
+XR_OUT=$(docker run --rm --network none \
+  -v "$(pwd)/execution-service/runtime-images/python/samples:/sandbox/code:ro" \
+  "collab-sandbox-python:0.2.0" python /sandbox/code/read_other_run_probe.py 2>/dev/null; echo "exit:$?") \
+  || true
+XR_EXIT=$(echo "$XR_OUT" | grep -o 'exit:[0-9]*' | cut -d: -f2)
+XR_STDOUT=$(echo "$XR_OUT" | grep -v 'exit:')
+
+if [ "$XR_EXIT" = "0" ] && echo "$XR_STDOUT" | grep -q "RUN ISOLATED"; then
+  check_pass "Cross-run isolation — run cannot see other runs' workspaces (NFR3.4)"
+else
+  check_fail "Cross-run isolation (NFR3.4)" "Unexpected exit=$XR_EXIT stdout='$XR_STDOUT'"
+fi
+echo ""
+
+# =============================================================================
 # SUMMARY
 # -----------------------------------------------------------------------------
 echo "============================================================"

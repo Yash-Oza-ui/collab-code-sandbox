@@ -230,6 +230,74 @@ Verify-Language "c"          "collab-sandbox-c:0.1.0"          $true
 Verify-Language "java"       "collab-sandbox-java:0.1.0"       $true
 Verify-Language "javascript" "collab-sandbox-javascript:0.1.0" $false
 
+# -----------------------------------------------------------------------------
+# US-12 Sandbox Isolation Verification Checks (NFR3.1 - NFR3.4)
+# -----------------------------------------------------------------------------
+Write-Host "============================================================"
+Write-Host " US-12 Sandbox Isolation Verification (NFR3.1 - NFR3.4)"
+Write-Host "============================================================"
+Write-Host ""
+
+$pythonSampleDir = "$RuntimeDir/python/samples"
+$pythonImage = "collab-sandbox-python:0.2.0"
+
+# Non-root user probe (NFR3.2)
+Write-Host "[isolation] Non-root user probe (NFR3.2)..."
+$uidOut = docker run --rm --network none -v "${pythonSampleDir}:/sandbox/code:ro" $pythonImage python /sandbox/code/user_id_probe.py 2>$null
+$uidExit = $LASTEXITCODE
+if ($uidExit -eq 0 -and ($uidOut -join " ") -match "NON-ROOT USER") {
+    Check-Pass "Non-root user probe - user_id_probe.py confirmed UID != 0 (NFR3.2)"
+} else {
+    Check-Fail "Non-root user probe (NFR3.2)" "Unexpected exit=$uidExit output='$uidOut'"
+}
+Write-Host ""
+
+# Read-only code directory (NFR3.3)
+Write-Host "[isolation] Read-only code directory (NFR3.3)..."
+$wrOut = docker run --rm --network none -v "${pythonSampleDir}:/sandbox/code:ro" $pythonImage python /sandbox/code/write_code_dir_probe.py 2>$null
+$wrExit = $LASTEXITCODE
+if ($wrExit -eq 1 -and ($wrOut -join " ") -match "WRITE BLOCKED") {
+    Check-Pass "Read-only code mount - writing to /sandbox/code rejected as expected (NFR3.3)"
+} elseif ($wrExit -eq 2) {
+    Check-Fail "Read-only code mount (NFR3.3)" "Write SUCCEEDED - code directory is not read-only"
+} else {
+    Check-Fail "Read-only code mount (NFR3.3)" "Expected exit=1 with WRITE BLOCKED, got exit=$wrExit output='$wrOut'"
+}
+Write-Host ""
+
+# Read-only root filesystem (NFR3.3)
+Write-Host "[isolation] Read-only root filesystem (NFR3.3)..."
+docker run --rm --network none --read-only --tmpfs /tmp:rw,noexec,nosuid,size=16m -v "${pythonSampleDir}:/sandbox/code:ro" $pythonImage sh -c "touch /etc/test_ro 2>/dev/null" *>$null
+$fsExit = $LASTEXITCODE
+if ($fsExit -ne 0) {
+    Check-Pass "Read-only root filesystem - modifying root directories rejected (NFR3.3)"
+} else {
+    Check-Fail "Read-only root filesystem (NFR3.3)" "Write outside /tmp succeeded under --read-only"
+}
+Write-Host ""
+
+# Host filesystem isolation (NFR3.4)
+Write-Host "[isolation] Host filesystem isolation (NFR3.4)..."
+$hostOut = docker run --rm --network none -v "${pythonSampleDir}:/sandbox/code:ro" $pythonImage python /sandbox/code/list_root_probe.py 2>$null
+$hostExit = $LASTEXITCODE
+if ($hostExit -eq 0 -and ($hostOut -join " ") -match "ROOT ISOLATED") {
+    Check-Pass "Host filesystem isolation - no host paths or sensitive files accessible (NFR3.4)"
+} else {
+    Check-Fail "Host filesystem isolation (NFR3.4)" "Expected exit=0, got exit=$hostExit output='$hostOut'"
+}
+Write-Host ""
+
+# Cross-run isolation (NFR3.4)
+Write-Host "[isolation] Cross-run isolation (NFR3.4)..."
+$xrOut = docker run --rm --network none -v "${pythonSampleDir}:/sandbox/code:ro" $pythonImage python /sandbox/code/read_other_run_probe.py 2>$null
+$xrExit = $LASTEXITCODE
+if ($xrExit -eq 0 -and ($xrOut -join " ") -match "RUN ISOLATED") {
+    Check-Pass "Cross-run isolation - run cannot see other runs' workspaces (NFR3.4)"
+} else {
+    Check-Fail "Cross-run isolation (NFR3.4)" "Expected exit=0, got exit=$xrExit output='$xrOut'"
+}
+Write-Host ""
+
 Write-Host "============================================================"
 Write-Host " Results: $Pass passed, $Fail failed"
 Write-Host "============================================================"

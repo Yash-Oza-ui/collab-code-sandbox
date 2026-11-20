@@ -453,6 +453,22 @@ Retry-After: 30
 
 ## Docker isolation, Docker access and its risk (FR5.1, FR5.2, US-09)
 
+### Isolation rules (NFR3.1 to NFR3.4, US-12)
+
+Every run happens in an ephemeral container strictly isolated from the host, other runs, and external networks.
+The isolation settings are applied in a single centralized container-start function (`DockerRunner#buildIsolatedContainerProcess`),
+guaranteeing that every run kind (including future test batches and sanitizer runs in US-71/US-73) reuses them and cannot skip any rule.
+
+| Rule | Requirement | How it is set | Which test proves it |
+| :--- | :--- | :--- | :--- |
+| **No network access** | NFR3.1 | Container started with `--network none` in `buildIsolatedContainerProcess` | `DockerRunnerIsolationTest#outsideNetworkConnectionFails`<br>`verify.sh` [8] (`network_probe.py`)<br>`tests/integration/test-us12-sandbox-isolation.sh` (Case 1) |
+| **Non-root user** | NFR3.2 | UID/GID 1001 enforced (`sandbox` user). Trusted supervisor drops privileges via `os.setuid(1001)`/`os.setgid(1001)`; container drops capabilities via `--cap-drop=ALL`, `--security-opt=no-new-privileges` | `DockerRunnerIsolationTest#codeRunsAsNonRootUser`<br>`verify.sh` [7] (`user_id_probe.py`)<br>`tests/integration/test-us12-sandbox-isolation.sh` (Case 2) |
+| **Read-only code directory** | NFR3.3 | Ephemeral code directory mounted read-only (`--mount type=bind,source=...,target=/sandbox/code,readonly`) | `DockerRunnerIsolationTest#codeDirectoryIsMountedReadOnly`<br>`verify.sh` [8b] (`write_code_dir_probe.py`)<br>`tests/integration/test-us12-sandbox-isolation.sh` (Case 3) |
+| **Read-only root filesystem** | NFR3.3 | Container root filesystem is `--read-only`; scratch space is restricted to a small noexec/nosuid tmpfs (`--tmpfs /tmp:rw,noexec,nosuid,size=16m`) | `DockerRunnerIsolationTest#rootFilesystemIsReadOnly`<br>`verify.sh` [8c]<br>`tests/integration/test-us12-sandbox-isolation.sh` (Case 3) |
+| **Host filesystem isolation** | NFR3.4 | No host paths mounted; host root directories (`/var/run/docker.sock`, `/host`) and sensitive files (`/etc/shadow`) are unmapped | `DockerRunnerIsolationTest#runCannotAccessHostFiles`<br>`verify.sh` [8d] (`list_root_probe.py`)<br>`tests/integration/test-us12-sandbox-isolation.sh` (Case 5) |
+| **Cross-run separation** | NFR3.4 | Each run receives a private container and fresh workspace; runs at the same time cannot see or modify each other's files | `DockerRunnerIsolationTest#concurrentRunsCannotSeeEachOthersFiles`<br>`DockerRunnerIsolationTest#secondRunCannotSeeFileWrittenByFirstRun`<br>`verify.sh` [8e] (`read_other_run_probe.py`)<br>`tests/integration/test-us12-sandbox-isolation.sh` (Case 4) |
+| **Centralized enforcement** | US-12 | All isolation options encapsulated in one function (`DockerRunner#buildIsolatedContainerProcess`) | `DockerRunnerIsolationTest#isolationSettingsEnforcedBySingleFunction` |
+
 ### Runner interface
 
 `RunController` talks only to the `CodeRunner` interface:

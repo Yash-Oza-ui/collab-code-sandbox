@@ -53,6 +53,16 @@ class Settings:
         # Rules-first AI call avoidance (FR36.4, US-67)
         self.RULES_FIRST_AI_AVOIDANCE: bool = os.getenv("RULES_FIRST_AI_AVOIDANCE", "false").lower() in ("true", "1")
 
+        # FR37.2, DR3 – Slowdown detection configurable thresholds (US-68, §16.2)
+        self.SLOWDOWN_FACTOR_THRESHOLD: float = float(os.getenv("SLOWDOWN_FACTOR_THRESHOLD", "8.0"))
+        self.SLOWDOWN_OUTLIER_THRESHOLD: float = float(
+            os.getenv("SLOWDOWN_OUTLIER_THRESHOLD", os.getenv("SLOWDOWN_MODIFIED_Z_THRESHOLD", "3.0"))
+        )
+        # Retain SLOWDOWN_MODIFIED_Z_THRESHOLD as alias for backwards compatibility
+        self.SLOWDOWN_MODIFIED_Z_THRESHOLD: float = self.SLOWDOWN_OUTLIER_THRESHOLD
+        self.SLOWDOWN_MIN_SAMPLES: int = int(os.getenv("SLOWDOWN_MIN_SAMPLES", "3"))
+        self.SLOWDOWN_MAX_HISTORY: int = int(os.getenv("SLOWDOWN_MAX_HISTORY", "100"))
+
     def __repr__(self) -> str:
         # Never print or log the actual API key (NFR8.2)
         key_status = "set" if self.LLM_API_KEY else "unset"
@@ -64,6 +74,10 @@ class Settings:
             f"ROOM_HOURLY_LIMIT={self.ROOM_HOURLY_LIMIT} "
             f"MONTHLY_BUDGET_USD={self.MONTHLY_BUDGET_USD} "
             f"SECTION_WINDOW_LINES={self.SECTION_WINDOW_LINES} SECTION_MAX_LINES={self.SECTION_MAX_LINES} "
+            f"SLOWDOWN_FACTOR_THRESHOLD={self.SLOWDOWN_FACTOR_THRESHOLD} "
+            f"SLOWDOWN_OUTLIER_THRESHOLD={self.SLOWDOWN_OUTLIER_THRESHOLD} "
+            f"SLOWDOWN_MODIFIED_Z_THRESHOLD={self.SLOWDOWN_MODIFIED_Z_THRESHOLD} "
+            f"SLOWDOWN_MIN_SAMPLES={self.SLOWDOWN_MIN_SAMPLES} "
             f"LLM_API_KEY={key_status}>"
         )
 
