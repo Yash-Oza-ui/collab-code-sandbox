@@ -775,8 +775,6 @@ public class DockerRunner implements CodeRunner {
                     exitCode = 124;
                 } else if (exitCode == SIGKILL_EXIT_CODE) {
                     oomKilled = confirmOomKill(containerName, metrics);
-                } else {
-                    oomKilled = inspectOomKilled(containerName);
                 }
 
                 CapturedOutput stdout = stdoutFuture.get();

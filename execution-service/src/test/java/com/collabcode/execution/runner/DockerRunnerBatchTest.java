@@ -243,6 +243,8 @@ class DockerRunnerBatchTest {
         // Test 3: container survived and executed remaining test
         assertEquals(0, results.get(2).getExitCode());
         assertEquals("DONE:after", results.get(2).getStdout().trim());
+        assertFalse(results.get(2).isOomKilled(), "Subsequent test must not be marked OOM killed");
+        assertFalse(results.get(2).isTimedOut());
 
         assertEquals(1, names.size(), "Batch must execute in exactly one container");
         assertTrue(listContainers(prefix, true).isEmpty(), "No container left behind");
