@@ -1892,7 +1892,7 @@ Rules:
 1. Only the Host can call either endpoint (`403 NOT_OWNER` otherwise; same check order as V2.17 / V2.21).
 2. **Pair mode only** (`422 INVALID_REQUEST` in Open mode).
 3. If no pending request exists for `member_id` (or `member_id` is unknown), returns `404 MEMBER_NOT_FOUND`.
-4. On **approve**: calls `RoomService.setEditAccess(roomId, memberId, true)` (V2.21), clears the pending request, broadcasts the updated `roster` to the room (V2.4), and sends `edit-access-responded` (`approved: true`) to the requester's control sockets.
+4. On **approve**: revalidates that the target is still a current **participant** without edit access. If they are no longer an eligible participant (for example, they were changed to `observer` via V2.17 or became `host` via V2.19), clears the stale pending request and refuses with `422 INVALID_REQUEST` (`"Observers cannot have edit access; make them a participant first."` / `"The Host's edit access cannot be changed."`). Otherwise, calls `RoomService.setEditAccess(roomId, memberId, true)` (V2.21), clears the pending request, broadcasts the updated `roster` to the room (V2.4), and sends `edit-access-responded` (`approved: true`) to the requester's control sockets.
 5. On **decline**: clears the pending request without changing `can_edit`, and sends `edit-access-responded` (`approved: false`) to the requester's control sockets (`docs/examples/v2-edit-request-responded-ws.json`):
 
 ```json
@@ -1904,7 +1904,7 @@ Rules:
 }
 ```
 
-6. **Automatic clearing:** A pending request is cleared (and Host sockets receive `{ "type": "edit-access-request-cleared", "member_id": "...", "reason": "granted" | "removed" | "left" }`) if the requester gets `can_edit` via V2.21, is removed (V2.18), or disconnects from all control sockets.
+6. **Automatic clearing:** A pending request is cleared (and Host sockets receive `{ "type": "edit-access-request-cleared", "member_id": "...", "reason": "granted" | "role_changed" | "removed" | "left" }`) if the requester gets `can_edit` via V2.21, has their role changed (V2.17) or becomes Host (V2.19), is removed (V2.18), or disconnects from all control sockets.
 7. Errors (V2.12): `404 ROOM_NOT_FOUND`, `404 SESSION_NOT_FOUND`, `404 MEMBER_NOT_FOUND`, `403 NOT_OWNER`, `422 INVALID_REQUEST`.
 
 ## Changes
