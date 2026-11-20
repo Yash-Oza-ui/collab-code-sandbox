@@ -505,3 +505,18 @@ The AI/ML service is never in the critical path of code execution or editing (NF
 - **Uncertain Post-Dispatch Outcomes:** Pre-dispatch network failures (e.g. `ConnectError`, `ConnectTimeout`) mean the request never reached the provider and release reservations with zero cost. For uncertain post-dispatch outcomes (e.g. `ReadTimeout`, connection drop while reading response, or client cancellation after transmission), the provider may have executed generation and billed the account; the service employs conservative accounting by committing the reserved tokens to monthly spend so expenditure is never undercounted.
 - **Cross-Month Rollover for In-Flight Calls:** When a UTC month rollover occurs while calls are in flight, active reservations are preserved (not cleared) so they continue holding headroom in the new month. When generation finishes, their spend is attributed to the month in which completion occurs, preventing reservation leaks or orphaned tokens.
 - **Single-Process Deployment Constraint:** The service is configured and deployed as a single container running a single Uvicorn process (`uvicorn app.main:app` in `Dockerfile`). The in-memory `UsageTracker` guarantees thread safety within this single process via `threading.Lock`. Multiple worker processes (`uvicorn --workers N`) or multiple container replicas do **not** provide a globally enforced budget cap with the current in-memory tracker; multi-process/multi-replica safety is not claimed without an external coordination layer (e.g. Redis atomic counters).
+
+## Deterministic Sanitizer Crash Report Parsing (US-73, FR39.1, FR39.2, DR5)
+
+The deterministic sanitizer parser (`app.sanitizer.parse_sanitizer_report`) parses compiler diagnostics from AddressSanitizer (ASan) and UndefinedBehaviorSanitizer (UBSan) for C and C++ programs without invoking external AI models.
+
+### Recognized Error Types
+- **AddressSanitizer:** `heap-buffer-overflow`, `stack-buffer-overflow`, `global-buffer-overflow`, `heap-use-after-free`, `double-free`.
+- **UndefinedBehaviorSanitizer:** `signed-integer-overflow`, `shift-out-of-bounds`, `index-out-of-bounds`, `null-pointer-dereference`, `division-by-zero`.
+
+### Line Extraction & Edge Cases
+- **Line Extraction:** Extracts the 1-based source line from the innermost frame (e.g. `#0 0x... in func /workspace/solution.cpp:14` or `/sandbox/code/solution.c:14:5: runtime error:`).
+- **Line Not Found:** When no source line can be determined, returns `line_number=None` and formats summary as `Detected <error_type>.`.
+- **Clean Runs:** When no sanitizer error is reported and the program executes successfully, returns `error_type=None`, `line_number=None`, and `summary=""` (empty summary, not an error).
+- **Non-Sanitizer Crashes:** Standard crashes (e.g. segmentation faults without sanitizer instrumentation) preserve exit information (e.g. `Process exited with exit code 139 (no sanitizer finding).`) without inventing a sanitizer error type.
+- **Compiler Compatibility:** Tested against diagnostic outputs from GCC 12+ and Clang/LLVM 14+.

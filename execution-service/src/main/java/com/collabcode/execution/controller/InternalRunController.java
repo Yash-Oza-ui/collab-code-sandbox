@@ -269,7 +269,9 @@ public class InternalRunController {
                 language,
                 List.of(new RunFile(entryName, req.getCode())),
                 entryName,
-                req.getStdin() != null ? req.getStdin() : ""
+                req.getStdin() != null ? req.getStdin() : "",
+                true,
+                req.getSanitizers()
         );
         ExecutionResult res = budget.execute(() -> codeRunner.execute(spec));
 

@@ -22,6 +22,9 @@ public class ExecutionLimitsProperties {
     /** NFR4.2 – maximum memory per container, in megabytes. */
     private int memoryMb;
 
+    /** DR3, DR5 / US-73 – maximum memory per container for sanitizer runs, in megabytes. */
+    private int sanitizerMemoryMb = 512;
+
     /** NFR4.3 – maximum number of processes / threads inside the container. */
     private int pidsLimit;
 
@@ -56,6 +59,9 @@ public class ExecutionLimitsProperties {
 
     public int getMemoryMb()                   { return memoryMb; }
     public void setMemoryMb(int v)             { this.memoryMb = v; }
+
+    public int getSanitizerMemoryMb()          { return sanitizerMemoryMb; }
+    public void setSanitizerMemoryMb(int v)    { this.sanitizerMemoryMb = v; }
 
     public int getPidsLimit()                  { return pidsLimit; }
     public void setPidsLimit(int v)            { this.pidsLimit = v; }

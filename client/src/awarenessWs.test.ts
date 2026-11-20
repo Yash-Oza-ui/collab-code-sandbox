@@ -4,8 +4,11 @@ import * as syncProtocol from 'y-protocols/sync'
 import * as Y from 'yjs'
 import { createAwareness, getExistingUserColors, setUserAwareness } from './awareness'
 import {
+  CLOSE_LINK_REGENERATED,
   CLOSE_NOT_JOINED,
+  CLOSE_REMOVED,
   CLOSE_UNKNOWN_DOC,
+  CLOSE_UNKNOWN_ROOM,
   COLLAB_SESSION_ID_KEY,
   MESSAGE_AWARENESS,
   MESSAGE_QUERY_AWARENESS,
@@ -2301,5 +2304,117 @@ describe('US-04 Open-mode missing module regression', () => {
       awareness.destroy()
       doc.destroy()
     }
+  })
+})
+
+describe('US-28 / US-54 control-socket signals (V2.18, V2.19)', () => {
+  it('names the terminal close codes of the contract', () => {
+    expect(CLOSE_REMOVED).toBe(4403)
+    expect(CLOSE_UNKNOWN_ROOM).toBe(4404)
+    expect(CLOSE_LINK_REGENERATED).toBe(4411)
+  })
+
+  it.each([4403, 4404, 4410, 4411])('does not auto-reconnect after close %i', async (code) => {
+    vi.useFakeTimers()
+    try {
+      const relay = new TestRelay()
+      const doc = new Y.Doc()
+      const awareness = createAwareness(doc)
+      let attempts = 0
+      const closes: number[] = []
+      const conn = connectAwarenessWs({
+        roomId: `us28-terminal-${code}`, awareness, doc,
+        sessionId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+        syncWsUrl: 'ws://localhost:8081/ws/rooms',
+        WebSocketClass: function (url: string) { return relay.createClient(url) } as unknown as typeof WebSocket,
+        onReconnecting: () => { attempts++ },
+        onClose: (event) => { closes.push(event.code) },
+      })
+      conn.join('Alice')
+      await vi.runAllTicks()
+      ;(conn.controlWs as unknown as TestWebSocket).close(code, 'terminal')
+      await vi.advanceTimersByTimeAsync(120000)
+
+      expect(closes).toEqual([code])
+      expect(attempts).toBe(0)
+      expect(conn.controlWs).toBeNull()
+      expect(conn.docWs).toBeNull()
+      conn.destroy()
+    } finally { vi.useRealTimers() }
+  })
+
+  it('still reconnects after an ordinary network loss', async () => {
+    vi.useFakeTimers()
+    try {
+      const relay = new TestRelay()
+      const doc = new Y.Doc()
+      const awareness = createAwareness(doc)
+      const attempts: number[] = []
+      const conn = connectAwarenessWs({
+        roomId: 'us28-network-loss', awareness, doc,
+        sessionId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+        syncWsUrl: 'ws://localhost:8081/ws/rooms',
+        WebSocketClass: function (url: string) { return relay.createClient(url) } as unknown as typeof WebSocket,
+        onReconnecting: (n) => attempts.push(n),
+      })
+      conn.join('Alice')
+      await vi.runAllTicks()
+      ;(conn.controlWs as unknown as TestWebSocket).close(1006, 'Network lost')
+      expect(attempts).toEqual([1])
+      conn.destroy()
+    } finally { vi.useRealTimers() }
+  })
+
+  it('does not rejoin after join-refused USER_BLOCKED', async () => {
+    vi.useFakeTimers()
+    try {
+      const relay = new TestRelay()
+      const doc = new Y.Doc()
+      const awareness = createAwareness(doc)
+      let attempts = 0
+      const refused: string[] = []
+      const conn = connectAwarenessWs({
+        roomId: 'us28-blocked', awareness, doc,
+        sessionId: 'ffffffff-ffff-4fff-8fff-ffffffffffff',
+        syncWsUrl: 'ws://localhost:8081/ws/rooms',
+        WebSocketClass: function (url: string) { return relay.createClient(url) } as unknown as typeof WebSocket,
+        onReconnecting: () => { attempts++ },
+        onJoinRefused: (msg) => refused.push(msg.reason),
+      })
+      conn.join('Alice')
+      await vi.runAllTicks()
+      const control = conn.controlWs as unknown as TestWebSocket
+      control.onmessage?.(new MessageEvent('message', {
+        data: JSON.stringify({ type: 'join-refused', reason: 'USER_BLOCKED', message: 'blocked' }),
+      }))
+      control.close(1000, 'refused')
+      await vi.advanceTimersByTimeAsync(120000)
+
+      expect(refused).toEqual(['USER_BLOCKED'])
+      expect(attempts).toBe(0)
+      conn.destroy()
+    } finally { vi.useRealTimers() }
+  })
+
+  it('delivers host-granted to onHostGranted with the new token', async () => {
+    const relay = new TestRelay()
+    const doc = new Y.Doc()
+    const awareness = createAwareness(doc)
+    const granted: Array<{ member_id: string; owner_token: string }> = []
+    const conn = connectAwarenessWs({
+      roomId: 'us54-granted', awareness, doc,
+      sessionId: '12121212-1212-4121-8121-121212121212',
+      syncWsUrl: 'ws://localhost:8081/ws/rooms',
+      WebSocketClass: function (url: string) { return relay.createClient(url) } as unknown as typeof WebSocket,
+      onHostGranted: (msg) => granted.push({ member_id: msg.member_id, owner_token: msg.owner_token }),
+    })
+    conn.join('Alice')
+    await new Promise((r) => setTimeout(r, 20))
+    ;(conn.controlWs as unknown as TestWebSocket).onmessage?.(new MessageEvent('message', {
+      data: JSON.stringify({ type: 'host-granted', member_id: 'm_7c22a1', owner_token: 'new-token' }),
+    }))
+
+    expect(granted).toEqual([{ member_id: 'm_7c22a1', owner_token: 'new-token' }])
+    conn.destroy()
   })
 })

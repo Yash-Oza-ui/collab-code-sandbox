@@ -109,6 +109,28 @@ public class DockerRunner implements CodeRunner {
             String language,
             List<String> commandAndArgs
     ) {
+        return buildIsolatedContainerProcess(
+                containerName,
+                workspace,
+                metricsDir,
+                buildDir,
+                image,
+                language,
+                commandAndArgs,
+                false
+        );
+    }
+
+    protected ProcessBuilder buildIsolatedContainerProcess(
+            String containerName,
+            Path workspace,
+            Path metricsDir,
+            Path buildDir,
+            String image,
+            String language,
+            List<String> commandAndArgs,
+            boolean isSanitizer
+    ) {
         List<String> command = new ArrayList<>();
         command.add("docker");
         command.add("run");
@@ -137,11 +159,12 @@ public class DockerRunner implements CodeRunner {
             command.add("1001:1001");
         }
 
-        // NFR4: Strict resource limits
+        // NFR4 & DR5: Strict resource limits (sanitizer memory limit per DR3/DR5)
+        int effectiveMemoryMb = isSanitizer ? limits.getSanitizerMemoryMb() : limits.getMemoryMb();
         command.add("--memory");
-        command.add(limits.getMemoryMb() + "m");
+        command.add(effectiveMemoryMb + "m");
         command.add("--memory-swap");
-        command.add(limits.getMemoryMb() + "m");
+        command.add(effectiveMemoryMb + "m");
         command.add("--pids-limit");
         command.add(String.valueOf(limits.getPidsLimit()));
 
@@ -258,6 +281,9 @@ public class DockerRunner implements CodeRunner {
                 // =================================================================
                 long compileStart = System.nanoTime();
                 List<String> compileCommand = buildCompileCommand(language, spec);
+                int compileMemoryMb = (spec != null && spec.isSanitizer())
+                        ? limits.getSanitizerMemoryMb()
+                        : limits.getMemoryMb();
 
                 List<String> compileDockerArgs = new ArrayList<>(List.of(
                         "docker", "run",
@@ -265,8 +291,8 @@ public class DockerRunner implements CodeRunner {
                         "--network", "none",
                         "--name", compileContainerName,
                         "--user", "1001:1001",
-                        "--memory", limits.getMemoryMb() + "m",
-                        "--memory-swap", limits.getMemoryMb() + "m",
+                        "--memory", compileMemoryMb + "m",
+                        "--memory-swap", compileMemoryMb + "m",
                         "--pids-limit", String.valueOf(limits.getPidsLimit()),
                         "--read-only",
                         "--tmpfs", "/tmp:rw,noexec,nosuid,size=16m",
@@ -361,7 +387,8 @@ public class DockerRunner implements CodeRunner {
                     isCompiled ? buildDir : null,
                     image,
                     language,
-                    runArgs
+                    runArgs,
+                    spec != null && spec.isSanitizer()
             );
             process = builder.start();
             Process runningProcess = process;
@@ -517,11 +544,16 @@ public class DockerRunner implements CodeRunner {
         dir.toFile().setWritable(true, false);
     }
 
-    private List<String> buildCompileCommand(String language, RunSpec spec) {
+    List<String> buildCompileCommand(String language, RunSpec spec) {
         List<String> cmd = new ArrayList<>();
+        boolean isSanitizer = spec != null && spec.isSanitizer();
         switch (language) {
             case "cpp" -> {
-                cmd.addAll(List.of("g++", "-O2", "-std=c++20", "-I/sandbox/code"));
+                if (isSanitizer) {
+                    cmd.addAll(List.of("g++", "-fsanitize=address,undefined", "-no-pie", "-g", "-O1", "-std=c++20", "-I/sandbox/code"));
+                } else {
+                    cmd.addAll(List.of("g++", "-O2", "-std=c++20", "-I/sandbox/code"));
+                }
                 for (RunFile file : spec.getFiles()) {
                     String name = file.getName();
                     String lower = name.toLowerCase(Locale.ROOT);
@@ -532,7 +564,11 @@ public class DockerRunner implements CodeRunner {
                 cmd.addAll(List.of("-o", "/sandbox/build/a.out"));
             }
             case "c" -> {
-                cmd.addAll(List.of("gcc", "-O2", "-std=c17", "-I/sandbox/code"));
+                if (isSanitizer) {
+                    cmd.addAll(List.of("gcc", "-fsanitize=address,undefined", "-no-pie", "-g", "-O1", "-std=c17", "-I/sandbox/code"));
+                } else {
+                    cmd.addAll(List.of("gcc", "-O2", "-std=c17", "-I/sandbox/code"));
+                }
                 for (RunFile file : spec.getFiles()) {
                     String name = file.getName();
                     if (name.toLowerCase(Locale.ROOT).endsWith(".c")) {
