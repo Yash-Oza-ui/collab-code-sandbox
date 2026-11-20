@@ -37,11 +37,11 @@ public final class ModuleRecord {
     public void setVersion(int version) { this.version = version; }
     public boolean pending() { return pending; }
 
-    void approve() {
+    synchronized void approve() {
         this.pending = false;
     }
 
-    void approve(String newOwnerMemberId) {
+    synchronized void approve(String newOwnerMemberId) {
         this.pending = false;
         if (newOwnerMemberId != null && !newOwnerMemberId.isBlank()) {
             this.ownerMemberId = newOwnerMemberId;
