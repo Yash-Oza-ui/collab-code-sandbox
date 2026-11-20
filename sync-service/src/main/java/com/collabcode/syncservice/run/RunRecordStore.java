@@ -1,7 +1,9 @@
 package com.collabcode.syncservice.run;
 
 import org.springframework.stereotype.Component;
+import org.springframework.beans.factory.annotation.Autowired;
 
+import java.time.Clock;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
@@ -12,13 +14,14 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * In-memory store for {@link RunRecord} entries held by {@code sync-service} (FR29, US-52, T-18 Decision 9).
  *
  * <p>Keyed by room so records can be deleted atomically with the room (FR32, US-56).
  * Supports queries by room and {@code input_hash} with newest-first ordering
- * for slowdown baseline calculation (US-68).
+ * for room-scoped run-history queries (US-52 / US-68).
  */
 @Component
 public class RunRecordStore {
@@ -34,6 +37,17 @@ public class RunRecordStore {
 
     private final Map<String, List<StoredEntry>> recordsByRoom = new ConcurrentHashMap<>();
     private final AtomicLong sequenceGenerator = new AtomicLong(0);
+    private final Clock clock;
+
+    @Autowired
+    public RunRecordStore() {
+        this(Clock.systemUTC());
+    }
+
+    /** Injectable clock makes retention tests deterministic. */
+    public RunRecordStore(Clock clock) {
+        this.clock = java.util.Objects.requireNonNull(clock);
+    }
 
     /**
      * Stores a new run record for its room.
@@ -43,9 +57,18 @@ public class RunRecordStore {
             return;
         }
         long seq = sequenceGenerator.incrementAndGet();
-        StoredEntry entry = new StoredEntry(record, parseInstantOrNull(record.getRanAt()), seq);
-        recordsByRoom.computeIfAbsent(record.getRoomId(), k -> new CopyOnWriteArrayList<>())
-                .add(entry);
+        Instant ranAt = parseInstantOrNull(record.getRanAt());
+        StoredEntry entry = new StoredEntry(record, ranAt != null ? ranAt : clock.instant(), seq);
+        // Perform insertion under the same per-room map operation as retention deletion.
+        // Otherwise a sweep can remove an empty list after computeIfAbsent, causing
+        // the new run to be added to a detached list and silently lost.
+        recordsByRoom.compute(record.getRoomId(), (roomId, entries) -> {
+            if (entries == null) {
+                entries = new CopyOnWriteArrayList<>();
+            }
+            entries.add(entry);
+            return entries;
+        });
     }
 
     /**
@@ -54,11 +77,41 @@ public class RunRecordStore {
      * @return number of deleted run records (0 if the room had no records)
      */
     public int deleteByRoom(String roomId) {
+        return deleteMatching(roomId, entry -> true);
+    }
+
+    /**
+     * Delete runs strictly older than {@code cutoff} across all rooms.
+     * The same room-scoped deletion primitive is used by room deletion.
+     * Expired runs immediately disappear from canonical sync-service queries;
+     * ai-ml-service owns its separate slowdown baseline measurements.
+     */
+    public int deleteOlderThan(Instant cutoff) {
+        java.util.Objects.requireNonNull(cutoff, "cutoff");
+        int total = 0;
+        for (String roomId : recordsByRoom.keySet()) {
+            total += deleteMatching(roomId, entry -> entry.parsedRanAt.isBefore(cutoff));
+        }
+        return total;
+    }
+
+    /** One atomic per-room deletion operation shared by the sweep and room lifecycle. */
+    private int deleteMatching(String roomId, java.util.function.Predicate<StoredEntry> predicate) {
         if (roomId == null) {
             return 0;
         }
-        List<StoredEntry> removed = recordsByRoom.remove(roomId);
-        return removed != null ? removed.size() : 0;
+        AtomicInteger removed = new AtomicInteger();
+        recordsByRoom.computeIfPresent(roomId, (key, entries) -> {
+            entries.removeIf(entry -> {
+                if (predicate.test(entry)) {
+                    removed.incrementAndGet();
+                    return true;
+                }
+                return false;
+            });
+            return entries.isEmpty() ? null : entries;
+        });
+        return removed.get();
     }
 
     /** Alias for {@link #deleteByRoom(String)}. */

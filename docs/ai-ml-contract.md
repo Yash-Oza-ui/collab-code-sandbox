@@ -1990,6 +1990,7 @@ Used only when the analysis request itself fails before any deterministic task r
 
 1. **Storage of Canonical Run Records (FR29, US-52):** The persistent run history record is owned and held by `sync-service`. It is written atomically when execution results are delivered to participants.
 2. **Room-Scoped In-Memory State in `ai-ml-service` (FR37.4, CR11):** `ai-ml-service` stores **no** permanent run records, source code, or user text. It maintains only compact, hash-keyed execution measurements (`execution_time_ms`, `peak_memory_mb`, and `input_hash`) in room-scoped memory (`room_histories[room_id][input_hash]`) solely to calculate Task 2 Median and MAD baselines.
+   **US-30 retention boundary:** The age-based sweep removes only canonical `sync-service` run records; it does not prune `ai-ml-service` slowdown measurements or change the at-least-three-prior-matching-runs baseline threshold (§16.2).
 3. **Room Destruction Lifecycle (FR32, US-56):** When a room is closed or deleted, `execution-service` calls `DELETE /v1/rooms/{room_id}/state` on `ai-ml-service`. This completely purges and frees all room-scoped measurement arrays and per-room rate-limit buckets from memory.
 
 ---
