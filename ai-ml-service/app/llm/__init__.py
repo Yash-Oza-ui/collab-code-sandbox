@@ -3,6 +3,7 @@
 from app.llm.client import (
     AIDisabledError,
     ConsentMissingError,
+    CostCapReachedError,
     LLMClient,
     LLMProviderError,
     LLMRateLimitError,
@@ -24,6 +25,7 @@ from app.section import extract_error_line_from_stderr, extract_relevant_section
 __all__ = [
     "AIDisabledError",
     "ConsentMissingError",
+    "CostCapReachedError",
     "LLMClient",
     "LLMProviderError",
     "LLMRateLimitError",

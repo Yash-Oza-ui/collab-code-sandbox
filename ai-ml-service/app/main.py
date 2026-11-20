@@ -13,6 +13,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.config import settings
+from app.counters import CostCapReachedError
 from app.llm.client import ConsentMissingError
 from app.routers import analyses, explain
 
@@ -104,6 +105,23 @@ async def log_requests(request: Request, call_next):
 @app.exception_handler(ConsentMissingError)
 async def consent_missing_exception_handler(request: Request, exc: ConsentMissingError):
     """Format consent missing errors into contract envelope (FR12.2, contract §5)."""
+    request.state.error_code = exc.code
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "request_id": getattr(request.state, "request_id", None),
+            "error": {
+                "code": exc.code,
+                "message": exc.message,
+                "retry_after_seconds": exc.retry_after_seconds,
+            },
+        },
+    )
+
+
+@app.exception_handler(CostCapReachedError)
+async def cost_cap_reached_exception_handler(request: Request, exc: CostCapReachedError):
+    """Format cost cap reached errors into contract envelope (NFR7.2, contract §5)."""
     request.state.error_code = exc.code
     return JSONResponse(
         status_code=exc.status_code,

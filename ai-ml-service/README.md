@@ -444,6 +444,68 @@ We selected **thread-safe in-memory storage** (`UsageTracker` protected by `thre
 - `GET /v1/rooms/{room_id}/usage`: Returns metrics scoped to a specific room.
 - `DELETE /v1/rooms/{room_id}/state`: Clears room-scoped counters and cache entries when closed or deleted (US-56).
 
+## Monthly AI Cost Cap and Budget Alert (US-24, NFR7.1, NFR7.2, NFR7.4, NFR7.5)
+
+To prevent runaway external AI provider costs and ensure predictable operational spend, the service enforces a hard monthly expenditure cap and early warning alerts.
+
+### 1. Spending Calculation & Accounting Period (NFR7.1)
+- **Calculation Formula:** `monthly_spend_usd = round(monthly_tokens_used * TOKEN_COST_PER_TOKEN, 4)`
+- **Actual Tokens Only:** Tokens are extracted directly from upstream LLM provider responses (`usageMetadata.totalTokenCount` for Gemini or `usage.total_tokens` for OpenAI). Token counts are **never estimated** from user text or prompt length (FR40.1).
+- **Accounting Month:** Accounting operates strictly on **UTC calendar months** (`datetime.now(timezone.utc)`). At 00:00:00 UTC on the first of each month (including year transitions such as December 31 to January 1), monthly spend counters and alert flags automatically reset to zero. Lifetime platform totals (`total_model_calls`, `total_tokens_used`, `total_cache_hits`, `total_fallback_activations`) remain preserved across resets.
+
+### 2. Configuration Parameters
+The cost cap is controlled via service environment variables:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `MONTHLY_BUDGET_USD` | `10.0` | Maximum monthly budget in USD for external AI provider calls (NFR7.2). Must be a finite positive number (`> 0.0`). Zero, negative values, and non-finite floats (`inf`, `nan`) are rejected at startup and configuration time (fail-closed). |
+| `AI_MAX_TOKENS_PER_REQUEST` | `4096` | Canonical maximum tokens the AI may generate per request (FR40.4). Drives both provider request payload parameters (`maxOutputTokens` / `max_tokens`) and admission reservation token estimates. Must be positive. |
+| `LLM_MAX_OUTPUT_TOKENS` | `4096` | Backward-compatible legacy alias for `AI_MAX_TOKENS_PER_REQUEST`. If both are provided and differ, `AI_MAX_TOKENS_PER_REQUEST` takes precedence with a startup warning. |
+| `TOKEN_COST_PER_TOKEN` | `0.0000035` | Price in USD per consumed token (Gemini 1.5 Flash reference rate: $0.0035 / 1K tokens). |
+| `ALERT_WEBHOOK_URL` | `None` | Optional HTTPS webhook URL for external alert notifications (NFR7.4). |
+
+### 3. 80% Budget Warning Alert (NFR7.4)
+- **Trigger:** When monthly spending reaches or exceeds 80% of `MONTHLY_BUDGET_USD` (e.g. $8.00 on a $10.00 budget), an alert is delivered to the team lead.
+- **Deduplication:** The alert is sent **exactly once** during that UTC calendar month. Subsequent requests do not generate duplicate notifications. The alert state resets automatically when a new UTC month begins.
+- **Delivery Mechanism:**
+  - A structured warning-level log is always emitted:
+    `AI_COST_CAP_ALERT: Monthly external AI spending has reached or exceeded 80% of budget. spend_usd=... budget_usd=... threshold_usd=... month=YYYY-MM`
+  - If `ALERT_WEBHOOK_URL` is configured, an HTTP POST payload is dispatched with metadata asynchronously via a dedicated background thread pool (`ThreadPoolExecutor`). Webhook delivery is completely non-blocking: the usage tracker lock is never held during HTTP I/O, and webhook delays, network timeouts, or external failures cannot stall concurrent FastAPI request handlers or corrupt spending state.
+- **Privacy Guarantee (NFR8.2):** Alerts contain numeric and temporal metadata only (`spend_usd`, `budget_usd`, `threshold_usd`, `month`). Alerts **never** contain source code, stderr, prompts, model responses, or user text.
+
+### 4. Cost-Cap Enforcement & Skipped AI Steps (NFR7.2, T-18 Decision 10)
+- **Pre-Call Enforcement:** Every outbound paid-model call passes through `app.counters.reserve_call` and `app.llm.client.call_llm_with_consent`. When monthly spend has reached or exceeded the configured budget:
+  - The external LLM is **not called** (zero HTTP requests dispatched).
+  - Zero tokens are consumed.
+  - The request returns HTTP 200 with the AI step skipped:
+    ```json
+    "ai_step": {
+      "status": "skipped",
+      "error_code": "COST_CAP_REACHED",
+      "explanation": null,
+      "suggested_fix": null
+    }
+    ```
+  - The system fallback counter (`total_fallback_activations`) is incremented.
+- **Gate Precedence:** User consent (`CONSENT_MISSING`) and the Host AI switch (`AI_DISABLED`) are evaluated before the cost cap. If consent or host approval is missing, their specific skip codes take precedence.
+- **Cache Preservation:** Existing cached results in `AnalysisCache` remain fully usable and are served with `status: "ok"` without making outbound paid calls even when the monthly cost cap has been reached.
+
+### 5. Preservation of AI-Free Functionality (NFR7.5)
+The AI/ML service is never in the critical path of code execution or editing (NFR9). When the AI cost cap is reached:
+- Code editing and room synchronization continue normally.
+- Code execution in Docker containers continues unaffected.
+- **Rules-First Static Analysis:** Deterministic AST checks (e.g. nested loops, string concatenation in loops) execute and return findings normally.
+- **Empirical Regression:** Mathematical log-log regression and Big-O complexity estimation continue unaffected.
+- **Sanitizer Parsing:** AddressSanitizer/UBSan diagnostic parsing for C/C++ crashes extracts `error_type`, `line_number`, and `summary` deterministically.
+
+### 6. Concurrency Strategy, Overshoot Bound & Operational Limitations
+- **Atomic Reservation Logic:** To prevent multiple concurrent requests from reading a stale spending total and stampeding past the budget cap, `UsageTracker.reserve_call` atomically reserves estimated token headroom under a thread lock before dispatching an outbound request. If active reservations + committed spend reach or exceed the budget, subsequent concurrent requests are immediately blocked with `CostCapReachedError`.
+- **Reservation Lifecycle & Stale Reservation Eviction (TTL):** Active reservations track in-flight provider calls with deterministic finalization guarantees provided by Python context managers (`with tracker.reserve_call(...)`) and `try...finally` blocks. To guard against orphaned reservations leaking budget headroom due to unexpected process crashes or unhandled task drops, each reservation records a `created_at` timestamp and is automatically evicted if it exceeds a TTL of `2 * settings.LLM_TIMEOUT_SECONDS` (default 20s). Every normal or error completion path immediately commits, conservatively commits (uncertain timeouts), or releases the reservation.
+- **Admission Estimate & Overshoot Dynamics:** The reservation is an **admission estimate**, not a strict upper bound. External LLM providers (Google Gemini, OpenAI) bill on **total tokens** (input prompt tokens + output generated tokens) and do not provide a pre-flight token quoting API. Because total tokens include user prompt length, the final overshoot on the single admitted in-flight call is $(\text{actual\_total\_tokens} - \text{reserved\_tokens}) \times \text{TOKEN\_COST\_PER\_TOKEN}$, and is **not strictly bounded** by `maxOutputTokens`. Once this final call commits, all subsequent calls are strictly blocked.
+- **Uncertain Post-Dispatch Outcomes:** Pre-dispatch network failures (e.g. `ConnectError`, `ConnectTimeout`) mean the request never reached the provider and release reservations with zero cost. For uncertain post-dispatch outcomes (e.g. `ReadTimeout`, connection drop while reading response, or client cancellation after transmission), the provider may have executed generation and billed the account; the service employs conservative accounting by committing the reserved tokens to monthly spend so expenditure is never undercounted.
+- **Cross-Month Rollover for In-Flight Calls:** When a UTC month rollover occurs while calls are in flight, active reservations are preserved (not cleared) so they continue holding headroom in the new month. When generation finishes, their spend is attributed to the month in which completion occurs, preventing reservation leaks or orphaned tokens.
+- **Single-Process Deployment Constraint:** The service is configured and deployed as a single container running a single Uvicorn process (`uvicorn app.main:app` in `Dockerfile`). The in-memory `UsageTracker` guarantees thread safety within this single process via `threading.Lock`. Multiple worker processes (`uvicorn --workers N`) or multiple container replicas do **not** provide a globally enforced budget cap with the current in-memory tracker; multi-process/multi-replica safety is not claimed without an external coordination layer (e.g. Redis atomic counters).
+
 ## Deterministic Sanitizer Crash Report Parsing (US-73, FR39.1, FR39.2, DR5)
 
 The deterministic sanitizer parser (`app.sanitizer.parse_sanitizer_report`) parses compiler diagnostics from AddressSanitizer (ASan) and UndefinedBehaviorSanitizer (UBSan) for C and C++ programs without invoking external AI models.

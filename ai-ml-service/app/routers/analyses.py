@@ -26,6 +26,7 @@ from app.limiter import get_room_rate_limiter
 from app.llm import (
     AIDisabledError,
     ConsentMissingError,
+    CostCapReachedError,
     LLMProviderError,
     LLMRateLimitError,
     LLMTimeoutError,
@@ -443,6 +444,15 @@ async def explain_crash(payload: CrashExplanationRequest, request: Request) -> C
                 ai_step = CrashAIStep(
                     status="skipped",
                     error_code="AI_DISABLED",
+                    explanation=None,
+                    suggested_fix=None,
+                )
+            except CostCapReachedError:
+                logger.info("Crash explanation skipped: monthly AI cost cap reached (NFR7.2)")
+                record_fallback(payload.room_id)
+                ai_step = CrashAIStep(
+                    status="skipped",
+                    error_code="COST_CAP_REACHED",
                     explanation=None,
                     suggested_fix=None,
                 )
