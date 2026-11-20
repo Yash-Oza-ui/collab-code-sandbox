@@ -397,186 +397,35 @@ async def run_rule_based_analysis_with_ai_fallback(
 ) -> dict[str, Any]:
     """Execute rule-based pattern checks first, followed by controlled AI assistance (US-21, US-22, US-67, FR12.3, FR12.4, FR35, T-18 v2).
 
-    When rules_first is True (US-67, FR36.4):
-    1. If any slow pattern rule fires, report its findings and stop (0 outbound AI calls).
-    2. If none fires, proceed to the AI step subject to consent (FR12, FR12.4, US-21) and the AI switch (FR35).
-
-    Mandatory Order of Checks (US-21, US-22):
-    1. Consent & Withdrawal (US-17, US-21, FR12.2, FR12.4) -> CONSENT_MISSING (skipped AI step, 0 calls)
-    2. Host AI Switch (FR35) -> AI_DISABLED (skipped AI step, 0 calls)
-    3. Code Cache (NFR5.2, Decision 11) -> Cache Hit returns cached suggestion (does NOT count as call)
-    4. Room Hourly Rate Limit (NFR5.3) -> ROOM_RATE_LIMITED (skipped AI step, 0 calls)
-    5. Outbound AI Call: records call on rate limiter, calls LLM, stores result in cache.
+    Routed through central method chain (US-77, FR40.3).
     """
-    # 1. AI-free rule-based analysis (always executes first unconditionally)
-    slow_patterns = detect_slow_patterns(code, language=language)
+    from app import chain
+    from app.chain import ChainRequest
 
-    # 2. Check 1: User Consent (FR12.2, FR12.4, US-17, US-21)
-    if consent is not True:
-        record_fallback(room_id)
-        ai_step = {
-            "status": "skipped",
-            "error_code": "CONSENT_MISSING",
-            "suggested_fix": None,
-            "verified": False,
-            "verified_speedup_pct": None,
-        }
-    # 3. Check 2: Host AI Switch (FR35)
-    elif ai_enabled is not True:
-        record_fallback(room_id)
-        ai_step = {
-            "status": "skipped",
-            "error_code": "AI_DISABLED",
-            "suggested_fix": None,
-            "verified": False,
-            "verified_speedup_pct": None,
-        }
-    # 4. Check 3: Rules-First Slow Pattern Detection (US-67, FR36.4)
-    # Before calling external AI, if simple rules detect a likely issue, report it and stop (0 LLM calls)
-    elif rules_first and slow_patterns:
-        ai_step = {
-            "status": "skipped",
-            "error_code": None,
-            "suggested_fix": None,
-            "verified": False,
-            "verified_speedup_pct": None,
-        }
-    else:
-        # 5. Check 4: Normalized Code Cache (NFR5.2, FR40.3, Decision 11)
-        # Cache hits answer immediately with $0 cost and do not count toward rate limits
-        cache_key = compute_cache_key(
-            code=code,
-            language=language,
-            request_type=request_type,
-            error_output=error_output,
-            cache_context=cache_context,
-        )
-        cached_result = get_analysis_cache().get(cache_key, room_id=room_id)
+    req = ChainRequest(
+        request_type=request_type,
+        code=code,
+        language=language,
+        room_id=room_id,
+        consent=consent,
+        ai_enabled=ai_enabled,
+        rules_first=rules_first,
+        error_output=error_output,
+        cache_context=cache_context,
+        client=client,
+        ai_fallback=ai_fallback,
+        reraise_ai_errors=reraise_ai_errors,
+    )
 
-        if cached_result is not None:
-            # Cache hit: does NOT count towards rate limit calls (US-22)
-            ai_step = {
-                "status": "ok",
-                "error_code": None,
-                "suggested_fix": cached_result.get("suggested_fix"),
-                "verified": False,
-                "verified_speedup_pct": None,
-            }
-        # 6. Check 4: Atomic Room Hourly Rate Limit Check-and-Reserve on outbound calls (NFR5.3, US-22)
-        elif room_id and not get_room_rate_limiter().check_and_reserve(room_id):
-            record_fallback(room_id)
-            ai_step = {
-                "status": "skipped",
-                "error_code": "ROOM_RATE_LIMITED",
-                "suggested_fix": None,
-                "verified": False,
-                "verified_speedup_pct": None,
-            }
-        else:
-            # 7. Check 5: Cache Miss within Quota -> Call slot atomically reserved, execute Outbound AI Call
-            try:
-                if ai_fallback is not None:
-                    ai_suggestion = await ai_fallback() if callable(ai_fallback) else await ai_fallback
-                else:
-                    prompt = f"Suggest a 1-sentence fix for code with patterns: {slow_patterns}"
-                    ai_suggestion = await call_llm_with_consent(
-                        prompt=prompt,
-                        consent=consent,
-                        ai_enabled=ai_enabled,
-                        client=client,
-                        room_id=room_id,
-                    )
-
-                # Store in cache
-                get_analysis_cache().set(
-                    cache_key,
-                    {"suggested_fix": ai_suggestion},
-                    room_id=room_id,
-                )
-
-                ai_step = {
-                    "status": "ok",
-                    "error_code": None,
-                    "suggested_fix": ai_suggestion,
-                    "verified": False,
-                    "verified_speedup_pct": None,
-                }
-            except RoomRateLimitedError:
-                record_fallback(room_id)
-                ai_step = {
-                    "status": "skipped",
-                    "error_code": "ROOM_RATE_LIMITED",
-                    "suggested_fix": None,
-                    "verified": False,
-                    "verified_speedup_pct": None,
-                }
-            except ConsentMissingError:
-                record_fallback(room_id)
-                ai_step = {
-                    "status": "skipped",
-                    "error_code": "CONSENT_MISSING",
-                    "suggested_fix": None,
-                    "verified": False,
-                    "verified_speedup_pct": None,
-                }
-            except AIDisabledError:
-                record_fallback(room_id)
-                ai_step = {
-                    "status": "skipped",
-                    "error_code": "AI_DISABLED",
-                    "suggested_fix": None,
-                    "verified": False,
-                    "verified_speedup_pct": None,
-                }
-            except LLMTimeoutError:
-                if reraise_ai_errors:
-                    raise
-                record_fallback(room_id)
-                ai_step = {
-                    "status": "skipped",
-                    "error_code": "PROVIDER_TIMEOUT",
-                    "suggested_fix": None,
-                    "verified": False,
-                    "verified_speedup_pct": None,
-                }
-            except LLMRateLimitError:
-                if reraise_ai_errors:
-                    raise
-                record_fallback(room_id)
-                ai_step = {
-                    "status": "skipped",
-                    "error_code": "RATE_LIMITED_PROVIDER",
-                    "suggested_fix": None,
-                    "verified": False,
-                    "verified_speedup_pct": None,
-                }
-            except LLMProviderError:
-                if reraise_ai_errors:
-                    raise
-                record_fallback(room_id)
-                ai_step = {
-                    "status": "skipped",
-                    "error_code": "PROVIDER_ERROR",
-                    "suggested_fix": None,
-                    "verified": False,
-                    "verified_speedup_pct": None,
-                }
-            except Exception:
-                if reraise_ai_errors:
-                    raise
-                record_fallback(room_id)
-                ai_step = {
-                    "status": "skipped",
-                    "error_code": "PROVIDER_ERROR",
-                    "suggested_fix": None,
-                    "verified": False,
-                    "verified_speedup_pct": None,
-                }
+    res = await chain.answer(req)
+    findings = res.rule_findings
+    if findings is None:
+        findings = detect_slow_patterns(code, language=language)
 
     return {
-        "task": "complexity",
-        "slow_patterns": slow_patterns,
-        "ai_step": ai_step,
+        "task": request_type,
+        "slow_patterns": findings,
+        "ai_step": res.ai_step,
     }
 
 

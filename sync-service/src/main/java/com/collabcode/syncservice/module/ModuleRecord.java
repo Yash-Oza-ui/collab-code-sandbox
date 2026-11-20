@@ -3,26 +3,52 @@ package com.collabcode.syncservice.module;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
-/** Authoritative Open-workspace module state needed by the V2.5/V2.6 boundary. */
+/** Authoritative Open-workspace module state needed by the V2.5/V2.6 boundary (FR20.1, DR4, US-39). */
 public final class ModuleRecord {
     private final String moduleId;
     private final String name;
-    private final String ownerMemberId;
+    private volatile String ownerMemberId;
     private final Set<String> writers = ConcurrentHashMap.newKeySet();
-    private volatile boolean pending = true;
+    private volatile boolean runnable = true;
+    private volatile boolean isEntry = false;
+    private volatile int version = 0;
+    private volatile boolean pending;
 
     ModuleRecord(String moduleId, String name, String ownerMemberId) {
+        this(moduleId, name, ownerMemberId, true);
+    }
+
+    ModuleRecord(String moduleId, String name, String ownerMemberId, boolean pending) {
         this.moduleId = moduleId;
         this.name = name;
         this.ownerMemberId = ownerMemberId;
+        this.pending = pending;
     }
 
     public String moduleId() { return moduleId; }
     public String name() { return name; }
     public String ownerMemberId() { return ownerMemberId; }
+    public Set<String> writers() { return writers; }
+    public boolean runnable() { return runnable; }
+    public void setRunnable(boolean runnable) { this.runnable = runnable; }
+    public boolean isEntry() { return isEntry; }
+    public void setEntry(boolean entry) { this.isEntry = entry; }
+    public int version() { return version; }
+    public void setVersion(int version) { this.version = version; }
     public boolean pending() { return pending; }
-    void approve() { pending = false; }
+
+    void approve() {
+        this.pending = false;
+    }
+
+    void approve(String newOwnerMemberId) {
+        this.pending = false;
+        if (newOwnerMemberId != null && !newOwnerMemberId.isBlank()) {
+            this.ownerMemberId = newOwnerMemberId;
+        }
+    }
+
     public boolean canEdit(String memberId) {
-        return !pending && (ownerMemberId.equals(memberId) || writers.contains(memberId));
+        return !pending && memberId != null && (ownerMemberId.equals(memberId) || writers.contains(memberId));
     }
 }

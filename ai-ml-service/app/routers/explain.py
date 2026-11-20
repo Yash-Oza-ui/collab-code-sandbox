@@ -18,7 +18,9 @@ from app.llm import (
     RoomRateLimitedError,
     generate_explanation,
 )
-from app.rules.patterns import run_rule_based_analysis_with_ai_fallback
+from app import chain
+from app.chain import ChainRequest
+from app.rules.patterns import detect_slow_patterns, run_rule_based_analysis_with_ai_fallback
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +79,7 @@ class ExplainResponse(BaseModel):
 
 @router.post("/explain", response_model=ExplainResponse)
 async def explain_failure(payload: ExplainRequest, request: Request) -> ExplainResponse:
-    """Explain a failed run in plain prose using rules-first analysis, rate limiting, caching, and LLM API (FR12.3, FR13.1, T-16, US-17, US-22, US-76)."""
+    """Explain a failed run in plain prose using central method chain (FR12.3, FR13.1, T-16, US-17, US-22, US-76, US-77, FR40.3)."""
     # Publish validated metadata into request.state for the logging middleware.
     # Only safe, non-user-text metadata fields are stored — never code/stderr.
     request.state.request_id = payload.request_id
@@ -85,38 +87,24 @@ async def explain_failure(payload: ExplainRequest, request: Request) -> ExplainR
     request.state.request_type = payload.request_type
     request.state.language = payload.language
 
-    # Define the failure explanation AI fallback
-    async def explain_fallback() -> str:
-        return await generate_explanation(
+    try:
+        chain_req = ChainRequest(
+            request_type=payload.request_type,
+            code=payload.code,
             language=payload.language,
+            room_id=payload.room_id,
+            request_id=payload.request_id,
             consent=payload.consent,
             ai_enabled=payload.ai_enabled,
             failure_kind=payload.failure_kind,
             exit_code=payload.exit_code,
-            stderr=payload.stderr,
+            error_output=payload.stderr,
             timed_out=payload.timed_out,
             oom_killed=payload.oom_killed,
-            code=payload.code,
-            request_id=payload.request_id,
-            room_id=payload.room_id,
             error_line=payload.error_line,
             function_name=payload.function_name,
-        )
-
-    try:
-        # 1. Rules-First Static Analysis with US-22 AI Control Pipeline:
-        # Consent -> AI Switch -> Room Rate Limit -> Normalized Cache -> AI Call
-        rule_analysis = await run_rule_based_analysis_with_ai_fallback(
-            code=payload.code,
-            language=payload.language,
-            consent=payload.consent,
-            ai_enabled=payload.ai_enabled,
-            ai_fallback=explain_fallback,
-            reraise_ai_errors=True,
-            room_id=payload.room_id,
-            request_type=payload.request_type,
-            error_output=payload.stderr,
             rules_first=False,
+            reraise_ai_errors=True,
             cache_context={
                 "failure_kind": payload.failure_kind,
                 "exit_code": payload.exit_code,
@@ -126,10 +114,14 @@ async def explain_failure(payload: ExplainRequest, request: Request) -> ExplainR
                 "function_name": payload.function_name,
             },
         )
-
-        slow_patterns = rule_analysis.get("slow_patterns", [])
+        chain_resp = await chain.answer(chain_req)
+        slow_patterns = (
+            chain_resp.rule_findings
+            if chain_resp.rule_findings is not None
+            else detect_slow_patterns(payload.code, language=payload.language)
+        )
         request.state.rule_findings = slow_patterns
-        ai_step = rule_analysis["ai_step"]
+        ai_step = chain_resp.ai_step
 
         if ai_step.get("status") == "skipped":
             request.state.error_code = ai_step.get("error_code")
@@ -144,7 +136,7 @@ async def explain_failure(payload: ExplainRequest, request: Request) -> ExplainR
                 ),
             )
 
-        explanation = ai_step.get("suggested_fix")
+        explanation = ai_step.get("suggested_fix") or chain_resp.answer
         request.state.error_code = None
         return ExplainResponse(
             request_id=payload.request_id,

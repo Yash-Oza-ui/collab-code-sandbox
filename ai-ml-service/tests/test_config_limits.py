@@ -44,7 +44,7 @@ class TestConfigDefaults:
         assert self.settings.ROOM_HOURLY_LIMIT > 0, "NFR5.3 room hourly limit must be > 0"
 
     def test_monthly_budget_has_non_negative_default(self):
-        assert self.settings.MONTHLY_BUDGET_USD >= 0.0, "NFR7.2 monthly budget must be >= 0"
+        assert self.settings.MONTHLY_BUDGET_USD > 0.0, "NFR7.2 monthly budget must be > 0"
 
     def test_token_cost_has_positive_default(self):
         assert self.settings.TOKEN_COST_PER_TOKEN > 0.0, "FR40.4 token cost must be > 0"
@@ -111,3 +111,41 @@ class TestConfigOverrides:
     def test_slowdown_min_samples_overridable(self):
         s = _fresh_settings(SLOWDOWN_MIN_SAMPLES="5")
         assert s.SLOWDOWN_MIN_SAMPLES == 5
+
+
+class TestConfigValidation:
+    """Config validation rejects invalid values and harmonizes token aliases (US-24)."""
+
+    def test_monthly_budget_rejects_zero_and_negative(self):
+        with pytest.raises(ValueError, match="MONTHLY_BUDGET_USD must be a finite positive number"):
+            _fresh_settings(MONTHLY_BUDGET_USD="0.0")
+
+        with pytest.raises(ValueError, match="MONTHLY_BUDGET_USD must be a finite positive number"):
+            _fresh_settings(MONTHLY_BUDGET_USD="-5.0")
+
+    def test_monthly_budget_rejects_nan_and_inf(self):
+        with pytest.raises(ValueError, match="MONTHLY_BUDGET_USD must be a finite positive number"):
+            _fresh_settings(MONTHLY_BUDGET_USD="nan")
+
+        with pytest.raises(ValueError, match="MONTHLY_BUDGET_USD must be a finite positive number"):
+            _fresh_settings(MONTHLY_BUDGET_USD="inf")
+
+    def test_ai_max_tokens_rejects_zero_and_negative(self):
+        with pytest.raises(ValueError, match="AI_MAX_TOKENS_PER_REQUEST must be a positive integer"):
+            _fresh_settings(AI_MAX_TOKENS_PER_REQUEST="0")
+
+        with pytest.raises(ValueError, match="AI_MAX_TOKENS_PER_REQUEST must be a positive integer"):
+            _fresh_settings(AI_MAX_TOKENS_PER_REQUEST="-100")
+
+    def test_legacy_llm_max_output_tokens_alias_used_when_canonical_omitted(self):
+        s = _fresh_settings(LLM_MAX_OUTPUT_TOKENS="2048")
+        assert s.AI_MAX_TOKENS_PER_REQUEST == 2048
+        assert s.LLM_MAX_OUTPUT_TOKENS == 2048
+
+    def test_canonical_ai_max_tokens_takes_precedence_over_legacy_alias(self):
+        s = _fresh_settings(
+            AI_MAX_TOKENS_PER_REQUEST="1024",
+            LLM_MAX_OUTPUT_TOKENS="4096",
+        )
+        assert s.AI_MAX_TOKENS_PER_REQUEST == 1024
+        assert s.LLM_MAX_OUTPUT_TOKENS == 1024

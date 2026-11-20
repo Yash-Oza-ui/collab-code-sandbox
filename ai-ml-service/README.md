@@ -444,6 +444,68 @@ We selected **thread-safe in-memory storage** (`UsageTracker` protected by `thre
 - `GET /v1/rooms/{room_id}/usage`: Returns metrics scoped to a specific room.
 - `DELETE /v1/rooms/{room_id}/state`: Clears room-scoped counters and cache entries when closed or deleted (US-56).
 
+## Monthly AI Cost Cap and Budget Alert (US-24, NFR7.1, NFR7.2, NFR7.4, NFR7.5)
+
+To prevent runaway external AI provider costs and ensure predictable operational spend, the service enforces a hard monthly expenditure cap and early warning alerts.
+
+### 1. Spending Calculation & Accounting Period (NFR7.1)
+- **Calculation Formula:** `monthly_spend_usd = round(monthly_tokens_used * TOKEN_COST_PER_TOKEN, 4)`
+- **Actual Tokens Only:** Tokens are extracted directly from upstream LLM provider responses (`usageMetadata.totalTokenCount` for Gemini or `usage.total_tokens` for OpenAI). Token counts are **never estimated** from user text or prompt length (FR40.1).
+- **Accounting Month:** Accounting operates strictly on **UTC calendar months** (`datetime.now(timezone.utc)`). At 00:00:00 UTC on the first of each month (including year transitions such as December 31 to January 1), monthly spend counters and alert flags automatically reset to zero. Lifetime platform totals (`total_model_calls`, `total_tokens_used`, `total_cache_hits`, `total_fallback_activations`) remain preserved across resets.
+
+### 2. Configuration Parameters
+The cost cap is controlled via service environment variables:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `MONTHLY_BUDGET_USD` | `10.0` | Maximum monthly budget in USD for external AI provider calls (NFR7.2). Must be a finite positive number (`> 0.0`). Zero, negative values, and non-finite floats (`inf`, `nan`) are rejected at startup and configuration time (fail-closed). |
+| `AI_MAX_TOKENS_PER_REQUEST` | `4096` | Canonical maximum tokens the AI may generate per request (FR40.4). Drives both provider request payload parameters (`maxOutputTokens` / `max_tokens`) and admission reservation token estimates. Must be positive. |
+| `LLM_MAX_OUTPUT_TOKENS` | `4096` | Backward-compatible legacy alias for `AI_MAX_TOKENS_PER_REQUEST`. If both are provided and differ, `AI_MAX_TOKENS_PER_REQUEST` takes precedence with a startup warning. |
+| `TOKEN_COST_PER_TOKEN` | `0.0000035` | Price in USD per consumed token (Gemini 1.5 Flash reference rate: $0.0035 / 1K tokens). |
+| `ALERT_WEBHOOK_URL` | `None` | Optional HTTPS webhook URL for external alert notifications (NFR7.4). |
+
+### 3. 80% Budget Warning Alert (NFR7.4)
+- **Trigger:** When monthly spending reaches or exceeds 80% of `MONTHLY_BUDGET_USD` (e.g. $8.00 on a $10.00 budget), an alert is delivered to the team lead.
+- **Deduplication:** The alert is sent **exactly once** during that UTC calendar month. Subsequent requests do not generate duplicate notifications. The alert state resets automatically when a new UTC month begins.
+- **Delivery Mechanism:**
+  - A structured warning-level log is always emitted:
+    `AI_COST_CAP_ALERT: Monthly external AI spending has reached or exceeded 80% of budget. spend_usd=... budget_usd=... threshold_usd=... month=YYYY-MM`
+  - If `ALERT_WEBHOOK_URL` is configured, an HTTP POST payload is dispatched with metadata asynchronously via a dedicated background thread pool (`ThreadPoolExecutor`). Webhook delivery is completely non-blocking: the usage tracker lock is never held during HTTP I/O, and webhook delays, network timeouts, or external failures cannot stall concurrent FastAPI request handlers or corrupt spending state.
+- **Privacy Guarantee (NFR8.2):** Alerts contain numeric and temporal metadata only (`spend_usd`, `budget_usd`, `threshold_usd`, `month`). Alerts **never** contain source code, stderr, prompts, model responses, or user text.
+
+### 4. Cost-Cap Enforcement & Skipped AI Steps (NFR7.2, T-18 Decision 10)
+- **Pre-Call Enforcement:** Every outbound paid-model call passes through `app.counters.reserve_call` and `app.llm.client.call_llm_with_consent`. When monthly spend has reached or exceeded the configured budget:
+  - The external LLM is **not called** (zero HTTP requests dispatched).
+  - Zero tokens are consumed.
+  - The request returns HTTP 200 with the AI step skipped:
+    ```json
+    "ai_step": {
+      "status": "skipped",
+      "error_code": "COST_CAP_REACHED",
+      "explanation": null,
+      "suggested_fix": null
+    }
+    ```
+  - The system fallback counter (`total_fallback_activations`) is incremented.
+- **Gate Precedence:** User consent (`CONSENT_MISSING`) and the Host AI switch (`AI_DISABLED`) are evaluated before the cost cap. If consent or host approval is missing, their specific skip codes take precedence.
+- **Cache Preservation:** Existing cached results in `AnalysisCache` remain fully usable and are served with `status: "ok"` without making outbound paid calls even when the monthly cost cap has been reached.
+
+### 5. Preservation of AI-Free Functionality (NFR7.5)
+The AI/ML service is never in the critical path of code execution or editing (NFR9). When the AI cost cap is reached:
+- Code editing and room synchronization continue normally.
+- Code execution in Docker containers continues unaffected.
+- **Rules-First Static Analysis:** Deterministic AST checks (e.g. nested loops, string concatenation in loops) execute and return findings normally.
+- **Empirical Regression:** Mathematical log-log regression and Big-O complexity estimation continue unaffected.
+- **Sanitizer Parsing:** AddressSanitizer/UBSan diagnostic parsing for C/C++ crashes extracts `error_type`, `line_number`, and `summary` deterministically.
+
+### 6. Concurrency Strategy, Overshoot Bound & Operational Limitations
+- **Atomic Reservation Logic:** To prevent multiple concurrent requests from reading a stale spending total and stampeding past the budget cap, `UsageTracker.reserve_call` atomically reserves estimated token headroom under a thread lock before dispatching an outbound request. If active reservations + committed spend reach or exceed the budget, subsequent concurrent requests are immediately blocked with `CostCapReachedError`.
+- **Reservation Lifecycle & Stale Reservation Eviction (TTL):** Active reservations track in-flight provider calls with deterministic finalization guarantees provided by Python context managers (`with tracker.reserve_call(...)`) and `try...finally` blocks. To guard against orphaned reservations leaking budget headroom due to unexpected process crashes or unhandled task drops, each reservation records a `created_at` timestamp and is automatically evicted if it exceeds a TTL of `2 * settings.LLM_TIMEOUT_SECONDS` (default 20s). Every normal or error completion path immediately commits, conservatively commits (uncertain timeouts), or releases the reservation.
+- **Admission Estimate & Overshoot Dynamics:** The reservation is an **admission estimate**, not a strict upper bound. External LLM providers (Google Gemini, OpenAI) bill on **total tokens** (input prompt tokens + output generated tokens) and do not provide a pre-flight token quoting API. Because total tokens include user prompt length, the final overshoot on the single admitted in-flight call is $(\text{actual\_total\_tokens} - \text{reserved\_tokens}) \times \text{TOKEN\_COST\_PER\_TOKEN}$, and is **not strictly bounded** by `maxOutputTokens`. Once this final call commits, all subsequent calls are strictly blocked.
+- **Uncertain Post-Dispatch Outcomes:** Pre-dispatch network failures (e.g. `ConnectError`, `ConnectTimeout`) mean the request never reached the provider and release reservations with zero cost. For uncertain post-dispatch outcomes (e.g. `ReadTimeout`, connection drop while reading response, or client cancellation after transmission), the provider may have executed generation and billed the account; the service employs conservative accounting by committing the reserved tokens to monthly spend so expenditure is never undercounted.
+- **Cross-Month Rollover for In-Flight Calls:** When a UTC month rollover occurs while calls are in flight, active reservations are preserved (not cleared) so they continue holding headroom in the new month. When generation finishes, their spend is attributed to the month in which completion occurs, preventing reservation leaks or orphaned tokens.
+- **Single-Process Deployment Constraint:** The service is configured and deployed as a single container running a single Uvicorn process (`uvicorn app.main:app` in `Dockerfile`). The in-memory `UsageTracker` guarantees thread safety within this single process via `threading.Lock`. Multiple worker processes (`uvicorn --workers N`) or multiple container replicas do **not** provide a globally enforced budget cap with the current in-memory tracker; multi-process/multi-replica safety is not claimed without an external coordination layer (e.g. Redis atomic counters).
+
 ## Deterministic Sanitizer Crash Report Parsing (US-73, FR39.1, FR39.2, DR5)
 
 The deterministic sanitizer parser (`app.sanitizer.parse_sanitizer_report`) parses compiler diagnostics from AddressSanitizer (ASan) and UndefinedBehaviorSanitizer (UBSan) for C and C++ programs without invoking external AI models.
@@ -458,3 +520,98 @@ The deterministic sanitizer parser (`app.sanitizer.parse_sanitizer_report`) pars
 - **Clean Runs:** When no sanitizer error is reported and the program executes successfully, returns `error_type=None`, `line_number=None`, and `summary=""` (empty summary, not an error).
 - **Non-Sanitizer Crashes:** Standard crashes (e.g. segmentation faults without sanitizer instrumentation) preserve exit information (e.g. `Process exited with exit code 139 (no sanitizer finding).`) without inventing a sanitizer error type.
 - **Compiler Compatibility:** Tested against diagnostic outputs from GCC 12+ and Clang/LLVM 14+.
+
+## Cheapest-Method-First AI Chain (US-77, FR40.3, FR40.4)
+
+To minimize unnecessary external API expenditure and latency, all AI-enabled analysis and explanation endpoints (`POST /v1/analyses/complexity`, `POST /v1/analyses/crash-explanation`, `POST /v1/explain`) route requests through a single central method chain: `app.chain.answer(request)`.
+
+### 1. Strict Execution Order
+
+The chain executes analysis requests in strictly ascending cost order:
+1. **Stage 1 — Cache ($0, 0 latency):** In-memory normalized cache lookup (US-22).
+2. **Stage 2 — Deterministic Rules & Statistics ($0):** Static AST/regex pattern detection (US-67).
+3. **Stage 3 — Optional Local Model ($0 external cost):** Extensible local model runner interface (US-77).
+4. **Stage 4 — Paid External Model ($$):** Central outbound LLM dispatch subject to consent, Host AI switch, room rate limits, prompt shortening, token budgets, and cost cap admission (US-17, US-21, US-24, US-76, US-77).
+
+### 2. Early-Exit Stopping Criteria
+
+The chain terminates at the earliest possible stage that can satisfy the request:
+
+1. **Stage 1 — Cache (US-22):**
+   - If the exact normalized request key matches an existing entry in `AnalysisCache`, the cached response is returned immediately with `stage="cache"`.
+   - Stages 2, 3, and 4 are called **zero times**.
+   - Increments the `cache_hits` telemetry counter.
+
+2. **Stage 2 — Deterministic Rules (US-67, FR40.3):**
+   - For complexity analysis requests with `rules_first=True`, the AST/regex analyzer evaluates the code.
+   - If one or more slow code patterns (e.g., nested loops, regex in loops) are matched, the rule findings are returned immediately with `stage="rules"`.
+   - The local model and paid model are called **zero times**.
+   - Increments the `rules_answers` telemetry counter.
+
+3. **Stage 3 — Local Model (US-77):**
+   - Dispatches to an optional locally hosted or containerized model runner.
+   - If the local model runner produces an answer string, it returns immediately with `stage="local_model"`.
+   - The paid external model is called **zero times**.
+   - Increments the `local_model_answers` telemetry counter.
+   - If no local model is configured, or if the runner returns `None` or encounters an error, the chain safely falls through to Stage 4 without failing the request.
+
+4. **Stage 4 — Paid External Model (US-17, US-21, US-24, US-77):**
+   - Invoked **only** when Stages 1, 2, and 3 cannot answer.
+   - Subject to strict consent gating, Host AI switch enforcement, hourly room quotas, and monthly budget cost-cap admission.
+   - Increments `paid_model_calls` and updates token spend telemetry.
+
+### 3. Optional Local-Model Interface
+
+The local-model capability is exposed via a clean, one-function interface:
+```python
+from app.chain import query_local_model, set_local_model_runner
+
+# Define a custom local runner (e.g. Ollama, vLLM, llama.cpp, LocalAI)
+async def my_runner(prompt: str, context: dict | None = None) -> str | None:
+    ...
+
+set_local_model_runner(my_runner)
+```
+
+- **Zero-Dependency Guarantee:** The local model is entirely optional. No local model weights, PyTorch binaries, or runtime dependencies are required for standard installation or testing.
+- **Environment Configuration:**
+  - `LOCAL_MODEL_ENABLED`: Boolean toggle (default `False`).
+  - `LOCAL_MODEL_URL`: Optional endpoint URL for an on-premise inference server.
+  - `LOCAL_MODEL_NAME`: Optional model identifier.
+
+### 4. Prompt-Size and Output-Token Budget Enforcement (FR40.4)
+
+Both prompt size and completion output tokens are strictly configurable to prevent runaway costs:
+
+| Setting | Environment Variable | Default | Purpose |
+|---|---|---|---|
+| `AI_MAX_PROMPT_LENGTH` | `AI_MAX_PROMPT_LENGTH` | `4000` | Upper bound on input prompt length in characters |
+| `LLM_MAX_OUTPUT_TOKENS` | `LLM_MAX_OUTPUT_TOKENS` | `256` | Maximum token budget requested from the external LLM provider |
+
+- **Relevant-Code Extraction Shortening (US-76, FR40.2):** When a constructed prompt exceeds `AI_MAX_PROMPT_LENGTH`, the central chain calls `extract_relevant_section()` on the source code to extract only the target function or bounded error line window.
+- **Safety Omission Guarantee:** If the prompt cannot be shortened below `AI_MAX_PROMPT_LENGTH`, the paid model call is safely skipped with `status="skipped"` and `error_code="PROVIDER_ERROR"` (with `metadata.reason="prompt_too_large"` conforming strictly to contract schemas) rather than transmitting an oversized payload.
+- **Provider Output Token Forwarding:** The configured `LLM_MAX_OUTPUT_TOKENS` is explicitly transmitted in outbound requests (`maxOutputTokens` for Google Gemini, `max_tokens` for OpenAI).
+
+### 5. Consent, Host AI Switch, and Cost-Cap Integration
+
+- **Dual-Gate Protection:** If `consent` is `False` or missing (`CONSENT_MISSING`), or if the room Host AI switch `ai_enabled` is `False` (`AI_DISABLED`), the paid external LLM step is skipped. However, **Stage 1 (Cache)** and **Stage 2 (Deterministic Rules)** remain 100% active and return HTTP 200 with complete AST findings.
+- **Cost-Cap Admission:** Before every paid-model dispatch, the system verifies `is_cost_cap_reached()` and calls `reserve_call(estimated_tokens=...)`. If the monthly budget cap has been reached (or if cost-cap protection is unavailable/fails):
+  - The paid model is immediately blocked with `error_code="COST_CAP_REACHED"`.
+  - Zero outbound HTTP requests are dispatched to external providers.
+  - Free cache hits and deterministic rule answers continue to function normally.
+
+### 6. Usage Counters and Privacy Invariant (US-75, NFR8.2)
+
+Usage counters accurately record which stage answered each request:
+- `cache_hits`: Stage 1 cache hits
+- `rules_answers`: Stage 2 deterministic rule answers
+- `local_model_answers`: Stage 3 local model answers
+- `paid_model_calls`: Stage 4 paid external API calls
+- `fallbacks`: Skipped or fallback activations
+
+Counters and application logs record **only** numeric counts, token consumption, room IDs, and error codes. Under no circumstances do logs or counter structures record source code, prompts, user input, or AI-generated answers (NFR8.2).
+
+### 7. US-24 Monthly Cost-Cap Integration Status
+
+- **Base Dependency:** US-77 is rebased directly on `feature/US-24-monthly-cost-cap` (PR #156), inheriting the persistent `UsageTracker`, atomic reservation lifecycle (`reserve_call()`), non-blocking webhook delivery (`ThreadPoolExecutor`), and `CostCapReachedError`.
+- **Zero Duplication:** Stage telemetry counters (`record_rules_answer()`, `record_local_model_answer()`, `get_stage_counters()`) cleanly extend `UsageTracker` without duplicating cost-cap accounting code.
