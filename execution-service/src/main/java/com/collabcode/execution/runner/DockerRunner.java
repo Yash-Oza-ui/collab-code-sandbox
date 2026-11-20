@@ -1,7 +1,10 @@
 package com.collabcode.execution.runner;
 
+import com.collabcode.execution.budget.RunBudget;
+import com.collabcode.execution.budget.RunBudgetExceededException;
 import com.collabcode.execution.config.ExecutionLanguageProperties;
 import com.collabcode.execution.config.ExecutionLimitsProperties;
+import com.collabcode.execution.model.BatchRunSpec;
 import com.collabcode.execution.model.RunFile;
 import com.collabcode.execution.model.RunSpec;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -535,6 +538,324 @@ public class DockerRunner implements CodeRunner {
         }
     }
 
+    @Override
+    public List<ExecutionResult> executeBatch(BatchRunSpec spec, RunBudget budget) {
+        String runId = UUID.randomUUID().toString();
+        String containerName = createContainerName();
+        String compileContainerName = containerName + "-compile";
+
+        Path workspace = null;
+        Path buildDir = null;
+        Process containerProcess = null;
+        Process compileProcess = null;
+
+        Double compileTimeMs = null;
+        List<ExecutionResult> results = new ArrayList<>();
+
+        try {
+            validateLimits();
+
+            String validationError = validateBatchRunSpec(spec);
+            if (validationError != null) {
+                ExecutionResult errResult = failureResult(
+                        validationError,
+                        2,
+                        "non_zero_exit",
+                        0.0,
+                        null,
+                        null
+                );
+                int count = (spec != null && spec.getInputs() != null) ? spec.getInputs().size() : 1;
+                for (int i = 0; i < count; i++) {
+                    results.add(errResult);
+                }
+                return results;
+            }
+
+            String language = spec.getLanguage().toLowerCase(Locale.ROOT);
+            String image = languageProperties.getImageForLanguage(language);
+            boolean isCompiled = ExecutionLanguageProperties.isCompiledLanguage(language);
+
+            Path workspaceRoot = Path.of("/tmp/collab-code-workspaces");
+            Files.createDirectories(workspaceRoot);
+            workspace = Files.createTempDirectory(workspaceRoot, "run-" + runId + "-");
+            setDirectoryPermissions(workspace);
+            writeRunFiles(spec.getFiles(), workspace);
+
+            Path metricsDir = workspace.resolve("metrics");
+            Files.createDirectories(metricsDir);
+            setDirectoryPermissions(metricsDir);
+
+            if (isCompiled) {
+                buildDir = workspace.resolve("build");
+                Files.createDirectories(buildDir);
+                setDirectoryPermissions(buildDir);
+
+                long compileStart = System.nanoTime();
+                List<String> compileCommand = buildCompileCommand(language, spec.getFiles(), false);
+                int compileMemoryMb = limits.getMemoryMb();
+
+                List<String> compileDockerArgs = new ArrayList<>(List.of(
+                        "docker", "run",
+                        "--interactive",
+                        "--network", "none",
+                        "--name", compileContainerName,
+                        "--user", "1001:1001",
+                        "--memory", compileMemoryMb + "m",
+                        "--memory-swap", compileMemoryMb + "m",
+                        "--pids-limit", String.valueOf(limits.getPidsLimit()),
+                        "--read-only",
+                        "--tmpfs", "/tmp:rw,noexec,nosuid,size=16m",
+                        "--mount", "type=bind,source=" + workspace.toAbsolutePath() + ",target=/sandbox/code,readonly",
+                        "--mount", "type=bind,source=" + buildDir.toAbsolutePath() + ",target=/sandbox/build,readonly=false",
+                        image
+                ));
+                compileDockerArgs.addAll(compileCommand);
+
+                compileProcess = startCompileProcess(compileDockerArgs);
+                Process runningCompile = compileProcess;
+
+                AtomicLong compileOutputBytes = new AtomicLong(0);
+                AtomicBoolean compileOutputTruncated = new AtomicBoolean(false);
+
+                CompletableFuture<CapturedOutput> compileStdoutFuture =
+                        CompletableFuture.supplyAsync(() -> captureStream(
+                                runningCompile.getInputStream(),
+                                compileOutputBytes,
+                                compileOutputTruncated
+                        ));
+
+                CompletableFuture<CapturedOutput> compileStderrFuture =
+                        CompletableFuture.supplyAsync(() -> captureStream(
+                                runningCompile.getErrorStream(),
+                                compileOutputBytes,
+                                compileOutputTruncated
+                        ));
+
+                boolean compileFinished = compileProcess.waitFor(
+                        limits.getCompileTimeoutSeconds(),
+                        TimeUnit.SECONDS
+                );
+
+                if (!compileFinished) {
+                    stopContainer(compileContainerName);
+                    if (compileProcess.isAlive()) {
+                        compileProcess.destroyForcibly();
+                        compileProcess.waitFor();
+                    }
+                }
+
+                int compileExitCode = compileProcess.exitValue();
+                CapturedOutput compileStderr = compileStderrFuture.get();
+                compileStdoutFuture.get(); // Drain stdout
+
+                compileTimeMs = elapsedMillis(compileStart);
+
+                if (!compileFinished || compileExitCode != 0) {
+                    boolean compileTimedOut = !compileFinished;
+                    String failureKind = compileTimedOut ? "timeout" : "compile_error";
+                    String message = compileTimedOut ? "Time limit exceeded" : "Compilation failed.";
+                    String failingModule = compileTimedOut ? null : spec.getEntry();
+
+                    ExecutionResult compileErrResult = new ExecutionResult(
+                            "",
+                            compileStderr.text(),
+                            compileTimedOut ? 124 : compileExitCode,
+                            0.0,
+                            0.0,
+                            compileTimedOut,
+                            false,
+                            failureKind,
+                            compileOutputTruncated.get(),
+                            message,
+                            compileTimeMs,
+                            failingModule
+                    );
+                    for (int i = 0; i < spec.getInputs().size(); i++) {
+                        results.add(compileErrResult);
+                    }
+                    return results;
+                }
+            }
+
+            // Start ONE container for the entire batch (FR5.1)
+            List<String> idleCommand = List.of("sleep", "3600");
+            ProcessBuilder builder = buildIsolatedContainerProcess(
+                    containerName,
+                    workspace,
+                    metricsDir,
+                    isCompiled ? buildDir : null,
+                    image,
+                    language,
+                    idleCommand,
+                    false
+            );
+
+            containerProcess = builder.start();
+            waitForContainerRunning(containerName, containerProcess, 10);
+
+            // Execute each test sequentially inside the single container (FR38.4, US-71)
+            for (int i = 0; i < spec.getInputs().size(); i++) {
+                String input = spec.getInputs().get(i);
+                budget.checkBudgetBeforeNextRun();
+
+                Path metricsFile = metricsDir.resolve("run-metrics.properties");
+                try {
+                    Files.deleteIfExists(metricsFile);
+                } catch (IOException ignored) {}
+
+                long runStart = System.nanoTime();
+                List<String> execArgs = new ArrayList<>(List.of("docker", "exec", "--interactive"));
+                if ("python".equals(language)) {
+                    execArgs.add(containerName);
+                    execArgs.add(PYTHON_EXECUTABLE);
+                    execArgs.add(PYTHON_RUNNER_PATH);
+                    execArgs.add(String.valueOf(limits.getWallTimeSeconds()));
+                    execArgs.add("/sandbox/code/" + spec.getEntry());
+                } else {
+                    execArgs.add(containerName);
+                    execArgs.addAll(buildRunCommand(language, spec.getEntry()));
+                }
+
+                Process execProcess = new ProcessBuilder(execArgs).start();
+                AtomicLong outputBytes = new AtomicLong(0);
+                AtomicBoolean outputTruncated = new AtomicBoolean(false);
+
+                CompletableFuture<CapturedOutput> stdoutFuture =
+                        CompletableFuture.supplyAsync(() -> captureStream(
+                                execProcess.getInputStream(),
+                                outputBytes,
+                                outputTruncated
+                        ));
+
+                CompletableFuture<CapturedOutput> stderrFuture =
+                        CompletableFuture.supplyAsync(() -> captureStream(
+                                execProcess.getErrorStream(),
+                                outputBytes,
+                                outputTruncated
+                        ));
+
+                if (input != null) {
+                    try {
+                        execProcess.getOutputStream().write(input.getBytes(StandardCharsets.UTF_8));
+                        execProcess.getOutputStream().flush();
+                    } catch (IOException ignored) {
+                    } finally {
+                        try { execProcess.getOutputStream().close(); } catch (IOException ignored) {}
+                    }
+                } else {
+                    execProcess.getOutputStream().close();
+                }
+
+                boolean finished = execProcess.waitFor(
+                        limits.getWallTimeSeconds() + CONTAINER_STARTUP_GRACE_SECONDS,
+                        TimeUnit.SECONDS
+                );
+
+                boolean execTimedOut = !finished;
+                if (!finished) {
+                    if (execProcess.isAlive()) {
+                        execProcess.destroyForcibly();
+                        execProcess.waitFor();
+                    }
+                }
+
+                int exitCode = execProcess.exitValue();
+                RunMetrics metrics = readRunMetrics(workspace);
+
+                if (metrics.executionTimeMs() == 0.0 && finished) {
+                    metrics = new RunMetrics(elapsedMillis(runStart), metrics.peakMemoryMb(), metrics.timedOut());
+                }
+
+                boolean timedOut = false;
+                boolean oomKilled = false;
+
+                if (execTimedOut || metrics.timedOut()) {
+                    timedOut = true;
+                    exitCode = 124;
+                } else if (exitCode == SIGKILL_EXIT_CODE) {
+                    oomKilled = confirmOomKill(containerName, metrics);
+                }
+
+                CapturedOutput stdout = stdoutFuture.get();
+                CapturedOutput stderr = stderrFuture.get();
+
+                boolean truncated = outputTruncated.get()
+                        || stdout.truncated()
+                        || stderr.truncated();
+
+                String failureKind = classifyFailure(
+                        language,
+                        exitCode,
+                        timedOut,
+                        oomKilled,
+                        stderr.text()
+                );
+
+                String message = resultMessage(
+                        exitCode,
+                        timedOut,
+                        oomKilled,
+                        failureKind,
+                        outputTruncated.get()
+                );
+
+                ExecutionResult testResult = new ExecutionResult(
+                        stdout.text(),
+                        stderr.text(),
+                        exitCode,
+                        metrics.executionTimeMs(),
+                        metrics.peakMemoryMb(),
+                        timedOut,
+                        oomKilled,
+                        failureKind,
+                        truncated,
+                        message,
+                        compileTimeMs,
+                        null
+                );
+
+                budget.recordRun(testResult, Math.max(elapsedMillis(runStart), testResult.getExecutionTimeMs()));
+                results.add(testResult);
+            }
+
+            return results;
+
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("Execution was interrupted.", e);
+        } catch (RunBudgetExceededException e) {
+            throw e;
+        } catch (Exception e) {
+            String detail = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
+            throw new RuntimeException("Docker batch execution failed: " + detail, e);
+        } finally {
+            cleanupAfterExecution(compileProcess, compileContainerName, null);
+            cleanupAfterExecution(containerProcess, containerName, workspace);
+        }
+    }
+
+    protected void waitForContainerRunning(String containerName, Process containerProcess, long timeoutSeconds)
+            throws IOException, InterruptedException {
+        long deadline = System.currentTimeMillis() + (timeoutSeconds * 1000);
+        while (System.currentTimeMillis() < deadline) {
+            if (!containerProcess.isAlive()) {
+                throw new IOException("Container failed to start (process exited with code " + containerProcess.exitValue() + ")");
+            }
+            Process inspect = new ProcessBuilder("docker", "inspect", "--format", "{{.State.Running}}", containerName)
+                    .redirectError(ProcessBuilder.Redirect.DISCARD)
+                    .start();
+            if (inspect.waitFor(2, TimeUnit.SECONDS) && inspect.exitValue() == 0) {
+                String out = new String(inspect.getInputStream().readAllBytes(), StandardCharsets.UTF_8).trim();
+                if ("true".equalsIgnoreCase(out)) {
+                    return;
+                }
+            }
+            Thread.sleep(50);
+        }
+        throw new IOException("Container " + containerName + " did not become ready within " + timeoutSeconds + "s");
+    }
+
     private static void setDirectoryPermissions(Path dir) throws IOException {
         if (!dir.toFile().setReadable(true, false)
                 || !dir.toFile().setExecutable(true, false)) {
@@ -545,8 +866,15 @@ public class DockerRunner implements CodeRunner {
     }
 
     List<String> buildCompileCommand(String language, RunSpec spec) {
+        return buildCompileCommand(
+                language,
+                spec != null ? spec.getFiles() : List.of(),
+                spec != null && spec.isSanitizer()
+        );
+    }
+
+    List<String> buildCompileCommand(String language, List<RunFile> files, boolean isSanitizer) {
         List<String> cmd = new ArrayList<>();
-        boolean isSanitizer = spec != null && spec.isSanitizer();
         switch (language) {
             case "cpp" -> {
                 if (isSanitizer) {
@@ -554,7 +882,7 @@ public class DockerRunner implements CodeRunner {
                 } else {
                     cmd.addAll(List.of("g++", "-O2", "-std=c++20", "-I/sandbox/code"));
                 }
-                for (RunFile file : spec.getFiles()) {
+                for (RunFile file : files) {
                     String name = file.getName();
                     String lower = name.toLowerCase(Locale.ROOT);
                     if (lower.endsWith(".cpp") || lower.endsWith(".cc") || lower.endsWith(".cxx")) {
@@ -569,7 +897,7 @@ public class DockerRunner implements CodeRunner {
                 } else {
                     cmd.addAll(List.of("gcc", "-O2", "-std=c17", "-I/sandbox/code"));
                 }
-                for (RunFile file : spec.getFiles()) {
+                for (RunFile file : files) {
                     String name = file.getName();
                     if (name.toLowerCase(Locale.ROOT).endsWith(".c")) {
                         cmd.add("/sandbox/code/" + name);
@@ -579,7 +907,7 @@ public class DockerRunner implements CodeRunner {
             }
             case "java" -> {
                 cmd.addAll(List.of("javac", "-d", "/sandbox/build"));
-                for (RunFile file : spec.getFiles()) {
+                for (RunFile file : files) {
                     String name = file.getName();
                     if (name.toLowerCase(Locale.ROOT).endsWith(".java")) {
                         cmd.add("/sandbox/code/" + name);
@@ -592,19 +920,22 @@ public class DockerRunner implements CodeRunner {
         return cmd;
     }
 
-    private List<String> buildRunCommand(String language, RunSpec spec) {
+    List<String> buildRunCommand(String language, RunSpec spec) {
+        return buildRunCommand(language, spec != null ? spec.getEntry() : null);
+    }
+
+    List<String> buildRunCommand(String language, String entry) {
         List<String> cmd = new ArrayList<>();
         switch (language) {
             case "cpp", "c" -> cmd.add("/sandbox/build/a.out");
             case "java" -> {
-                String entry = spec.getEntry();
-                String className = entry.endsWith(".java")
+                String className = (entry != null && entry.endsWith(".java"))
                         ? entry.substring(0, entry.length() - ".java".length())
-                        : entry;
+                        : (entry != null ? entry : "");
                 cmd.addAll(List.of("java", "-cp", "/sandbox/build", className));
             }
-            case "javascript" -> cmd.addAll(List.of("node", "/sandbox/code/" + spec.getEntry()));
-            case "python" -> cmd.addAll(List.of("python", "/sandbox/code/" + spec.getEntry()));
+            case "javascript" -> cmd.addAll(List.of("node", "/sandbox/code/" + entry));
+            case "python" -> cmd.addAll(List.of("python", "/sandbox/code/" + entry));
             default -> throw new IllegalArgumentException("Unknown language: " + language);
         }
         return cmd;
@@ -778,8 +1109,59 @@ public class DockerRunner implements CodeRunner {
                 && name.indexOf('\0') < 0;
     }
 
+    private String validateBatchRunSpec(BatchRunSpec spec) {
+        if (spec == null) {
+            return "Batch run specification must not be null.";
+        }
+
+        String language = spec.getLanguage();
+        if (language == null || !languageProperties.isSupportedLanguage(language)) {
+            return "Unsupported language. The configured runtime supports: "
+                    + String.join(", ", languageProperties.getImages().keySet());
+        }
+
+        List<RunFile> files = spec.getFiles();
+        if (files == null || files.isEmpty()) {
+            return "At least one source file is required.";
+        }
+
+        Set<String> names = new HashSet<>();
+        boolean entryFound = false;
+
+        for (RunFile file : files) {
+            if (file == null) {
+                return "Source file entries must not be null.";
+            }
+
+            String name = file.getName();
+            if (!isValidFileName(name)) {
+                return "Invalid file name: " + name;
+            }
+
+            if (!names.add(name)) {
+                return "Duplicate file name: " + name;
+            }
+
+            if (name.equals(spec.getEntry())) {
+                entryFound = true;
+            }
+        }
+
+        if (!entryFound) {
+            return "Entry file was not included in the run specification: "
+                    + spec.getEntry();
+        }
+
+        return null;
+    }
+
     private void writeRunFiles(RunSpec spec, Path workspace) throws IOException {
-        for (RunFile file : spec.getFiles()) {
+        writeRunFiles(spec != null ? spec.getFiles() : List.of(), workspace);
+    }
+
+    private void writeRunFiles(List<RunFile> files, Path workspace) throws IOException {
+        if (files == null) return;
+        for (RunFile file : files) {
             Path filePath = workspace.resolve(file.getName());
 
             if (!filePath.normalize().startsWith(workspace)) {
