@@ -11,6 +11,12 @@
     "consent": { "type": "boolean" },
     "ai_enabled": { "type": "boolean" },
     "code": { "type": "string" },
+    "base_input_size": { "type": "integer" },
+    "inputs": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "repeats": { "type": "integer" },
     "measurements": {
       "type": "array",
       "items": {
@@ -40,8 +46,7 @@
     "language",
     "consent",
     "ai_enabled",
-    "code",
-    "measurements"
+    "code"
   ],
   "additionalProperties": false
 }

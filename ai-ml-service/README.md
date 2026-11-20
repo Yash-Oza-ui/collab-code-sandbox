@@ -18,7 +18,7 @@ The AI/ML microservice for **Collab Code Sandbox** (IT-314, Group 32). This serv
   - See [docs/host-config.md](../docs/host-config.md) for details on host configuration and overrides. Final per-host values are determined only after host benchmarking.
 - **Endpoints:**
   - `GET /health`: Liveness probe for container orchestration and smoke tests.
-  - `POST /v1/analyses/complexity`: Rules-first time complexity analysis with verified AI fallback (FR36, US-17, US-22).
+  - `POST /v1/analyses/complexity`: Rules-first time complexity analysis with verified AI fallback and empirical log-log regression (FR36, US-65, US-17, US-22).
   - `POST /v1/analyses/slowdown`: Statistical slowdown detection against empirical Median and MAD baseline (FR37, US-68).
   - `POST /v1/analyses/crash-explanation`: Deterministic C/C++ sanitizer parser with crash explanation fallback (FR39, DR5).
   - `POST /v1/explain`: Execution failure explainer behind consent, normalized caching, and rate limits (T-16, US-22).
@@ -220,6 +220,91 @@ The generator uses the eight T-13 features plus a label column. It contains only
 The dataset generator and its unittest checks require only the Python standard library. The API service requires the dependencies listed above.
 
 Keep generated CSV files out of commits. The production anomaly score threshold will be chosen during Sprint 3 validation.
+
+## Empirical Time Complexity Measurement & Regression (US-65, FR36.1, FR36.2)
+
+### User Story & Purpose (US-65)
+As a student, I want an estimate of how my program's run time grows so that I can see whether it will be too slow.
+
+`ai-ml-service` measures the program at geometric input sizes $n$, $2n$, and $4n$, several times each, and calculates the median run time at each size. It fits a linear regression line to $\log(\text{input size})$ against $\log(\text{run time})$ to estimate the empirical growth rate ($m$), calculates the $R^2$ goodness-of-fit score, classifies the Big-O time complexity, and extrapolates the input size at which execution would reach the 5-second sandbox limit.
+
+### Geometric Input Sizes & Repeat Count (FR36.1, US-64, NFR14)
+- **Input Sizes:** Measurements are performed at 3 geometric points: $n$, $2n$, and $4n$ (configurable base size `COMPLEXITY_BASE_INPUT_SIZE`, default $n = 100$, yielding inputs $100, 200, 400$).
+- **Repeats:** Each size is measured 3 times (`COMPLEXITY_DEFAULT_REPEATS = 3`) to filter transient container startup overhead, giving $3 \text{ sizes} \times 3 \text{ repeats} = 9 \text{ total runs}$.
+- **Run Cap Compliance (US-64, NFR14):** In collaboration with Bhavya Vekariya, 3 repeats was selected so the 9 total runs strictly remain under the 10-run per-request ceiling (`max-runs-per-request: 10`) enforced by `execution-service`.
+- **Median Runtime:** At each input size $N_i$, the representative execution time is the median runtime across the repeats:
+  $$\tilde{t}_i = \text{median}(t_{i, 1}, t_{i, 2}, \dots, t_{i, k})$$
+- **Stage Isolation (V2.9, AC 3):** Only the actual run stage time (`execution_time_ms`) is used for statistical regression. Compile time and container queue time are strictly excluded from the regression curve.
+- **Aggregate Budget Accounting:** In compiled languages (C, C++, Java), compilation is executed on each measurement run. While compile time is excluded from `execution_time_ms`, it is counted toward the 20,000 ms aggregate execution budget in `execution-service` (`RunBudget`).
+
+### Log-Log Linear Regression Formula (FR36.2)
+For polynomial and power-law relationships $T(N) = a \cdot N^m$, taking the natural logarithm of both sides yields a linear equation:
+$$\ln(T) = m \cdot \ln(N) + c$$
+where:
+- $N$ is the input size ($n, 2n, 4n$).
+- $T$ is the median execution time in milliseconds.
+- $m$ is the slope of the line, representing the empirical growth rate (power-law exponent).
+- $c = \ln(a)$ is the intercept.
+
+The slope $m$ and intercept $c$ are determined using ordinary least squares (OLS) linear regression:
+$$m = \frac{\sum_{i=1}^k (\ln N_i - \overline{\ln N})(\ln T_i - \overline{\ln T})}{\sum_{i=1}^k (\ln N_i - \overline{\ln N})^2}$$
+$$c = \overline{\ln T} - m \cdot \overline{\ln N}$$
+
+### Big-O Complexity Classification Table
+The empirical growth rate $m$ is mapped to standard Big-O notation using calibrated boundary intervals:
+
+| Growth Rate Interval ($m$) | Estimated Complexity | Algorithmic Class |
+|---|---|---|
+| $m \le 0.20$ | $O(1)$ | Constant Time |
+| $0.20 \le m < 0.80$ | $O(\log n)$ | Logarithmic Time |
+| $0.80 \le m < 1.25$ | $O(n)$ | Linear Time |
+| $1.25 \le m < 1.75$ | $O(n \log n)$ | Linearithmic Time |
+| $1.75 \le m < 2.50$ | $O(n^2)$ | Quadratic Time |
+| $2.50 \le m < 3.50$ | $O(n^3)$ | Cubic Time |
+| $m \ge 3.50$ | $O(2^n)$ | Exponential Time |
+
+### $R^2$ Score & Poor Fit Handling
+The coefficient of determination ($R^2$) measures how well the regression line accounts for empirical variance:
+$$R^2 = 1 - \frac{\sum_{i=1}^k (\ln T_i - \widehat{\ln T}_i)^2}{\sum_{i=1}^k (\ln T_i - \overline{\ln T})^2}$$
+- **What Low $R^2$ Means:** Microbenchmark measurements at small input sizes are susceptible to noise, container scheduling jitter, garbage collection pauses, or algorithmic phase transitions (e.g. cache line thresholds). An $R^2$ score below `0.85` indicates that execution time did not scale cleanly with input size.
+- **Reporting Policy:** When $R^2 < 0.85$ (`COMPLEXITY_R2_POOR_FIT_THRESHOLD`), the response sets `is_poor_fit: true` and includes an explicit warning message:
+  `"Complexity estimate has low confidence (R² = 0.XX < 0.85). Variance or noise was high across measured sizes."`
+  A weak estimate is never presented to the student as a firm answer.
+
+### Projected Timeout Extrapolation (5 s Sandbox Limit)
+Extrapolating the log-log fit predicts the input size $N_{\text{limit}}$ at which the program would hit the 5,000 ms (5 s) sandbox timeout limit (`COMPLEXITY_TIMEOUT_MS`, NFR4.1):
+$$\ln(5000) = m \cdot \ln(N_{\text{limit}}) + c \implies N_{\text{limit}} = \operatorname{round}\left(\exp\left(\frac{\ln(5000) - c}{m}\right)\right)$$
+
+- **Flat or Falling Line Protection:** When the slope is near zero or negative ($m \le 0.05$, e.g. for $O(1)$ constant time or caching effects), solving for $N_{\text{limit}}$ would yield astronomical or meaningless negative/fractional numbers. In such cases, the service reports `projected_timeout_input_size = "limit not reached"` rather than a nonsense number.
+
+### Timeout Handling Policy (NFR4.1)
+- **Individual Timeout Detection:** If any execution run at a given input size reaches or exceeds 5,000 ms (5 s), it is classified as a timeout at that size.
+- **Minimum Points Requirement:** A valid regression curve strictly requires at least 3 distinct finished input sizes.
+- **Refusal to Fit Through Two Points:** If fewer than 3 sizes finish (for instance, a timeout occurs at size $2n$ or $4n$), the service **refuses to fit a line through two points**. It sets `growth_rate = null`, `estimated_complexity = null`, `timeout_at_size = <size>`, and returns an explicit explanatory message:
+  `"Execution timed out at input size 400 (5000 ms limit reached). No complexity estimate possible from fewer than 3 completed sizes."`
+
+### Budget Exceeded Policy (HTTP 429 RUN_BUDGET_EXCEEDED, US-64)
+- When repeated measurement requests exceed the execution-service resource budget (either 20,000 ms aggregate execution time or 10 runs per request ceiling), `execution-service` returns HTTP 429 with `error.code = "RUN_BUDGET_EXCEEDED"` and `retry_after_seconds = 30`.
+- **No Incomplete Estimates:** `ai-ml-service` never attempts to construct a partial estimate from truncated runs.
+- **Budget Attribution:** The refusal reason (`aggregate_time_budget` or `max_runs_per_request`) is captured and surfaced in `refusal_reason` and the response message:
+  `"Repeated-run execution budget exceeded (aggregate_time_budget). No estimate possible from incomplete data."`
+- The service sets HTTP 429 with `Retry-After: 30` header, informing the client when a new measurement request can be attempted.
+
+### Internal Run Architecture & Dual Runner Pattern (T-18 Decision 7)
+`ai-ml-service` never spawns Docker containers directly. It interacts with `execution-service` via `POST /internal/runs` (`purpose: "measurement"`) authenticated by the shared header `X-Internal-Token`.
+- **`MeasurementRunner` Interface:** Defines the contract for executing repeated runs at geometric input sizes.
+- **`StubMeasurementRunner`:** Deterministic in-memory harness developed during Sprint 3 early start. Simulates constant, linear, quadratic, cubic, noisy, timeout, and 429 budget conditions without invoking Docker or network sockets. Used for fast, repeatable unit tests.
+- **`HttpInternalRunClient`:** Production client connecting to `execution-service` container runner over HTTP. Propagates internal credentials, parses `completed_runs`, detects timeouts, and extracts 429 budget refusal metadata.
+- **Automatic Fallback:** In local test environments where `execution-service` is unreachable, `HttpInternalRunClient` gracefully falls back to `StubMeasurementRunner`, keeping offline test suites green.
+
+### Asynchronous Delivery & Zero Execution Delay (NFR9, CR08)
+- **Zero Run Delay:** Code execution results are returned immediately to the student without waiting for complexity measurements.
+- **Separate WebSocket Message:** Complexity analysis is performed asynchronously and dispatched as a separate `analysis-result` message with `task: "complexity"`.
+- **Identical Audience:** Dispatched to the same room or sessions that received the original run result.
+
+### Privacy & Data Minimization (NFR7.5, NFR8.2)
+- **No AI Call Required (NFR7.5):** Complexity curve fitting is pure mathematical statistics. It operates unconditionally regardless of user consent (`consent: false`) or the room AI switch (`ai_enabled: false`).
+- **Metadata-Only Logging (NFR8.2):** Service logs record only request identifiers, input sizes, slope, $R^2$, and status codes. User source code and stdin input text are **never logged**.
 
 ## Slowdown Detection in Run History (US-68, FR37, T-18 v2 §16.2)
 

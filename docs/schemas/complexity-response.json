@@ -6,10 +6,13 @@
     "request_id": { "type": "string" },
     "analysis_id": { "type": "string" },
     "task": { "type": "string", "enum": ["complexity"] },
-    "growth_rate": { "type": "number" },
-    "estimated_complexity": { "type": "string" },
-    "r2_score": { "type": "number" },
-    "projected_timeout_input_size": { "type": "integer" },
+    "growth_rate": { "type": ["number", "null"] },
+    "estimated_complexity": { "type": ["string", "null"] },
+    "r2_score": { "type": ["number", "null"] },
+    "projected_timeout_input_size": { "type": ["integer", "string", "null"] },
+    "timeout_at_size": { "type": ["integer", "null"] },
+    "is_poor_fit": { "type": ["boolean", "null"] },
+    "message": { "type": ["string", "null"] },
     "slow_patterns": {
       "type": "array",
       "items": {

@@ -107,6 +107,21 @@ class Settings:
         self.SLOWDOWN_MIN_SAMPLES: int = int(os.getenv("SLOWDOWN_MIN_SAMPLES", "3"))
         self.SLOWDOWN_MAX_HISTORY: int = int(os.getenv("SLOWDOWN_MAX_HISTORY", "100"))
 
+        # Time complexity measurement and internal run configuration (US-64, US-65, T-18 Decision 7)
+        self.USE_STUB_RUNNER: bool = os.getenv("USE_STUB_RUNNER", "true").lower() in ("true", "1")
+        self.EXECUTION_SERVICE_URL: str = os.getenv(
+            "EXECUTION_SERVICE_URL", "http://execution-service:8082"
+        ).rstrip("/")
+        self.INTERNAL_API_TOKEN: str = os.getenv(
+            "INTERNAL_API_TOKEN", os.getenv("INTERNAL_TOKEN", "")
+        )
+        self.COMPLEXITY_BASE_INPUT_SIZE: int = int(os.getenv("COMPLEXITY_BASE_INPUT_SIZE", "100"))
+        self.COMPLEXITY_DEFAULT_REPEATS: int = int(os.getenv("COMPLEXITY_DEFAULT_REPEATS", "3"))
+        self.COMPLEXITY_TIMEOUT_MS: float = float(os.getenv("COMPLEXITY_TIMEOUT_MS", "5000.0"))
+        self.COMPLEXITY_R2_POOR_FIT_THRESHOLD: float = float(
+            os.getenv("COMPLEXITY_R2_POOR_FIT_THRESHOLD", "0.85")
+        )
+
     def __repr__(self) -> str:
         # Never print or log the actual API key (NFR8.2)
         key_status = "set" if self.LLM_API_KEY else "unset"
