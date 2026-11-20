@@ -35,6 +35,9 @@ public class RunBudgetExceededExceptionHandler {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("request_id", ex.getRequestId());
         body.put("error", error);
+        if (ex.getBatchResults() != null && !ex.getBatchResults().isEmpty()) {
+            body.put("batch_results", ex.getBatchResults());
+        }
 
         return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS)
                 .header(HttpHeaders.RETRY_AFTER, String.valueOf(ex.getRetryAfterSeconds()))
