@@ -146,14 +146,21 @@ async function main() {
   const strangerJoined = await waitFor(firstOfType(strangerCtl, 'joined'), 'stranger joined')
   const strangerMemberId = strangerJoined.member_id
 
-  // List modules to find entry module (created automatically in Open mode)
-  const listRes = await http('GET', `/v1/rooms/${roomId}/modules`, {
+  // Create and approve a module (US-39 / US-40)
+  const createModRes = await http('POST', `/v1/rooms/${roomId}/modules`, {
     headers: { 'X-Session-Id': hostSession },
+    body: { name: 'solver.py' },
   })
-  assert.equal(listRes.status, 200, 'list modules')
-  assert.ok(listRes.body.length >= 1, 'entry module exists')
-  const entryModule = listRes.body[0]
-  const moduleId = entryModule.module_id
+  assert.equal(createModRes.status, 202, 'module requested')
+  const moduleId = createModRes.body.module_id
+  assert.ok(moduleId, 'moduleId exists')
+
+  const approveRes = await http('POST', `/v1/rooms/${roomId}/modules/${moduleId}/approve`, {
+    headers: { 'X-Session-Id': hostSession, 'X-Owner-Token': ownerToken },
+    body: {},
+  })
+  assert.equal(approveRes.status, 200, 'module approved')
+  const entryModule = approveRes.body
 
   // Connect doc sockets for host and guest
   const hostDoc = await connectDoc(roomId, moduleId, hostSession)
