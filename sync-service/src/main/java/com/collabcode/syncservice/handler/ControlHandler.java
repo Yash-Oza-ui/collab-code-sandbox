@@ -19,6 +19,7 @@ import org.springframework.web.socket.handler.AbstractWebSocketHandler;
 
 import java.io.IOException;
 import java.net.URI;
+import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -304,6 +305,26 @@ public class ControlHandler extends AbstractWebSocketHandler {
             }
         } catch (Exception e) {
             log.error("Control: failed to broadcast roster for room={}: {}", roomId, e.getMessage());
+        }
+    }
+
+    /**
+     * Broadcast a {@code module-updated} message to every control socket in the room (V2.6, US-39).
+     * Never logs module code or private tokens (NFR10).
+     */
+    public void broadcastModuleUpdated(String roomId, Map<String, Object> moduleUpdatedMsg) {
+        Room room = roomStore.get(roomId);
+        if (room == null) {
+            return;
+        }
+
+        try {
+            String json = objectMapper.writeValueAsString(moduleUpdatedMsg);
+            for (WebSocketSession target : registry.getJoinedControlSessions(roomId)) {
+                sendText(target, json);
+            }
+        } catch (Exception e) {
+            log.error("Control: failed to broadcast module-updated for room={}: {}", roomId, e.getMessage());
         }
     }
 
