@@ -73,8 +73,13 @@ async def call_llm_api(
     room_id: Optional[str] = None,
 ) -> str:
     """Call external LLM API routed through the central consent gate (FR12.2, FR35, US-17)."""
-    return await call_llm_with_consent(
+    from app import chain
+    chain_req = chain.ChainRequest(
+        request_type="explanation",
+        code=prompt,
+        language="python",
         prompt=prompt,
+        room_id=room_id,
         consent=consent,
         ai_enabled=ai_enabled,
         client=client,
@@ -82,8 +87,10 @@ async def call_llm_api(
         model=model,
         base_url=base_url,
         timeout_seconds=timeout_seconds,
-        room_id=room_id,
+        rules_first=False,
     )
+    res = await chain.answer(chain_req)
+    return res.answer or ""
 
 
 async def generate_explanation(
@@ -105,65 +112,40 @@ async def generate_explanation(
     pre_sliced: bool = False,
     room_id: Optional[str] = None,
 ) -> str:
-    """Generate a 3-sentence plain prose failure explanation using LLM (FR13.1, FR40.2, US-76).
+    """Generate a 3-sentence plain prose failure explanation using central method chain (FR13.1, FR40.2, FR40.3, US-76, US-77)."""
+    from app.chain import ChainRequest, answer
+    from app.llm.client import AIDisabledError, ConsentMissingError, RoomRateLimitedError
 
-    Privacy & Data minimization compliance:
-    - FR40.2, US-76: Sends ONLY the relevant code section to external AI, never the full file.
-    - FR12.2, FR35: If consent is missing/false or ai_enabled is missing/false, fails immediately at the gate without outbound calls.
-    - NFR8.2: Never logs raw code, stderr, or prompts.
-    """
-    # Safe logging of non-sensitive execution metadata
-    logger.info(
-        "Generating failure explanation: request_id=%s language=%s failure_kind=%s exit_code=%s timed_out=%s oom_killed=%s",
-        request_id,
-        language,
-        failure_kind,
-        exit_code,
-        timed_out,
-        oom_killed,
-    )
-
-    # 1. Extract only the relevant code section (FR40.2, US-76)
-    if pre_sliced:
-        # Caller supplied an already-localized code_snippet (e.g. Task 4 crash explanation).
-        # Avoid re-windowing it with a full-file error_line when it already fits within SECTION_MAX_LINES.
-        code_lines = code.splitlines() if code else []
-        if len(code_lines) <= settings.SECTION_MAX_LINES:
-            relevant_code = code
-        else:
-            relevant_code = "\n".join(code_lines[: settings.SECTION_MAX_LINES])
-    else:
-        target_error_line = error_line
-        if target_error_line is None and stderr:
-            target_error_line = extract_error_line_from_stderr(stderr, language=language)
-
-        relevant_code = extract_relevant_section(
-            code=code,
-            language=language,
-            function_name=function_name,
-            error_line=target_error_line,
-        )
-
-    prompt = build_explanation_prompt(
+    req = ChainRequest(
+        request_type="explain",
         language=language,
-        failure_kind=failure_kind,
-        exit_code=exit_code,
-        stderr=stderr,
-        timed_out=timed_out,
-        oom_killed=oom_killed,
-        code=relevant_code,
-    )
-
-    raw_output = await call_llm_with_consent(
-        prompt=prompt,
+        code=code,
         consent=consent,
         ai_enabled=ai_enabled,
+        failure_kind=failure_kind,
+        exit_code=exit_code,
+        error_output=stderr,
+        timed_out=timed_out,
+        oom_killed=oom_killed,
+        request_id=request_id,
         client=llm_client,
-        api_key=api_key,
-        model=model,
+        error_line=error_line,
+        function_name=function_name,
+        pre_sliced=pre_sliced,
         room_id=room_id,
+        rules_first=False,
+        reraise_ai_errors=True,
     )
-
-    explanation = enforce_sentence_limit(raw_output, max_sentences=3)
-    logger.info("Successfully generated explanation for request_id=%s", request_id)
-    return explanation
+    resp = await answer(req)
+    if resp.status == "skipped" and resp.error_code:
+        if resp.error_code == "CONSENT_MISSING":
+            raise ConsentMissingError()
+        elif resp.error_code == "AI_DISABLED":
+            raise AIDisabledError()
+        elif resp.error_code == "COST_CAP_REACHED":
+            from app.chain import CostCapReachedError
+            if CostCapReachedError is not None:
+                raise CostCapReachedError()
+        elif resp.error_code == "ROOM_RATE_LIMITED":
+            raise RoomRateLimitedError()
+    return resp.answer or ""

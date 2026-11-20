@@ -520,3 +520,98 @@ The deterministic sanitizer parser (`app.sanitizer.parse_sanitizer_report`) pars
 - **Clean Runs:** When no sanitizer error is reported and the program executes successfully, returns `error_type=None`, `line_number=None`, and `summary=""` (empty summary, not an error).
 - **Non-Sanitizer Crashes:** Standard crashes (e.g. segmentation faults without sanitizer instrumentation) preserve exit information (e.g. `Process exited with exit code 139 (no sanitizer finding).`) without inventing a sanitizer error type.
 - **Compiler Compatibility:** Tested against diagnostic outputs from GCC 12+ and Clang/LLVM 14+.
+
+## Cheapest-Method-First AI Chain (US-77, FR40.3, FR40.4)
+
+To minimize unnecessary external API expenditure and latency, all AI-enabled analysis and explanation endpoints (`POST /v1/analyses/complexity`, `POST /v1/analyses/crash-explanation`, `POST /v1/explain`) route requests through a single central method chain: `app.chain.answer(request)`.
+
+### 1. Strict Execution Order
+
+The chain executes analysis requests in strictly ascending cost order:
+1. **Stage 1 — Cache ($0, 0 latency):** In-memory normalized cache lookup (US-22).
+2. **Stage 2 — Deterministic Rules & Statistics ($0):** Static AST/regex pattern detection (US-67).
+3. **Stage 3 — Optional Local Model ($0 external cost):** Extensible local model runner interface (US-77).
+4. **Stage 4 — Paid External Model ($$):** Central outbound LLM dispatch subject to consent, Host AI switch, room rate limits, prompt shortening, token budgets, and cost cap admission (US-17, US-21, US-24, US-76, US-77).
+
+### 2. Early-Exit Stopping Criteria
+
+The chain terminates at the earliest possible stage that can satisfy the request:
+
+1. **Stage 1 — Cache (US-22):**
+   - If the exact normalized request key matches an existing entry in `AnalysisCache`, the cached response is returned immediately with `stage="cache"`.
+   - Stages 2, 3, and 4 are called **zero times**.
+   - Increments the `cache_hits` telemetry counter.
+
+2. **Stage 2 — Deterministic Rules (US-67, FR40.3):**
+   - For complexity analysis requests with `rules_first=True`, the AST/regex analyzer evaluates the code.
+   - If one or more slow code patterns (e.g., nested loops, regex in loops) are matched, the rule findings are returned immediately with `stage="rules"`.
+   - The local model and paid model are called **zero times**.
+   - Increments the `rules_answers` telemetry counter.
+
+3. **Stage 3 — Local Model (US-77):**
+   - Dispatches to an optional locally hosted or containerized model runner.
+   - If the local model runner produces an answer string, it returns immediately with `stage="local_model"`.
+   - The paid external model is called **zero times**.
+   - Increments the `local_model_answers` telemetry counter.
+   - If no local model is configured, or if the runner returns `None` or encounters an error, the chain safely falls through to Stage 4 without failing the request.
+
+4. **Stage 4 — Paid External Model (US-17, US-21, US-24, US-77):**
+   - Invoked **only** when Stages 1, 2, and 3 cannot answer.
+   - Subject to strict consent gating, Host AI switch enforcement, hourly room quotas, and monthly budget cost-cap admission.
+   - Increments `paid_model_calls` and updates token spend telemetry.
+
+### 3. Optional Local-Model Interface
+
+The local-model capability is exposed via a clean, one-function interface:
+```python
+from app.chain import query_local_model, set_local_model_runner
+
+# Define a custom local runner (e.g. Ollama, vLLM, llama.cpp, LocalAI)
+async def my_runner(prompt: str, context: dict | None = None) -> str | None:
+    ...
+
+set_local_model_runner(my_runner)
+```
+
+- **Zero-Dependency Guarantee:** The local model is entirely optional. No local model weights, PyTorch binaries, or runtime dependencies are required for standard installation or testing.
+- **Environment Configuration:**
+  - `LOCAL_MODEL_ENABLED`: Boolean toggle (default `False`).
+  - `LOCAL_MODEL_URL`: Optional endpoint URL for an on-premise inference server.
+  - `LOCAL_MODEL_NAME`: Optional model identifier.
+
+### 4. Prompt-Size and Output-Token Budget Enforcement (FR40.4)
+
+Both prompt size and completion output tokens are strictly configurable to prevent runaway costs:
+
+| Setting | Environment Variable | Default | Purpose |
+|---|---|---|---|
+| `AI_MAX_PROMPT_LENGTH` | `AI_MAX_PROMPT_LENGTH` | `4000` | Upper bound on input prompt length in characters |
+| `LLM_MAX_OUTPUT_TOKENS` | `LLM_MAX_OUTPUT_TOKENS` | `256` | Maximum token budget requested from the external LLM provider |
+
+- **Relevant-Code Extraction Shortening (US-76, FR40.2):** When a constructed prompt exceeds `AI_MAX_PROMPT_LENGTH`, the central chain calls `extract_relevant_section()` on the source code to extract only the target function or bounded error line window.
+- **Safety Omission Guarantee:** If the prompt cannot be shortened below `AI_MAX_PROMPT_LENGTH`, the paid model call is safely skipped with `status="skipped"` and `error_code="PROVIDER_ERROR"` (with `metadata.reason="prompt_too_large"` conforming strictly to contract schemas) rather than transmitting an oversized payload.
+- **Provider Output Token Forwarding:** The configured `LLM_MAX_OUTPUT_TOKENS` is explicitly transmitted in outbound requests (`maxOutputTokens` for Google Gemini, `max_tokens` for OpenAI).
+
+### 5. Consent, Host AI Switch, and Cost-Cap Integration
+
+- **Dual-Gate Protection:** If `consent` is `False` or missing (`CONSENT_MISSING`), or if the room Host AI switch `ai_enabled` is `False` (`AI_DISABLED`), the paid external LLM step is skipped. However, **Stage 1 (Cache)** and **Stage 2 (Deterministic Rules)** remain 100% active and return HTTP 200 with complete AST findings.
+- **Cost-Cap Admission:** Before every paid-model dispatch, the system verifies `is_cost_cap_reached()` and calls `reserve_call(estimated_tokens=...)`. If the monthly budget cap has been reached (or if cost-cap protection is unavailable/fails):
+  - The paid model is immediately blocked with `error_code="COST_CAP_REACHED"`.
+  - Zero outbound HTTP requests are dispatched to external providers.
+  - Free cache hits and deterministic rule answers continue to function normally.
+
+### 6. Usage Counters and Privacy Invariant (US-75, NFR8.2)
+
+Usage counters accurately record which stage answered each request:
+- `cache_hits`: Stage 1 cache hits
+- `rules_answers`: Stage 2 deterministic rule answers
+- `local_model_answers`: Stage 3 local model answers
+- `paid_model_calls`: Stage 4 paid external API calls
+- `fallbacks`: Skipped or fallback activations
+
+Counters and application logs record **only** numeric counts, token consumption, room IDs, and error codes. Under no circumstances do logs or counter structures record source code, prompts, user input, or AI-generated answers (NFR8.2).
+
+### 7. US-24 Monthly Cost-Cap Integration Status
+
+- **Base Dependency:** US-77 is rebased directly on `feature/US-24-monthly-cost-cap` (PR #156), inheriting the persistent `UsageTracker`, atomic reservation lifecycle (`reserve_call()`), non-blocking webhook delivery (`ThreadPoolExecutor`), and `CostCapReachedError`.
+- **Zero Duplication:** Stage telemetry counters (`record_rules_answer()`, `record_local_model_answer()`, `get_stage_counters()`) cleanly extend `UsageTracker` without duplicating cost-cap accounting code.

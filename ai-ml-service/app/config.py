@@ -61,6 +61,14 @@ class Settings:
         self.AI_MAX_TOKENS_PER_REQUEST: int = effective_max_tokens
         self.LLM_MAX_OUTPUT_TOKENS: int = effective_max_tokens
 
+        # FR40.4 - maximum input prompt length in characters (US-77)
+        self.AI_MAX_PROMPT_LENGTH: int = int(os.getenv("AI_MAX_PROMPT_LENGTH", os.getenv("AI_MAX_PROMPT_CHARS", "4000")))
+
+        # FR40.3 - optional local model configuration (US-77)
+        self.LOCAL_MODEL_ENABLED: bool = os.getenv("LOCAL_MODEL_ENABLED", "false").lower() in ("true", "1")
+        self.LOCAL_MODEL_URL: Optional[str] = os.getenv("LOCAL_MODEL_URL")
+        self.LOCAL_MODEL_NAME: str = os.getenv("LOCAL_MODEL_NAME", "local-model")
+
         # NFR5.3 – hourly per-room AI request limit (US-22 / US-16)
         self.ROOM_HOURLY_LIMIT: int = int(os.getenv("ROOM_HOURLY_LIMIT", "20"))
 
