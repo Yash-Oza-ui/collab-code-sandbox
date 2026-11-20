@@ -334,8 +334,10 @@ def test_log_marker_never_appears_in_logs_on_any_path(caplog):
 
     with caplog.at_level(logging.DEBUG):
         with patch.object(settings, "LLM_API_KEY", "test-fake-key"):
-            with patch("httpx.AsyncClient.post", new=AsyncMock(return_value=_MOCK_LLM_RESPONSE)), \\
-                    patch("app.failing_input.sandbox_batch", new=fake_test_batch):
+            with (
+                patch("httpx.AsyncClient.post", new=AsyncMock(return_value=_MOCK_LLM_RESPONSE)),
+                patch("app.failing_input.sandbox_batch", new=fake_test_batch),
+            ):
                 client.get("/health")
 
                 for case in route_cases:
