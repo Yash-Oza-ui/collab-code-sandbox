@@ -2,6 +2,7 @@
 import json
 import os
 import re
+import secrets
 import time
 import uuid
 from typing import Literal
@@ -144,13 +145,15 @@ async def sandbox_batch(
     if data.get("request_id") != body["request_id"]:
         raise _fixed_error("INVALID_REQUEST", 502)
     records = data.get("batch_results", [])
-    if not isinstance(records, list) or len(records) > len(inputs):
+    if not isinstance(records, list) or len(records) > len(inputs) or (res.status_code == 200 and len(records) != len(inputs)):
         raise _fixed_error("INVALID_REQUEST", 502)
     for i, record in enumerate(records):
         if not isinstance(record, dict) or record.get("input") != inputs[i] or record.get("status") not in (FAILURES | {"pass"}):
             raise _fixed_error("INVALID_REQUEST", 502)
     budget.record(len(records))
     if len(records) < len(inputs):
+        budget.exhausted = True
+    if time.monotonic() >= budget.deadline:
         budget.exhausted = True
     return records, budget.exhausted
 
@@ -169,7 +172,7 @@ def identify_failure(record: dict, has_reference: bool) -> str | None:
 
 def as_response(payload: FailingInputRequest, step: AIStep, records: list[dict],
                 with_reference: bool, exhausted: bool) -> FailingInputResponse:
-    for index, record in enumerate(records):
+    for record in records:
         failure = identify_failure(record, with_reference)
         if failure is None:
             continue
@@ -181,7 +184,7 @@ def as_response(payload: FailingInputRequest, step: AIStep, records: list[dict],
             failure_found=True, failure_type=failure, original_input=value,
             # US-72 owns minimisation; the original is retained unchanged.
             minimized_input=value, expected_output=expected, actual_output=actual,
-            tests_executed=index + 1,
+            tests_executed=len(records),
             minimization_status="budget_exhausted" if exhausted else "completed",
             test_case=TestCase(input=value, expected_output=expected,
                                failure_type=failure, language=payload.language),
@@ -255,7 +258,7 @@ async def failing_input(
     request.state.language = payload.language
     token = os.getenv("INTERNAL_API_TOKEN", "")
     if payload.reference_solution is not None and (
-        not token or request.headers.get("X-Internal-Token") != token
+        not token or not secrets.compare_digest(request.headers.get("X-Internal-Token", ""), token)
     ):
         request.state.error_code = "UNAUTHORIZED"
         raise _fixed_error("UNAUTHORIZED", 401)
@@ -274,13 +277,14 @@ async def failing_input(
         "AI_DISABLED" if not payload.ai_enabled else None
     ))
     records: list[dict] = []
+    reference_valid = with_reference
 
     async def check(inputs: list[str]) -> None:
-        nonlocal records
+        nonlocal records, reference_valid
         if not inputs or budget.exhausted:
             return
         expected = None
-        if with_reference:
+        if reference_valid:
             reference_records, _ = await sandbox_batch(
                 payload, budget, payload.reference_solution, inputs
             )
@@ -288,26 +292,29 @@ async def failing_input(
             if len(reference_records) != len(inputs) or any(
                 r["status"] != "pass" or r.get("output_truncated") for r in reference_records
             ):
-                response.headers["X-Failing-Input-Reference"] = "unavailable"
-                return
-            expected = [r.get("stdout", "") for r in reference_records]
+                reference_valid = False
+                # Reference crashed/timed out: do not infer correctness from its output.
+                # Continue with crash/timeout-only candidate search when budget permits.
+                expected = None
+            else:
+                expected = [r.get("stdout", "") for r in reference_records]
         if not budget.exhausted:
             batch_records, _ = await sandbox_batch(payload, budget, payload.code, inputs, expected=expected)
             records.extend(batch_records)
 
     await check(cases)
-    found = any(identify_failure(r, with_reference) for r in records)
+    found = any(identify_failure(r, reference_valid) for r in records)
     if not found and not budget.exhausted and payload.consent and payload.ai_enabled:
         generated, step = await ai_inputs(payload, budget)
         generated = [s for s in dict.fromkeys(generated) if s not in cases]
         # With a reference, two process slots are required for each candidate.
-        generated = generated[:budget.remaining // (2 if with_reference else 1)]
+        generated = generated[:budget.remaining // (2 if reference_valid else 1)]
         await check(generated)
-    response.headers["X-Failing-Input-Reference"] = "available" if with_reference else "unavailable"
+    response.headers["X-Failing-Input-Reference"] = "available" if reference_valid else "unavailable"
     response.headers["X-Failing-Input-Skipped-Cases"] = ", ".join(skipped)
     response.headers["X-Failing-Input-Budget"] = "exhausted" if budget.exhausted else "ok"
-    if not with_reference:
+    if not reference_valid:
         response.headers["X-Failing-Input-Scope"] = "crash-and-timeout-only"
-    final = as_response(payload, step, records, with_reference, budget.exhausted)
+    final = as_response(payload, step, records, reference_valid, budget.exhausted)
     request.state.error_code = step.error_code
     return final
