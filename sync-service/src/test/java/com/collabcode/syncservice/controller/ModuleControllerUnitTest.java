@@ -39,6 +39,8 @@ class ModuleControllerUnitTest {
     private RoomRegistry roomRegistry;
     private RoomService roomService;
     private ModuleService moduleService;
+    private Member host;
+    private Member guest;
     private final List<Map<String, Object>> broadcasts = new ArrayList<>();
 
     private static final String OPEN_ROOM_ID = "openRoom1234567890123";
@@ -67,6 +69,8 @@ class ModuleControllerUnitTest {
         roomService.join(OPEN_ROOM_ID, HOST_SESSION, "Host", OWNER_TOKEN);
         roomService.join(OPEN_ROOM_ID, GUEST_SESSION, "Guest", null);
         roomService.join(OPEN_ROOM_ID, OBSERVER_SESSION, "Observer", null);
+        host = roomService.findMemberBySession(OPEN_ROOM_ID, HOST_SESSION);
+        guest = roomService.findMemberBySession(OPEN_ROOM_ID, GUEST_SESSION);
         com.collabcode.syncservice.room.Member obs = roomService.findMemberBySession(OPEN_ROOM_ID, OBSERVER_SESSION);
         obs.setRole(com.collabcode.syncservice.room.Role.OBSERVER);
 
