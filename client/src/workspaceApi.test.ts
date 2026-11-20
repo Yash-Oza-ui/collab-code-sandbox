@@ -472,4 +472,4 @@ describe('revokeWriteAccess', () => {
       expect(res.code).toBe('INVALID_REQUEST')
     }
   })
-}))
+})
