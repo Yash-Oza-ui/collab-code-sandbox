@@ -15,6 +15,8 @@ export interface WorkspacePanelProps {
   onRequestModule?: (name: string) => Promise<void> | void
   onApproveModule?: (moduleId: string, ownerMemberId?: string) => Promise<void> | void
   onDeclineModule?: (moduleId: string) => Promise<void> | void
+  onGrantWriteAccess?: (moduleId: string, memberId: string) => Promise<void> | void
+  onRevokeWriteAccess?: (moduleId: string, memberId: string) => Promise<void> | void
   creationError?: string | null
   isCreating?: boolean
   roster?: Array<{ member_id: string; display_name: string; role: string }>
@@ -33,14 +35,17 @@ export default function WorkspacePanel({
   onRequestModule,
   onApproveModule,
   onDeclineModule,
+  onGrantWriteAccess,
+  onRevokeWriteAccess,
   creationError,
   isCreating = false,
   roster = [],
-  myMemberId: _myMemberId,
+  myMemberId,
 }: WorkspacePanelProps) {
   const [newModuleName, setNewModuleName] = useState('')
   const [requestModuleName, setRequestModuleName] = useState('')
   const [selectedOwners, setSelectedOwners] = useState<Record<string, string>>({})
+  const [expandedWriters, setExpandedWriters] = useState<Record<string, boolean>>({})
 
   const handleCreateSubmit = (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault()
@@ -137,6 +142,78 @@ export default function WorkspacePanel({
                 >
                   Owner: {ownerName}
                 </span>
+
+                {/* Write Access Control (US-43 / FR22.1) */}
+                {!m.pending && (isHost || (myMemberId && m.owner_member_id === myMemberId)) && (
+                  <div className="module-writers-control" data-testid={`writers-control-${m.module_id}`}>
+                    <button
+                      type="button"
+                      className="toggle-writers-btn"
+                      data-testid={`toggle-writers-${m.module_id}`}
+                      aria-expanded={expandedWriters[m.module_id] ? 'true' : 'false'}
+                      onClick={() =>
+                        setExpandedWriters((prev) => ({
+                          ...prev,
+                          [m.module_id]: !prev[m.module_id],
+                        }))
+                      }
+                    >
+                      Write access ({(m.writers || []).length + 1})
+                    </button>
+                    {expandedWriters[m.module_id] && (
+                      <div className="module-writers-dropdown" data-testid={`writers-dropdown-${m.module_id}`}>
+                        <span className="writers-dropdown-title">Manage write access:</span>
+                        <ul className="writers-participants-list" data-testid={`writers-list-${m.module_id}`}>
+                          {roster.map((p) => {
+                            const isOwner = p.member_id === m.owner_member_id
+                            const isWriter = isOwner || (m.writers || []).includes(p.member_id)
+                            return (
+                              <li
+                                key={p.member_id}
+                                className="writer-participant-item"
+                                data-testid={`writer-item-${m.module_id}-${p.member_id}`}
+                              >
+                                <label className="writer-switch-label">
+                                  <input
+                                    type="checkbox"
+                                    role="switch"
+                                    className="writer-toggle-switch"
+                                    data-testid={`writer-toggle-${m.module_id}-${p.member_id}`}
+                                    aria-label={`Give write access to ${p.display_name} for ${m.name}`}
+                                    checked={isWriter}
+                                    disabled={isOwner}
+                                    onChange={(e) => {
+                                      if (isOwner) return
+                                      if (e.target.checked) {
+                                        void onGrantWriteAccess?.(m.module_id, p.member_id)
+                                      } else {
+                                        void onRevokeWriteAccess?.(m.module_id, p.member_id)
+                                      }
+                                    }}
+                                  />
+                                  <span className="writer-display-name">{p.display_name}</span>
+                                  {isOwner && <span className="writer-owner-tag">(Owner)</span>}
+                                </label>
+                              </li>
+                            )
+                          })}
+                        </ul>
+                      </div>
+                    )}
+                  </div>
+                )}
+                {!m.pending && !(isHost || (myMemberId && m.owner_member_id === myMemberId)) && (
+                  <span
+                    className="module-access-badge"
+                    data-testid={`access-badge-${m.module_id}`}
+                  >
+                    {m.owner_member_id === myMemberId
+                      ? 'Owner'
+                      : (m.writers || []).includes(myMemberId || '')
+                        ? 'Writer'
+                        : 'Read-only'}
+                  </span>
+                )}
               </li>
             )
           })}

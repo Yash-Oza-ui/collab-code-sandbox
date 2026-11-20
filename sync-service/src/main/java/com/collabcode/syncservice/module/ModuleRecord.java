@@ -29,6 +29,18 @@ public final class ModuleRecord {
     public String name() { return name; }
     public String ownerMemberId() { return ownerMemberId; }
     public Set<String> writers() { return writers; }
+    public synchronized boolean addWriter(String memberId) {
+        if (memberId == null || memberId.isBlank()) {
+            return false;
+        }
+        return writers.add(memberId);
+    }
+    public synchronized boolean removeWriter(String memberId) {
+        if (memberId == null) {
+            return false;
+        }
+        return writers.remove(memberId);
+    }
     public boolean runnable() { return runnable; }
     public void setRunnable(boolean runnable) { this.runnable = runnable; }
     public boolean isEntry() { return isEntry; }
