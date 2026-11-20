@@ -21,7 +21,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  *
  * <p>Keyed by room so records can be deleted atomically with the room (FR32, US-56).
  * Supports queries by room and {@code input_hash} with newest-first ordering
- * for slowdown baseline calculation (US-68).
+ * for room-scoped run-history queries (US-52 / US-68).
  */
 @Component
 public class RunRecordStore {
@@ -59,8 +59,16 @@ public class RunRecordStore {
         long seq = sequenceGenerator.incrementAndGet();
         Instant ranAt = parseInstantOrNull(record.getRanAt());
         StoredEntry entry = new StoredEntry(record, ranAt != null ? ranAt : clock.instant(), seq);
-        recordsByRoom.computeIfAbsent(record.getRoomId(), k -> new CopyOnWriteArrayList<>())
-                .add(entry);
+        // Perform insertion under the same per-room map operation as retention deletion.
+        // Otherwise a sweep can remove an empty list after computeIfAbsent, causing
+        // the new run to be added to a detached list and silently lost.
+        recordsByRoom.compute(record.getRoomId(), (roomId, entries) -> {
+            if (entries == null) {
+                entries = new CopyOnWriteArrayList<>();
+            }
+            entries.add(entry);
+            return entries;
+        });
     }
 
     /**
@@ -75,7 +83,8 @@ public class RunRecordStore {
     /**
      * Delete runs strictly older than {@code cutoff} across all rooms.
      * The same room-scoped deletion primitive is used by room deletion.
-     * Expired runs immediately disappear from both general and baseline queries.
+     * Expired runs immediately disappear from canonical sync-service queries;
+     * ai-ml-service owns its separate slowdown baseline measurements.
      */
     public int deleteOlderThan(Instant cutoff) {
         java.util.Objects.requireNonNull(cutoff, "cutoff");
