@@ -350,6 +350,23 @@ export interface RunResultMessage {
   [key: string]: unknown
 }
 
+export interface AnalysisResultMessage {
+  type: 'analysis-result'
+  request_id: string
+  analysis_id: string
+  room_id: string
+  task: string
+  status: 'ok' | 'fallback' | 'error'
+  ai_step: {
+    status: 'ok' | 'skipped'
+    error_code: string | null
+    [key: string]: unknown
+  }
+  result?: Record<string, unknown>
+  message: string
+  [key: string]: unknown
+}
+
 export interface ConnectAwarenessWsOptions {
   roomId: string
   displayName?: string
@@ -375,6 +392,8 @@ export interface ConnectAwarenessWsOptions {
   onEditRejected?: (msg: EditRejectedMessage) => void
   /** A run finished in this room (T-17 section 3.6); delivered to every participant. */
   onRunResult?: (msg: RunResultMessage) => void
+  /** An AI analysis completed or fell back in this room (T-18 / US-78). */
+  onAnalysisResult?: (msg: AnalysisResultMessage) => void
   onError?: (event: Event) => void
   onClose?: (event: CloseEvent) => void
   onDocError?: (event: Event) => void
@@ -422,6 +441,7 @@ export function connectAwarenessWs(
     onHostGranted,
     onEditRejected,
     onRunResult,
+    onAnalysisResult,
     onError,
     onClose,
     onDocError,
@@ -914,6 +934,8 @@ export function connectAwarenessWs(
             onEditRejected?.(msg as EditRejectedMessage)
           } else if (msg.type === 'run-result') {
             onRunResult?.(msg as RunResultMessage)
+          } else if (msg.type === 'analysis-result') {
+            onAnalysisResult?.(msg as AnalysisResultMessage)
           }
         } catch {
           // ignore non-json control frames

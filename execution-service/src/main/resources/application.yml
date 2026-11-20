@@ -40,6 +40,11 @@ app:
   internal:
     token: ${INTERNAL_API_TOKEN:}
 
+  # AI/ML service connection (US-78, NFR9, T-18)
+  ai-ml-service:
+    url: ${AI_ML_SERVICE_URL:http://localhost:8000}
+    timeout-seconds: ${AI_ML_TIMEOUT_SECONDS:5}
+
   # ---------------------------------------------------------------
   # Resource limits for sandboxed code execution (DR3, NFR4, US-13)
   # Values are configured defaults; never hard-coded in Java (DR3).

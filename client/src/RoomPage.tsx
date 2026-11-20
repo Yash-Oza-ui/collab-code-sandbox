@@ -18,6 +18,7 @@ import {
 import {
   connectAwarenessWs,
   getCollabSessionId,
+  type AnalysisResultMessage,
   type AwarenessWsConnection,
   type JoinedMessage,
   type RosterMember,
@@ -146,6 +147,7 @@ export default function RoomPage(props: RoomPageProps = {}) {
   const [pendingName, setPendingName] = useState<string | null>(null)
   const [currentLanguage, setCurrentLanguage] = useState<SupportedLanguage>('python')
   const [runOutput, setRunOutput] = useState<RunResponseData | null>(null)
+  const [analysisResults, setAnalysisResults] = useState<Record<string, AnalysisResultMessage>>({})
   // Role from the server's `joined` or `roster` message (T-10 Host badge / US-27 Observer mode)
   const [roomMode, setRoomMode] = useState<{ mode: string; detail?: string } | null>(null)
   const [role, setRole] = useState<string | null>(null)
@@ -585,6 +587,12 @@ export default function RoomPage(props: RoomPageProps = {}) {
         onRunResult: (msg) => {
           const parsed = parseRunResultFrame(msg, roomId)
           if (parsed.valid) showRunResult(parsed.data)
+        },
+        onAnalysisResult: (msg) => {
+          setAnalysisResults((prev) => ({
+            ...prev,
+            [msg.request_id]: msg,
+          }))
         },
         onEditRejected: (msg) => {
           let reasonText = 'You do not have permission to edit this document.'
@@ -1192,7 +1200,12 @@ export default function RoomPage(props: RoomPageProps = {}) {
         disabled={runDisabled}
         disabledReason={runDisabledReason}
       >
-        {displayRunOutput ? <RunOutputPanel result={displayRunOutput} /> : null}
+        {displayRunOutput ? (
+          <RunOutputPanel
+            result={displayRunOutput}
+            analysisResult={analysisResults[displayRunOutput.request_id] ?? null}
+          />
+        ) : null}
       </RunPanel>
       <div className="room-editor">
         <Editor
