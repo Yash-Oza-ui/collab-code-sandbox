@@ -1,7 +1,9 @@
 package com.collabcode.syncservice.run;
 
 import org.springframework.stereotype.Component;
+import org.springframework.beans.factory.annotation.Autowired;
 
+import java.time.Clock;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
@@ -12,6 +14,7 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * In-memory store for {@link RunRecord} entries held by {@code sync-service} (FR29, US-52, T-18 Decision 9).
@@ -34,6 +37,17 @@ public class RunRecordStore {
 
     private final Map<String, List<StoredEntry>> recordsByRoom = new ConcurrentHashMap<>();
     private final AtomicLong sequenceGenerator = new AtomicLong(0);
+    private final Clock clock;
+
+    @Autowired
+    public RunRecordStore() {
+        this(Clock.systemUTC());
+    }
+
+    /** Injectable clock makes retention tests deterministic. */
+    public RunRecordStore(Clock clock) {
+        this.clock = java.util.Objects.requireNonNull(clock);
+    }
 
     /**
      * Stores a new run record for its room.
@@ -43,7 +57,8 @@ public class RunRecordStore {
             return;
         }
         long seq = sequenceGenerator.incrementAndGet();
-        StoredEntry entry = new StoredEntry(record, parseInstantOrNull(record.getRanAt()), seq);
+        Instant ranAt = parseInstantOrNull(record.getRanAt());
+        StoredEntry entry = new StoredEntry(record, ranAt != null ? ranAt : clock.instant(), seq);
         recordsByRoom.computeIfAbsent(record.getRoomId(), k -> new CopyOnWriteArrayList<>())
                 .add(entry);
     }
@@ -54,11 +69,40 @@ public class RunRecordStore {
      * @return number of deleted run records (0 if the room had no records)
      */
     public int deleteByRoom(String roomId) {
+        return deleteMatching(roomId, entry -> true);
+    }
+
+    /**
+     * Delete runs strictly older than {@code cutoff} across all rooms.
+     * The same room-scoped deletion primitive is used by room deletion.
+     * Expired runs immediately disappear from both general and baseline queries.
+     */
+    public int deleteOlderThan(Instant cutoff) {
+        java.util.Objects.requireNonNull(cutoff, "cutoff");
+        int total = 0;
+        for (String roomId : recordsByRoom.keySet()) {
+            total += deleteMatching(roomId, entry -> entry.parsedRanAt.isBefore(cutoff));
+        }
+        return total;
+    }
+
+    /** One atomic per-room deletion operation shared by the sweep and room lifecycle. */
+    private int deleteMatching(String roomId, java.util.function.Predicate<StoredEntry> predicate) {
         if (roomId == null) {
             return 0;
         }
-        List<StoredEntry> removed = recordsByRoom.remove(roomId);
-        return removed != null ? removed.size() : 0;
+        AtomicInteger removed = new AtomicInteger();
+        recordsByRoom.computeIfPresent(roomId, (key, entries) -> {
+            entries.removeIf(entry -> {
+                if (predicate.test(entry)) {
+                    removed.incrementAndGet();
+                    return true;
+                }
+                return false;
+            });
+            return entries.isEmpty() ? null : entries;
+        });
+        return removed.get();
     }
 
     /** Alias for {@link #deleteByRoom(String)}. */

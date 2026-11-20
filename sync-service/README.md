@@ -334,6 +334,14 @@ Transmits control messages and run execution results from backend services to ac
   - `GET /internal/rooms/{room_id}/runs[?input_hash=<sha256>]` — returns `{"room_id": "...", "runs": [...]}` ordered **newest first** (filtered by `input_hash` when supplied, for US-68 slowdown baselines). Returns `401 UNAUTHORIZED` on invalid token and `404 ROOM_NOT_FOUND` on unknown/closed rooms.
   - `DELETE /internal/rooms/{room_id}/runs` — deletes all run records for `room_id` (`RunRecordStore.deleteByRoom`) and returns `{"room_id": "...", "deleted": <count>}`. Closing or deleting a room via `RoomService.closeRoom` / `RoomService.deleteRoom` also purges its run records automatically (FR32 / US-56).
 
+### 6.4 Execution History Retention (FR15 / US-30 / CR11)
+
+- Default retention is **86,400 seconds (about 24 hours)**. This is **provisional**, not the final FR15 decision; Sprint 6 will confirm the period. Override using `APP_RUN_HISTORY_RETENTION_SECONDS` in the host environment (positive integer).
+- The server sweeps old records every **60,000 ms (one minute)** by default; override `APP_RUN_HISTORY_SWEEP_INTERVAL_MS`. The sweep uses a clock-injectable implementation for deterministic tests and logs **record counts only**, never user content.
+- Runs older than the cutoff are removed from the same `RunRecordStore` used by both `GET /internal/rooms/{room_id}/runs` and the US-68 matching-`input_hash` slowdown baseline query. Room closure/deletion still removes **all** the room's run records immediately through the shared per-room deletion function, independent of age. Live room code and CRDT documents are untouched by the retention sweep.
+- **CR11 check:** US-68's slowdown baseline needs **at least 3 earlier runs with the same `input_hash`** (`docs/ai-ml-contract.md`, §16.2). A normal room session that executes the same input 3 or more times inside 24 hours retains those runs and supports the baseline. Sessions with fewer than 3 comparable runs will still be in baseline-establishing mode; sessions spanning more than 24 hours may lose earlier samples. This adequacy assumption must be reevaluated before the Sprint 6 period is finalized.
+- `ai-ml-service` has separate room-scoped measurements; **US-56** removes them via `DELETE /v1/rooms/{room_id}/state` on room deletion. US-30 intentionally does **not** add a second timer to ai-ml-service.
+
 ---
 
 ## 7. Known Limitations
