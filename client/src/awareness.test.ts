@@ -1,4 +1,8 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+import {
+  applyAwarenessUpdate,
+  encodeAwarenessUpdate,
+} from 'y-protocols/awareness'
 import * as Y from 'yjs'
 import {
   applyRosterNamesToAwareness,
@@ -57,6 +61,54 @@ describe('awareness', () => {
       doc.destroy()
     }
   })
+
+  it('removes a remote collaborator after 30 seconds without awareness updates', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+
+    const aliceDoc = new Y.Doc()
+    const bobDoc = new Y.Doc()
+    const aliceAwareness = createAwareness(aliceDoc)
+    const bobAwareness = createAwareness(bobDoc)
+
+    try {
+      bobAwareness.setLocalState({
+        user: { name: 'Bob', color: '#2563eb' },
+      })
+
+      const bobClientID = bobAwareness.clientID
+      const removedClients: number[] = []
+
+      aliceAwareness.on('change', ({ removed }: { removed: number[] }) => {
+        removedClients.push(...removed)
+      })
+
+      applyAwarenessUpdate(
+        aliceAwareness,
+        encodeAwarenessUpdate(bobAwareness, [bobClientID]),
+        'test',
+      )
+
+      expect(aliceAwareness.getStates().has(bobClientID)).toBe(true)
+
+      // Simulate Bob's last awareness update being 31 seconds old.
+      const bobMeta = aliceAwareness.meta.get(bobClientID)
+      expect(bobMeta).toBeDefined()
+
+      bobMeta!.lastUpdated = Date.now() - 31_000
+
+      await vi.advanceTimersByTimeAsync(3_000)
+
+      expect(aliceAwareness.getStates().has(bobClientID)).toBe(false)
+      expect(removedClients).toContain(bobClientID)
+    } finally {
+      aliceAwareness.destroy()
+      bobAwareness.destroy()
+      aliceDoc.destroy()
+      bobDoc.destroy()
+      vi.useRealTimers()
+    }
+  })
+
   it('uses roster names for remote cursors and never shows forged awareness text', () => {
     const doc = new Y.Doc()
     const awareness = createAwareness(doc)
@@ -108,5 +160,48 @@ describe('awareness', () => {
     }
   })
 
+  it('ignores forged awareness names/roles and projects authoritative roster names by member_id', () => {
+    const doc = new Y.Doc()
+    const localAwareness = createAwareness(doc)
+    const remoteClientId = localAwareness.clientID + 1
+
+    localAwareness.getStates().set(remoteClientId, {
+      user: {
+        name: 'Spoofed Host',
+        color: '#2563eb',
+        member_id: 'm_obs',
+        role: 'HOST',
+      },
+    })
+
+    applyRosterNamesToAwareness(localAwareness, [
+      { member_id: 'm_obs', display_name: 'Real Observer' },
+    ])
+
+    const projected = localAwareness.getStates().get(remoteClientId) as {
+      user?: { name?: string; member_id?: string; role?: string }
+    }
+    expect(projected.user?.name).toBe('Real Observer')
+    expect(projected.user?.member_id).toBe('m_obs')
+
+    // Unknown/forged member_id must not display the claimed name
+    localAwareness.getStates().set(remoteClientId, {
+      user: {
+        name: 'Fake Admin',
+        color: '#e11d48',
+        member_id: 'm_forged',
+      },
+    })
+
+    applyRosterNamesToAwareness(localAwareness, [
+      { member_id: 'm_obs', display_name: 'Real Observer' },
+    ])
+
+    const unknownProjected = localAwareness.getStates().get(remoteClientId) as {
+      user?: { name?: string }
+    }
+    expect(unknownProjected.user?.name).toBe('Unknown participant')
+    doc.destroy()
+  })
 })
 

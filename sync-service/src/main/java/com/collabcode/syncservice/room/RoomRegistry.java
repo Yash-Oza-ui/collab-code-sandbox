@@ -103,6 +103,23 @@ public class RoomRegistry {
     }
 
     /**
+     * Return all open, successfully joined control sessions in a room.
+     * Excludes unjoined and APPROVAL_PENDING sockets.
+     */
+    public List<WebSocketSession> getJoinedControlSessions(String roomId) {
+        List<WebSocketSession> raw = rooms.getOrDefault(roomId, Collections.emptyList());
+        List<WebSocketSession> result = new ArrayList<>(raw.size());
+        for (WebSocketSession s : raw) {
+            if (s.isOpen()
+                    && s.getAttributes().get("docId") == null
+                    && Boolean.TRUE.equals(s.getAttributes().get("joined"))) {
+                result.add(s);
+            }
+        }
+        return result;
+    }
+    
+    /**
      * Return all open control sessions in a room whose session_id matches any of
      * the requested session IDs. Used by targeted internal broadcast (T-17 V2.10).
      *

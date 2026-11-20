@@ -210,6 +210,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: tests/integration/requirements.txt
+
+      - name: Install integration test dependencies
+        run: python -m pip install -r tests/integration/requirements.txt
+
       - name: Create .env from .env.example (no secrets in the repo, NFR10)
         run: cp .env.example .env
 

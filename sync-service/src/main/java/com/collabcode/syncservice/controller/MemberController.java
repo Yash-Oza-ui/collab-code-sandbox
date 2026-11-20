@@ -7,6 +7,7 @@ import com.collabcode.syncservice.room.Room;
 import com.collabcode.syncservice.room.RoomMessages;
 import com.collabcode.syncservice.room.RoomService;
 import com.collabcode.syncservice.room.RoomStore;
+import com.collabcode.syncservice.handler.ControlHandler;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.PatchMapping;
@@ -40,10 +41,15 @@ public class MemberController {
 
     private final RoomStore store;
     private final RoomService roomService;
+    private final ControlHandler controlHandler;
 
-    public MemberController(RoomStore store, RoomService roomService) {
+    public MemberController(
+            RoomStore store,
+            RoomService roomService,
+            ControlHandler controlHandler) {
         this.store = store;
         this.roomService = roomService;
+        this.controlHandler = controlHandler;
     }
 
     @PatchMapping("/rooms/{roomId}/members/{memberId}")
@@ -102,11 +108,9 @@ public class MemberController {
             // Removed between the lookup and the change.
             return error(HttpStatus.NOT_FOUND, "MEMBER_NOT_FOUND", "Member not found in this room.");
         }
-        // The role change is applied to the server model and returned as it
-        // appears in the roster (V2.17). Broadcasting the new roster to the room
-        // (V2.17 rule 4) and the edit-rejected handling for a now-Observer
-        // (rule 3) are done by the control-socket layer (the T-20 socket split),
-        // which is not yet in main.
+        controlHandler.broadcastRoster(roomId);
+        // The updated role is now part of the server-authoritative roster.
+        // Broadcast it to all connected control sockets (V2.17 rule 4).
         return ResponseEntity.ok(RoomMessages.memberEntry(room, updated));
     }
 

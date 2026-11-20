@@ -183,6 +183,12 @@ public class RoomService {
     }
 
     /**
+     * Remove a disconnected member from the room roster without blocking them.
+     * Frees their display_name for future joins while keeping US-28 block
+     * semantics exclusive to removeMember().
+     */
+
+    /**
      * Re-admit a member (US-28, V2.18): remove the one block entry with this
      * member_id. Returns false if no block entry matches (404 MEMBER_NOT_FOUND).
      */
