@@ -80,4 +80,10 @@ class ExecutionLimitsPropertiesTest {
         assertThat(limits.getMaxRunsPerRequest()).isGreaterThanOrEqualTo(1);
         assertThat(limits.getBudgetRetryAfterSeconds()).isGreaterThan(0);
     }
+
+    @Test
+    @DisplayName("sanitizer-memory-mb has a configured value >= 128 MB (DR3, DR5, US-73)")
+    void sanitizerMemoryMb_hasConfiguredValue() {
+        assertThat(limits.getSanitizerMemoryMb()).isGreaterThanOrEqualTo(128);
+    }
 }

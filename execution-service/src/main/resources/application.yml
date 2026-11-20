@@ -57,6 +57,8 @@ app:
       wall-time-seconds: 5
       # NFR4.2 – maximum memory per container (megabytes, swap disabled)
       memory-mb: 128
+      # DR3 / DR5 / US-73 – maximum memory per container for sanitizer runs (megabytes)
+      sanitizer-memory-mb: 512
       # NFR4.3 – maximum number of processes / threads inside the container
       pids-limit: 64
       # NFR4.4 – maximum total output (stdout + stderr combined, bytes)

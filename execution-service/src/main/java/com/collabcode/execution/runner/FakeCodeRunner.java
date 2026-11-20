@@ -121,6 +121,135 @@ public class FakeCodeRunner implements CodeRunner {
                 .filter(c -> c != null)
                 .collect(java.util.stream.Collectors.joining("\n"));
 
+        // Case 2.5: Sanitizer run simulation (US-73, FR39.1, FR39.2)
+        if (spec.isSanitizer()) {
+            if (code.contains("clean_sanitizer") || code.contains("SANITIZER_CLEAN")) {
+                return new ExecutionResult(
+                        "SANITIZER_CLEAN\n",
+                        "",
+                        0,
+                        15.0,
+                        4.2,
+                        false,
+                        false,
+                        null,
+                        false,
+                        null,
+                        compileTime,
+                        null
+                );
+            }
+            if (code.contains("non_sanitizer_crash")) {
+                return new ExecutionResult(
+                        "",
+                        "Segmentation fault (core dumped)\n",
+                        139,
+                        15.0,
+                        4.2,
+                        false,
+                        false,
+                        "non_zero_exit",
+                        false,
+                        "Program exited with a non-zero status.",
+                        compileTime,
+                        null
+                );
+            }
+            if (code.contains("heap-buffer-overflow")) {
+                String asanReport = "==4210==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x602000000014\n" +
+                        "READ of size 4 at 0x602000000014 thread T0\n" +
+                        "    #0 0x401233 in process_buffer /workspace/solution.cpp:14\n";
+                return new ExecutionResult(
+                        "",
+                        asanReport,
+                        1,
+                        15.0,
+                        4.2,
+                        false,
+                        false,
+                        "non_zero_exit",
+                        false,
+                        null,
+                        compileTime,
+                        null
+                );
+            }
+            if (code.contains("stack-buffer-overflow")) {
+                String asanReport = "==5120==ERROR: AddressSanitizer: stack-buffer-overflow on address 0x7ffe12345678\n" +
+                        "WRITE of size 4 at 0x7ffe12345678 thread T0\n" +
+                        "    #0 0x4011aa in vulnerable_copy /workspace/solution.c:20\n";
+                return new ExecutionResult(
+                        "",
+                        asanReport,
+                        1,
+                        15.0,
+                        4.2,
+                        false,
+                        false,
+                        "non_zero_exit",
+                        false,
+                        null,
+                        compileTime,
+                        null
+                );
+            }
+            if (code.contains("use-after-free")) {
+                String asanReport = "==7032==ERROR: AddressSanitizer: heap-use-after-free on address 0x602000000010\n" +
+                        "READ of size 4 at 0x602000000010 thread T0\n" +
+                        "    #0 0x401222 in read_node /workspace/solution.cpp:32\n";
+                return new ExecutionResult(
+                        "",
+                        asanReport,
+                        1,
+                        15.0,
+                        4.2,
+                        false,
+                        false,
+                        "non_zero_exit",
+                        false,
+                        null,
+                        compileTime,
+                        null
+                );
+            }
+            if (code.contains("double-free")) {
+                String asanReport = "==8192==ERROR: AddressSanitizer: attempting double-free on 0x602000000010 in thread T0:\n" +
+                        "    #0 0x7f8812 in free (/usr/lib/x86_64-linux-gnu/libasan.so.6+0xb2123)\n" +
+                        "    #1 0x401290 in clean_memory /workspace/solution.c:25\n";
+                return new ExecutionResult(
+                        "",
+                        asanReport,
+                        1,
+                        15.0,
+                        4.2,
+                        false,
+                        false,
+                        "non_zero_exit",
+                        false,
+                        null,
+                        compileTime,
+                        null
+                );
+            }
+            if (code.contains("signed-integer-overflow")) {
+                String ubsanReport = "/sandbox/code/solution.c:14:5: runtime error: signed integer overflow: 2147483647 + 1 cannot be represented in type 'int'\n";
+                return new ExecutionResult(
+                        "",
+                        ubsanReport,
+                        1,
+                        15.0,
+                        4.2,
+                        false,
+                        false,
+                        "non_zero_exit",
+                        false,
+                        null,
+                        compileTime,
+                        null
+                );
+            }
+        }
+
         // Case 3: timeout / infinite loop simulation (US-13, NFR4.1)
         if (code.contains("infinite_loop") || code.contains("while True: pass") || code.contains("while true")) {
             return new ExecutionResult(

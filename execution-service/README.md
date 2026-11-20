@@ -428,6 +428,7 @@ user-visible `run-result` messages.
 | `app.execution.limits.aggregate-time-budget-ms`   | `20000` | Per-request aggregate wall-clock budget (ms, NFR14)            |
 | `app.execution.limits.max-runs-per-request`       | `10`    | Maximum number of runs allowed per repeated-run request (NFR14)|
 | `app.execution.limits.budget-retry-after-seconds` | `30`    | Sent in `Retry-After` and `error.retry_after_seconds` on 429   |
+| `app.execution.limits.sanitizer-memory-mb`        | `512`   | Maximum memory per container for sanitizer runs (MB, DR3, DR5) |
 
 ### `RUN_BUDGET_EXCEEDED` error shape (`docs/examples/v2-error-run-budget-exceeded.json`)
 
