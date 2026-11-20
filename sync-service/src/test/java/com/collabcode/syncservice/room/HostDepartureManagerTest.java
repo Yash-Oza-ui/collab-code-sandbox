@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.web.socket.CloseStatus;
 import org.springframework.web.socket.WebSocketSession;
 
+import java.lang.reflect.Proxy;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneId;
@@ -13,8 +14,6 @@ import java.util.HashMap;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.ArgumentMatchers.argThat;
-import static org.mockito.Mockito.*;
 
 class HostDepartureManagerTest {
     private static final String ROOM_ID = "Us55HostLeftRoom000000AA";
@@ -25,6 +24,7 @@ class HostDepartureManagerTest {
     private MutableClock clock;
     private RoomLimitsProperties config;
     private HostDepartureManager manager;
+    private final Map<String, CloseStatus> closedSockets = new HashMap<>();
 
     @BeforeEach
     void setup() {
@@ -58,8 +58,8 @@ class HostDepartureManagerTest {
         clock.advanceMillis(1);
         manager.checkExpiredDepartures();
         assertThat(room.isClosed()).isTrue();
-        verify(guest).close(argThat(status -> status.getCode() == 4410));
-        verify(doc).close(argThat(status -> status.getCode() == 4410));
+        assertThat(closedSockets.get("ws-guest").getCode()).isEqualTo(4410);
+        assertThat(closedSockets.get("ws-doc").getCode()).isEqualTo(4410);
         assertThat(service.join(ROOM_ID, "new", "New", null).isJoined()).isFalse();
         assertThat(service.join(ROOM_ID, "new", "New", null).getRefusedReason()).isEqualTo("ROOM_CLOSED");
     }
@@ -146,16 +146,33 @@ class HostDepartureManagerTest {
         assertThat(room.isClosed()).isTrue();
     }
 
-    private static WebSocketSession socket(String id, String clientSessionId, boolean control) {
-        WebSocketSession socket = mock(WebSocketSession.class);
+    /** A JDK proxy avoids Mockito / Byte Buddy instrumentation of WebSocketSession.
+     *  This keeps the tests compatible with newer JDKs used in CI.
+     */
+    private WebSocketSession socket(String id, String clientSessionId, boolean control) {
         Map<String, Object> attributes = new HashMap<>();
         attributes.put("sessionId", clientSessionId);
         attributes.put("joined", control);
         if (!control) attributes.put("docId", "module-1");
-        when(socket.getId()).thenReturn(id);
-        when(socket.getAttributes()).thenReturn(attributes);
-        when(socket.isOpen()).thenReturn(true);
-        return socket;
+        return (WebSocketSession) Proxy.newProxyInstance(
+                WebSocketSession.class.getClassLoader(),
+                new Class<?>[]{WebSocketSession.class},
+                (proxy, method, args) -> {
+                    switch (method.getName()) {
+                        case "getId": return id;
+                        case "getAttributes": return attributes;
+                        case "isOpen": return !closedSockets.containsKey(id);
+                        case "close":
+                            closedSockets.put(id, args != null && args.length > 0
+                                    ? (CloseStatus) args[0] : CloseStatus.NORMAL);
+                            return null;
+                        case "equals": return proxy == args[0];
+                        case "hashCode": return System.identityHashCode(proxy);
+                        case "toString": return "TestWebSocketSession(" + id + ")";
+                        default: throw new UnsupportedOperationException(
+                                "Unexpected WebSocketSession method in test: " + method.getName());
+                    }
+                });
     }
 
     private static final class MutableClock extends Clock {
