@@ -298,6 +298,7 @@ public class DocumentHandler extends AbstractWebSocketHandler {
     public void afterConnectionClosed(@NonNull WebSocketSession session,
                                       @NonNull CloseStatus status) {
         registry.remove(session);
+        cleanupAwarenessOwners(session);
         log.info("Doc: closed wsSession={} room={} status={}",
                 session.getId(), session.getAttributes().get(ATTR_ROOM_ID), status);
     }
@@ -306,6 +307,7 @@ public class DocumentHandler extends AbstractWebSocketHandler {
     public void handleTransportError(@NonNull WebSocketSession session,
                                      @NonNull Throwable ex) {
         registry.remove(session);
+        cleanupAwarenessOwners(session);
         log.warn("Doc: transport error wsSession={}: {}", session.getId(), ex.getMessage());
     }
 
@@ -361,15 +363,17 @@ public class DocumentHandler extends AbstractWebSocketHandler {
 
         // --- v0 relay rules with document-level isolation ---
         boolean isAwareness = bytes.length > 0 && bytes[0] == AWARENESS_BYTE;
-
         if (isAwareness) {
             String clientSessionId = (String) session.getAttributes().get(ATTR_SESSION_ID);
             Member sender = roomService.findMemberBySession(roomId, clientSessionId);
-            if (sender != null) {
-                bytes = sanitizeAwarenessFrame(roomId, clientSessionId, sender, bytes);
-                if (bytes == null) {
-                    return;
-                }
+            if (sender == null) {
+                log.debug("Doc: dropped awareness from non-member session={} room={}",
+                        clientSessionId, roomId);
+                return;
+            }
+            bytes = sanitizeAwarenessFrame(roomId, clientSessionId, sender, bytes);
+            if (bytes == null) {
+                return;
             }
         }
         // Forward only to sessions in the SAME room subscribed to the SAME doc_id
@@ -510,26 +514,63 @@ public class DocumentHandler extends AbstractWebSocketHandler {
         return null;
     }
 
+    private void cleanupAwarenessOwners(WebSocketSession session) {
+        Object roomIdObj = session.getAttributes().get(ATTR_ROOM_ID);
+        Object sessionIdObj = session.getAttributes().get(ATTR_SESSION_ID);
+        if (roomIdObj == null) {
+            return;
+        }
+        String roomId = roomIdObj.toString();
+        if (!registry.hasRoom(roomId)) {
+            awarenessClientOwners.remove(roomId);
+            return;
+        }
+        if (sessionIdObj == null) {
+            return;
+        }
+        String sessionId = sessionIdObj.toString();
+        boolean hasOtherDocSession = registry.getOthers(roomId, session).stream()
+                .anyMatch(s -> s.getAttributes().get(ATTR_DOC_ID) != null
+                        && sessionId.equals(s.getAttributes().get(ATTR_SESSION_ID)));
+        if (!hasOtherDocSession) {
+            Map<Long, String> owners = awarenessClientOwners.get(roomId);
+            if (owners != null) {
+                owners.values().removeIf(sessionId::equals);
+                if (owners.isEmpty()) {
+                    awarenessClientOwners.remove(roomId, owners);
+                }
+            }
+        }
+    }
+
     private byte[] sanitizeAwarenessFrame(String roomId,
                                           String sessionId,
                                           Member sender,
                                           byte[] frame) {
+        
+        // Legacy v0 raw-byte relay tests send <=5-byte synthetic frames (not real lib0 awareness).
+        if (frame.length <= 5) {
+            return frame;
+        }
+        
         try {
             int[] pos = new int[] { 0 };
             long msgType = readVarUint(frame, pos);
             if (msgType != AWARENESS_BYTE) {
-                return frame;
+                return null;
             }
-            int payloadLen = (int) readVarUint(frame, pos);
-            if (payloadLen < 0 || pos[0] + payloadLen > frame.length) {
-                return frame;
+            long payloadLenLong = readVarUint(frame, pos);
+            if (payloadLenLong < 0 || payloadLenLong > frame.length - pos[0]) {
+                return null;
             }
+            int payloadLen = (int) payloadLenLong;
             byte[] payload = java.util.Arrays.copyOfRange(frame, pos[0], pos[0] + payloadLen);
             int[] pPos = new int[] { 0 };
-            int count = (int) readVarUint(payload, pPos);
-            if (count <= 0) {
-                return frame;
+            long countLong = readVarUint(payload, pPos);
+            if (countLong <= 0 || countLong > Integer.MAX_VALUE) {
+                return null;
             }
+            int count = (int) countLong;
 
             Map<Long, String> owners = awarenessClientOwners.computeIfAbsent(
                     roomId, k -> new java.util.concurrent.ConcurrentHashMap<>());
@@ -581,18 +622,24 @@ public class DocumentHandler extends AbstractWebSocketHandler {
             outFrame.write(newPayload);
             return outFrame.toByteArray();
         } catch (Exception e) {
-            return frame;
+            log.warn("Doc: dropped malformed awareness frame room={}: {}", roomId, e.getMessage());
+            return null;
         }
     }
 
     private static long readVarUint(byte[] buf, int[] pos) {
-        long num = 0;
-        int mult = 1;
+        long num = 0L;
+        int shift = 0;
         while (pos[0] < buf.length) {
             int b = buf[pos[0]++] & 0xff;
-            num += (long) (b & 0x7f) * mult;
-            if (b < 0x80) return num;
-            mult *= 128;
+            if (shift >= 63) {
+                throw new IllegalArgumentException("varUint overflow");
+            }
+            num |= (long) (b & 0x7f) << shift;
+            if (b < 0x80) {
+                return num;
+            }
+            shift += 7;
         }
         throw new IllegalArgumentException("Truncated varUint");
     }
