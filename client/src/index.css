@@ -570,9 +570,69 @@ body {
   color: #713f12;
 }
 
+.runnable-badge {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.workspace-module-item.active .runnable-badge {
+  background: #bbf7d0;
+  color: #14532d;
+}
+
+.non-runnable-badge {
+  background: #f1f5f9;
+  color: #64748b;
+}
+
+.workspace-module-item.active .non-runnable-badge {
+  background: #e2e8f0;
+  color: #334155;
+}
+
 .pending-badge {
   background: #fed7aa;
   color: #9a3412;
+}
+
+.workspace-entry-status {
+  font-size: 0.8rem;
+  color: #475569;
+  padding: 2px 0 4px;
+}
+
+.no-entry-file-message {
+  color: #64748b;
+  font-style: italic;
+}
+
+.entry-file-indicator {
+  color: #0f172a;
+}
+
+.module-controls {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+  margin-left: 6px;
+}
+
+.module-toggle-runnable-btn,
+.module-set-entry-btn {
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 0.72rem;
+  border: 1px solid #cbd5e1;
+  background: #ffffff;
+  color: #334155;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.module-toggle-runnable-btn:hover,
+.module-set-entry-btn:hover {
+  background: #f8fafc;
+  border-color: #94a3b8;
 }
 
 .workspace-create-form {

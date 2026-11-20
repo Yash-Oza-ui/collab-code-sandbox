@@ -325,4 +325,71 @@ class ModuleServiceTest {
         assertThat(result.pending()).isFalse();
         assertThat(result.ownerMemberId()).isIn("m_host", "m_part");
     }
+
+    @Test
+    @DisplayName("Owner can mark and unmark runnable (US-46, FR20.2)")
+    void setRunnable_ownerCanToggleRunnable() {
+        ModuleRecord module = moduleService.createApprovedModule(OPEN_ROOM_ID, participant, "helper.py");
+        assertThat(module.runnable()).isTrue();
+
+        ModuleRecord unmarked = moduleService.setRunnable(OPEN_ROOM_ID, module.moduleId(), participant, false);
+        assertThat(unmarked.runnable()).isFalse();
+
+        ModuleRecord marked = moduleService.setRunnable(OPEN_ROOM_ID, module.moduleId(), participant, true);
+        assertThat(marked.runnable()).isTrue();
+    }
+
+    @Test
+    @DisplayName("Non-owner setting runnable is refused with NOT_MODULE_OWNER (US-46, FR20.2)")
+    void setRunnable_nonOwnerThrowsSecurityException() {
+        ModuleRecord module = moduleService.createApprovedModule(OPEN_ROOM_ID, participant, "helper.py");
+
+        assertThatThrownBy(() -> moduleService.setRunnable(OPEN_ROOM_ID, module.moduleId(), host, false))
+                .isInstanceOf(SecurityException.class)
+                .hasMessage("NOT_MODULE_OWNER");
+    }
+
+    @Test
+    @DisplayName("Host can set entry file and replacing it unsets previous entry file (US-46, FR20.3)")
+    void setEntry_hostCanSetAndReplaceEntryFile() {
+        ModuleRecord m1 = moduleService.createApprovedModule(OPEN_ROOM_ID, host, "main.py");
+        ModuleRecord m2 = moduleService.createApprovedModule(OPEN_ROOM_ID, participant, "app.py");
+
+        ModuleService.EntryChangeResult res1 = moduleService.setEntry(OPEN_ROOM_ID, m1.moduleId(), host, OWNER_TOKEN, true);
+        assertThat(res1.updated().isEntry()).isTrue();
+        assertThat(res1.replaced()).isNull();
+
+        ModuleService.EntryChangeResult res2 = moduleService.setEntry(OPEN_ROOM_ID, m2.moduleId(), host, OWNER_TOKEN, true);
+        assertThat(res2.updated().isEntry()).isTrue();
+        assertThat(res2.replaced()).isNotNull();
+        assertThat(res2.replaced().moduleId()).isEqualTo(m1.moduleId());
+        assertThat(res2.replaced().isEntry()).isFalse();
+        assertThat(m1.isEntry()).isFalse();
+    }
+
+    @Test
+    @DisplayName("Non-host or wrong token setting entry is refused with NOT_OWNER (US-46, FR20.3)")
+    void setEntry_nonHostOrInvalidTokenThrowsSecurityException() {
+        ModuleRecord m = moduleService.createApprovedModule(OPEN_ROOM_ID, host, "main.py");
+
+        assertThatThrownBy(() -> moduleService.setEntry(OPEN_ROOM_ID, m.moduleId(), participant, OWNER_TOKEN, true))
+                .isInstanceOf(SecurityException.class)
+                .hasMessage("NOT_OWNER");
+
+        assertThatThrownBy(() -> moduleService.setEntry(OPEN_ROOM_ID, m.moduleId(), host, "wrong-token", true))
+                .isInstanceOf(SecurityException.class)
+                .hasMessage("NOT_OWNER");
+    }
+
+    @Test
+    @DisplayName("Setting runnable or entry on non-existent module throws MODULE_NOT_FOUND")
+    void setRunnableAndEntry_unknownModuleThrows() {
+        assertThatThrownBy(() -> moduleService.setRunnable(OPEN_ROOM_ID, "mod_unknown12345678", host, true))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("MODULE_NOT_FOUND");
+
+        assertThatThrownBy(() -> moduleService.setEntry(OPEN_ROOM_ID, "mod_unknown12345678", host, OWNER_TOKEN, true))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("MODULE_NOT_FOUND");
+    }
 }

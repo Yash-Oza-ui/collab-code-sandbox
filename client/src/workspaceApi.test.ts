@@ -3,9 +3,12 @@ import {
   approveModule,
   createModule,
   declineModule,
+  friendlyWorkspaceErrorMessage,
   listModules,
   listPendingModules,
   requestModule,
+  setModuleEntry,
+  setModuleRunnable,
   validateModuleName,
 } from './workspaceApi'
 
@@ -333,5 +336,194 @@ describe('listPendingModules', () => {
         }),
       }),
     )
+  })
+})
+
+describe('friendlyWorkspaceErrorMessage', () => {
+  it('translates V2.12 error codes to plain words', () => {
+    expect(friendlyWorkspaceErrorMessage('NOT_MODULE_OWNER')).toBe(
+      'Only the module owner can change its runnable status.',
+    )
+    expect(friendlyWorkspaceErrorMessage('NOT_OWNER')).toBe(
+      'Only the room Host can designate the workspace entry file.',
+    )
+    expect(friendlyWorkspaceErrorMessage('MODULE_NOT_FOUND')).toBe(
+      'Module not found in this workspace.',
+    )
+    expect(friendlyWorkspaceErrorMessage('NAME_TAKEN')).toBe(
+      'A module with this name already exists in this workspace.',
+    )
+    expect(friendlyWorkspaceErrorMessage('UNKNOWN_CODE', 'Custom message')).toBe('Custom message')
+  })
+})
+
+describe('setModuleRunnable', () => {
+  it('sends PATCH with runnable boolean and X-Session-Id (US-46)', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        module_id: 'mod_1',
+        name: 'script.py',
+        owner_member_id: 'm_owner',
+        runnable: false,
+      }),
+    })
+
+    const res = await setModuleRunnable(
+      {
+        roomId: 'room-123',
+        sessionId: 'sess-owner',
+        fetchFn: fetchMock as unknown as typeof fetch,
+        baseUrl: 'http://localhost:8081',
+      },
+      'mod_1',
+      false,
+    )
+
+    expect(res.ok).toBe(true)
+    if (res.ok) {
+      expect(res.data.runnable).toBe(false)
+    }
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://localhost:8081/v1/rooms/room-123/modules/mod_1',
+      expect.objectContaining({
+        method: 'PATCH',
+        headers: expect.objectContaining({
+          'X-Session-Id': 'sess-owner',
+          'Content-Type': 'application/json',
+        }),
+        body: JSON.stringify({ runnable: false }),
+      }),
+    )
+  })
+
+  it('handles NOT_MODULE_OWNER refusal in plain words (US-46)', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 403,
+      json: async () => ({
+        error: { code: 'NOT_MODULE_OWNER', message: 'Not module owner' },
+      }),
+    })
+
+    const res = await setModuleRunnable(
+      {
+        roomId: 'room-123',
+        sessionId: 'sess-nonowner',
+        fetchFn: fetchMock as unknown as typeof fetch,
+        baseUrl: 'http://localhost:8081',
+      },
+      'mod_1',
+      true,
+    )
+
+    expect(res.ok).toBe(false)
+    if (!res.ok) {
+      expect(res.status).toBe(403)
+      expect(res.code).toBe('NOT_MODULE_OWNER')
+      expect(res.error).toBe('Only the module owner can change its runnable status.')
+    }
+  })
+})
+
+describe('setModuleEntry', () => {
+  it('sends PATCH with is_entry, X-Session-Id, and X-Owner-Token (US-46)', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        module_id: 'mod_1',
+        name: 'main.py',
+        owner_member_id: 'm_host',
+        is_entry: true,
+      }),
+    })
+
+    const res = await setModuleEntry(
+      {
+        roomId: 'room-123',
+        sessionId: 'sess-host',
+        ownerToken: 'token-secret',
+        fetchFn: fetchMock as unknown as typeof fetch,
+        baseUrl: 'http://localhost:8081',
+      },
+      'mod_1',
+      true,
+    )
+
+    expect(res.ok).toBe(true)
+    if (res.ok) {
+      expect(res.data.is_entry).toBe(true)
+    }
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://localhost:8081/v1/rooms/room-123/modules/mod_1',
+      expect.objectContaining({
+        method: 'PATCH',
+        headers: expect.objectContaining({
+          'X-Session-Id': 'sess-host',
+          'X-Owner-Token': 'token-secret',
+          'Content-Type': 'application/json',
+        }),
+        body: JSON.stringify({ is_entry: true }),
+      }),
+    )
+  })
+
+  it('handles NOT_OWNER refusal in plain words (US-46)', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 403,
+      json: async () => ({
+        error: { code: 'NOT_OWNER', message: 'Not owner' },
+      }),
+    })
+
+    const res = await setModuleEntry(
+      {
+        roomId: 'room-123',
+        sessionId: 'sess-nonhost',
+        fetchFn: fetchMock as unknown as typeof fetch,
+        baseUrl: 'http://localhost:8081',
+      },
+      'mod_1',
+      true,
+    )
+
+    expect(res.ok).toBe(false)
+    if (!res.ok) {
+      expect(res.status).toBe(403)
+      expect(res.code).toBe('NOT_OWNER')
+      expect(res.error).toBe('Only the room Host can designate the workspace entry file.')
+    }
+  })
+
+  it('handles MODULE_NOT_FOUND refusal in plain words (US-46)', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 404,
+      json: async () => ({
+        error: { code: 'MODULE_NOT_FOUND', message: 'Module not found' },
+      }),
+    })
+
+    const res = await setModuleEntry(
+      {
+        roomId: 'room-123',
+        sessionId: 'sess-host',
+        ownerToken: 'token-secret',
+        fetchFn: fetchMock as unknown as typeof fetch,
+        baseUrl: 'http://localhost:8081',
+      },
+      'mod_unknown',
+      true,
+    )
+
+    expect(res.ok).toBe(false)
+    if (!res.ok) {
+      expect(res.status).toBe(404)
+      expect(res.code).toBe('MODULE_NOT_FOUND')
+      expect(res.error).toBe('Module not found in this workspace.')
+    }
   })
 })
