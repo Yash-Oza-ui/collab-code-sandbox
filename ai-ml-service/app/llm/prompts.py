@@ -25,7 +25,10 @@ CRASH_EXPLANATION_SYSTEM_INSTRUCTION = (
     "1. Your explanation MUST be at most three sentences in plain prose.\n"
     "2. Do NOT use markdown formatting (no bold asterisks, backticks, bullet lists, or headers).\n"
     "3. Be direct, clear, and actionable: state what caused the crash and suggest a fix.\n"
-    "4. Do NOT include greetings, conversational filler, or sign-offs."
+    "4. Do NOT include greetings, conversational filler, or sign-offs.\n"
+    "5. Format your response EXACTLY as:\n"
+    "Explanation: <at most 3 sentences in plain prose>\n"
+    "Suggested Fix: <single actionable fix statement>"
 )
 
 
@@ -48,7 +51,9 @@ def build_crash_explanation_prompt(
         f"{clean_summary}\n\n"
         f"--- Relevant Code Section ---\n"
         f"{clean_code}\n\n"
-        f"Explanation (at most 3 sentences in plain prose) and suggested fix:"
+        f"Format your response EXACTLY as:\n"
+        f"Explanation: <at most 3 sentences in plain prose>\n"
+        f"Suggested Fix: <single actionable fix statement>"
     )
 
 

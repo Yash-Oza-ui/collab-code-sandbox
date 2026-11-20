@@ -246,16 +246,15 @@ def _build_default_prompt(request: ChainRequest) -> str:
 
     if request.request_type in ("crash-explanation", "crash_explanation"):
         summary = request.sanitizer_summary or request.error_signature or "Sanitizer crash detected."
-        snippet_lines = request.code.splitlines()
-        if request.error_line is not None and request.error_line <= len(snippet_lines):
-            relevant_code = extract_relevant_section(
-                code=request.code,
-                language=request.language,
-                function_name=request.function_name,
-                error_line=request.error_line,
-            )
+        if request.pre_sliced and request.code:
+            snippet_lines = request.code.splitlines()
+            if len(snippet_lines) <= settings.SECTION_MAX_LINES:
+                relevant_code = request.code
+            else:
+                relevant_code = "\n".join(snippet_lines[: settings.SECTION_MAX_LINES])
         else:
-            if len(snippet_lines) > settings.SECTION_MAX_LINES:
+            snippet_lines = request.code.splitlines()
+            if request.error_line is not None and request.error_line <= len(snippet_lines):
                 relevant_code = extract_relevant_section(
                     code=request.code,
                     language=request.language,
@@ -263,7 +262,15 @@ def _build_default_prompt(request: ChainRequest) -> str:
                     error_line=request.error_line,
                 )
             else:
-                relevant_code = request.code
+                if len(snippet_lines) > settings.SECTION_MAX_LINES:
+                    relevant_code = extract_relevant_section(
+                        code=request.code,
+                        language=request.language,
+                        function_name=request.function_name,
+                        error_line=request.error_line,
+                    )
+                else:
+                    relevant_code = request.code
 
         return build_crash_explanation_prompt(
             summary=summary,
@@ -566,7 +573,11 @@ async def answer(request: ChainRequest) -> ChainResponse:
             room_id,
         )
         if req_type in ("crash-explanation", "crash_explanation"):
-            local_ans, local_fix = parse_crash_explanation_output(local_model_answer, request.error_line)
+            local_ans, local_fix = parse_crash_explanation_output(
+                local_model_answer,
+                request.error_line,
+                request.error_signature,
+            )
             local_expl = local_ans
         else:
             local_ans = local_model_answer
@@ -829,7 +840,11 @@ async def answer(request: ChainRequest) -> ChainResponse:
             )
 
         if req_type in ("crash-explanation", "crash_explanation"):
-            paid_answer, suggested_fix = parse_crash_explanation_output(paid_output, request.error_line)
+            paid_answer, suggested_fix = parse_crash_explanation_output(
+                paid_output,
+                request.error_line,
+                request.error_signature,
+            )
             explanation = paid_answer
         elif req_type in ("explain", "explanation"):
             paid_answer = enforce_sentence_limit(paid_output, max_sentences=3)

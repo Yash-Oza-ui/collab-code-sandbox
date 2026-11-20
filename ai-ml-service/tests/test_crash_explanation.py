@@ -472,3 +472,98 @@ def test_crash_explanation_c_language_supported():
     assert data["ai_step"]["status"] == "ok"
     assert data["ai_step"]["suggested_fix"] == "Cast to 64-bit integer."
     assert mock_complete.call_count == 1
+
+
+def test_crash_explanation_cache_key_ignores_aslr_and_pid():
+    """Verify ASLR addresses and PIDs in sanitizer output do not pollute the cache key (Item 5)."""
+    room_id = "room-us74-cache-aslr-01"
+    clear_room(room_id)
+
+    mock_complete = AsyncMock(
+        return_value="Explanation: Buffer overflow detected.\nSuggested Fix: Add boundary check."
+    )
+
+    sanitizer_run_1 = (
+        "==12345==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x602000000014\n"
+        "READ of size 4 at 0x602000000014 thread T0\n"
+        "    #0 0x401234 in main main.cpp:14\n"
+    )
+    sanitizer_run_2 = (
+        "==98765==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x7ffd01234567\n"
+        "READ of size 4 at 0x7ffd01234567 thread T0\n"
+        "    #0 0x509876 in main main.cpp:14\n"
+    )
+
+    code = "int main() {\n  int arr[10];\n  return arr[14];\n}\n"
+
+    payload_1 = {
+        "request_id": "req-aslr-01",
+        "room_id": room_id,
+        "analysis_id": "ana-aslr-01",
+        "request_type": "crash_explanation",
+        "language": "cpp",
+        "consent": True,
+        "ai_enabled": True,
+        "sanitizer_output": sanitizer_run_1,
+        "code_snippet": code,
+    }
+
+    payload_2 = {
+        "request_id": "req-aslr-02",
+        "room_id": room_id,
+        "analysis_id": "ana-aslr-02",
+        "request_type": "crash_explanation",
+        "language": "cpp",
+        "consent": True,
+        "ai_enabled": True,
+        "sanitizer_output": sanitizer_run_2,
+        "code_snippet": code,
+    }
+
+    with patch("app.llm.client.LLMClient.complete", mock_complete):
+        resp1 = client.post("/v1/analyses/crash-explanation", json=payload_1)
+        resp2 = client.post("/v1/analyses/crash-explanation", json=payload_2)
+
+    assert resp1.status_code == 200
+    assert resp2.status_code == 200
+    assert resp2.json()["ai_step"]["status"] == "ok"
+    # Stage 1 Cache Hit: LLM should be called only ONCE despite different PIDs and addresses
+    assert mock_complete.call_count == 1
+
+
+def test_crash_explanation_neutral_fallback_for_ubsan():
+    """Verify non-buffer UBSan crashes do not receive 'Add boundary check' when unstructured (Item 6)."""
+    room_id = "room-us74-ubsan-fallback-01"
+    clear_room(room_id)
+
+    # Output without explicit Fix: header
+    mock_complete = AsyncMock(
+        return_value="The signed integer overflow occurred because values exceeded 32-bit limits."
+    )
+
+    ubsan_output = (
+        "main.cpp:25:5: runtime error: signed integer overflow: 2147483647 + 1 cannot be represented in type 'int'\n"
+    )
+
+    payload = {
+        "request_id": "req-ubsan-fallback-01",
+        "room_id": room_id,
+        "analysis_id": "ana-ubsan-fallback-01",
+        "request_type": "crash_explanation",
+        "language": "cpp",
+        "consent": True,
+        "ai_enabled": True,
+        "sanitizer_output": ubsan_output,
+        "code_snippet": "int a = 2147483647;\nint b = a + 1;",
+    }
+
+    with patch("app.llm.client.LLMClient.complete", mock_complete):
+        resp = client.post("/v1/analyses/crash-explanation", json=payload)
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["ai_step"]["status"] == "ok"
+    suggested_fix = data["ai_step"]["suggested_fix"]
+    assert suggested_fix is not None
+    assert "boundary check" not in suggested_fix.lower()
+    assert "undefined arithmetic" in suggested_fix.lower() or "inspect line" in suggested_fix.lower()

@@ -379,6 +379,7 @@ async def explain_crash(payload: CrashExplanationRequest, request: Request) -> C
         sanitizer_summary=summary,
         error_signature=err_sig,
         error_line=line_number,
+        pre_sliced=True,
         rules_first=False,
     )
     chain_resp = await chain.answer(chain_req)
@@ -389,7 +390,19 @@ async def explain_crash(payload: CrashExplanationRequest, request: Request) -> C
 
     if status_str == "ok":
         explanation = c_step.get("explanation") or chain_resp.answer
-        suggested_fix = c_step.get("suggested_fix") or (f"Add boundary check before line {line_number}." if line_number else None)
+        suggested_fix = c_step.get("suggested_fix")
+        if not suggested_fix:
+            err_lower = (error_type or "").lower()
+            if any(k in err_lower for k in ("overflow", "underflow", "shift", "zero", "divide", "float")):
+                suggested_fix = (
+                    f"Inspect line {line_number} to prevent undefined arithmetic or operations."
+                    if line_number
+                    else "Verify operand ranges and valid mathematical values."
+                )
+            elif line_number:
+                suggested_fix = f"Inspect and fix the faulty statement at line {line_number}."
+            else:
+                suggested_fix = "Verify pointer validity and operational constraints."
         ai_step = CrashAIStep(
             status="ok",
             error_code=None,
