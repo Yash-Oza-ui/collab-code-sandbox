@@ -222,9 +222,10 @@ async function main() {
 
   if (variant === 'T1-O') {
     // 5 owners (users 0..4) each request one module; Host (user 0) approves all.
+    const ext = { python: '.py', cpp: '.cpp', c: '.c', java: '.java', javascript: '.js' }[room.language] || '.py'
     const owners = Array.from({ length: Math.min(args.modules, users) }, (_, i) => i)
     const moduleIds = []
-    for (const o of owners) moduleIds.push(await requestModule(httpBase, room.room_id, sessions[o], `module-${o}`))
+    for (const o of owners) moduleIds.push(await requestModule(httpBase, room.room_id, sessions[o], `module-${o}${ext}`))
     for (const id of moduleIds) await approveModule(httpBase, room.room_id, id, sessions[0], room.owner_token)
     console.log(`[harness] ${moduleIds.length} modules requested by 5 owners and approved by Host`)
     const readers = Array.from({ length: users }, (_, i) => i).filter((i) => !owners.includes(i))
