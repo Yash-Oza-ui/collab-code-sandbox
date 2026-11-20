@@ -334,6 +334,14 @@ Transmits control messages and run execution results from backend services to ac
   - `GET /internal/rooms/{room_id}/runs[?input_hash=<sha256>]` — returns `{"room_id": "...", "runs": [...]}` ordered **newest first** (filtered by `input_hash` when supplied, for US-68 slowdown baselines). Returns `401 UNAUTHORIZED` on invalid token and `404 ROOM_NOT_FOUND` on unknown/closed rooms.
   - `DELETE /internal/rooms/{room_id}/runs` — deletes all run records for `room_id` (`RunRecordStore.deleteByRoom`) and returns `{"room_id": "...", "deleted": <count>}`. Closing or deleting a room via `RoomService.closeRoom` / `RoomService.deleteRoom` also purges its run records automatically (FR32 / US-56).
 
+### 6.4 Execution History Retention (FR15 / US-30 / CR11)
+
+- Default retention is **86,400 seconds (about 24 hours)**. This is **provisional**, not the final FR15 decision; Sprint 6 will confirm the period. Override using `APP_RUN_HISTORY_RETENTION_SECONDS` in the host environment (positive integer).
+- The server sweeps old records every **60,000 ms (one minute)** by default; override `APP_RUN_HISTORY_SWEEP_INTERVAL_MS`. The sweep uses a clock-injectable implementation for deterministic tests and logs **record counts only**, never user content.
+- Runs older than the cutoff are removed from the same `RunRecordStore` used by both `GET /internal/rooms/{room_id}/runs` and the US-68 matching-`input_hash` slowdown baseline query. Room closure/deletion still removes **all** the room's run records immediately through the shared per-room deletion function, independent of age. Live room code and CRDT documents are untouched by the retention sweep.
+- **CR11 check:** US-68's slowdown baseline needs **at least 3 earlier runs with the same `input_hash`** (`docs/ai-ml-contract.md`, §16.2). A normal room session that executes the same input 3 or more times inside 24 hours retains those runs and supports the baseline. Sessions with fewer than 3 comparable runs will still be in baseline-establishing mode; sessions spanning more than 24 hours may lose earlier samples. This adequacy assumption must be reevaluated before the Sprint 6 period is finalized.
+- `ai-ml-service` has separate room-scoped measurements; **US-56** removes them via `DELETE /v1/rooms/{room_id}/state` on room deletion. US-30 intentionally does **not** add a second timer to ai-ml-service.
+
 ---
 
 ## 7. Known Limitations
@@ -343,3 +351,21 @@ Transmits control messages and run execution results from backend services to ac
 - **Edit mode rules** (US-35, US-43): the `canEdit` flag at join is set by the Pair preset. Per-module write access in Open mode is applied in US-43 on top of the check already implemented here.
 - **ROOM_FULL / USER_BLOCKED** defined in US-63 / US-28 respectively.
 - **In-memory platform state** (T-05, `docs/decisions/platform-home.md`): room metadata and members live behind `RoomStore` in memory. A `sync-service` restart clears all rooms, so owner tokens issued before it stop working. Durable storage is a later decision.
+
+### US-55: Close room after Host departure
+
+When the final joined Host control socket disconnects, `HostDepartureManager`
+records a deadline. A returning Host cancels it; a successful US-54 transfer
+cancels the previous Host's deadline. The scheduler checks the deadline using
+an injectable `Clock` (tests use a fixed/advanceable clock).
+
+- `APP_ROOM_LIMITS_HOST_LEAVES_TIMEOUT_MS` overrides the **provisional** 30,000 ms grace period.
+- `APP_ROOM_LIMITS_HOST_LEAVES_CHECK_INTERVAL_MS` overrides the 1,000 ms deadline-check interval.
+- When the deadline expires, `closeRoom` marks the room closed and closes all
+  control and document sockets with WebSocket code `4410`.
+- A closed room is retained as an in-memory tombstone and rejects new sockets with
+  `4410`. This is the US-55/US-56 interim decision: US-56 must coordinate
+  cross-service data deletion while preserving the closed/not-found contract.
+- The client already stops retries and shows “This room has been closed” on `4410`.
+
+Test: `mvn -Dtest=HostDepartureManagerTest test` from `sync-service`.
