@@ -155,7 +155,7 @@ describe('RoomPage edit access controls (US-36, V2.21)', () => {
           wsOptions={{
             WebSocketClass: FakeSocket as unknown as typeof WebSocket,
             sessionId: SESSION_ID,
-            fetchFn,
+            fetchFn: fetchFn as unknown as typeof fetch,
           }}
         />,
       )
