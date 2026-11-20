@@ -162,7 +162,6 @@ export default function RoomPage(props: RoomPageProps = {}) {
   const [workspaceError, setWorkspaceError] = useState<string | null>(null)
   const [isCreatingModule, setIsCreatingModule] = useState(false)
   const [workspaceLanguage, setWorkspaceLanguage] = useState<string | undefined>(undefined)
-  const connRef = useRef<AwarenessWsConnection | null>(null)
   const [role, setRole] = useState<string | null>(null)
   const [myMemberId, setMyMemberId] = useState<string | null>(null)
   const [roster, setRoster] = useState<RosterMember[]>([])
@@ -986,13 +985,14 @@ export default function RoomPage(props: RoomPageProps = {}) {
       setWorkspaceError(null)
       setIsCreatingModule(true)
       const token = readOwnerToken(roomId)
+      const currentSessionId = sessionIdRef.current ?? wsOptions?.sessionId ?? getCollabSessionId()
       const syncBase = wsOptions?.syncWsUrl
         ? wsOptions.syncWsUrl.replace(/^ws/, 'http').replace(/\/ws\/rooms.*$/, '')
         : undefined
       const res = await createModule(
         {
           roomId,
-          sessionId: sessionIdRef.current,
+          sessionId: currentSessionId,
           ownerToken: token,
           baseUrl: syncBase,
           fetchFn: wsOptions?.fetchFn,
