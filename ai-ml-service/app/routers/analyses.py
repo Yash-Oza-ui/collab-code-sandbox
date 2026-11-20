@@ -37,6 +37,7 @@ from app.rules.patterns import (
     detect_slow_patterns,
     run_rule_based_analysis_with_ai_fallback,
 )
+from app.sanitizer import parse_sanitizer_report
 from app.section import extract_relevant_section
 from app.slowdown import (
     SlowdownAnalysisRequest,
@@ -134,8 +135,8 @@ class CrashExplanationResponse(BaseModel):
     request_id: str
     analysis_id: str
     task: Literal["crash_explanation"] = "crash_explanation"
-    error_type: str
-    line_number: int
+    error_type: Optional[str] = None
+    line_number: Optional[int] = None
     summary: str
     ai_step: CrashAIStep
 
@@ -338,19 +339,20 @@ async def explain_crash(payload: CrashExplanationRequest, request: Request) -> C
         )
 
     # 2. Deterministic parsing of sanitizer output (FR39.2, US-73)
-    error_type = "unknown-crash"
-    line_number = 1
-    match_err = re.search(r"AddressSanitizer:\s*([a-zA-Z0-9_\-]+)", payload.sanitizer_output)
-    if match_err:
-        error_type = match_err.group(1)
-    match_line = re.search(r":(\d+)", payload.sanitizer_output)
-    if match_line:
-        line_number = int(match_line.group(1))
-
-    summary = f"Detected {error_type} at line {line_number}."
+    parsed = parse_sanitizer_report(payload.sanitizer_output)
+    error_type = parsed.error_type
+    line_number = parsed.line_number
+    summary = parsed.summary
 
     # 3. Controlled AI pipeline (US-17, US-21, FR12.4, FR35, NFR5.3, NFR5.2, US-22, US-75)
-    if payload.consent is not True:
+    if not error_type and not summary:
+        ai_step = CrashAIStep(
+            status="ok",
+            error_code=None,
+            explanation=None,
+            suggested_fix=None,
+        )
+    elif payload.consent is not True:
         record_fallback(payload.room_id)
         ai_step = CrashAIStep(
             status="skipped",
@@ -408,7 +410,7 @@ async def explain_crash(payload: CrashExplanationRequest, request: Request) -> C
                     error_line=line_number,
                     pre_sliced=True,
                 )
-                suggested_fix = f"Add boundary check before line {line_number}."
+                suggested_fix = f"Add boundary check before line {line_number}." if line_number is not None else "Review code logic around reported failure."
                 cache.set(
                     cache_key,
                     {"explanation": explanation, "suggested_fix": suggested_fix},

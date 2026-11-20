@@ -199,6 +199,11 @@ class InternalRunControllerTest {
                 .andExpect(jsonPath("$.sanitizer_report.status").value("crashed"))
                 .andExpect(jsonPath("$.sanitizer_report.exit_code").value(2));
 
+        org.mockito.ArgumentCaptor<RunSpec> specCaptor = org.mockito.ArgumentCaptor.forClass(RunSpec.class);
+        verify(codeRunner).execute(specCaptor.capture());
+        assertThat(specCaptor.getValue().isSanitizer()).isTrue();
+        assertThat(specCaptor.getValue().getSanitizers()).containsExactly("address", "undefined");
+
         String pyBody = """
                 {
                   "request_id": "%s",

@@ -443,3 +443,18 @@ We selected **thread-safe in-memory storage** (`UsageTracker` protected by `thre
   ```
 - `GET /v1/rooms/{room_id}/usage`: Returns metrics scoped to a specific room.
 - `DELETE /v1/rooms/{room_id}/state`: Clears room-scoped counters and cache entries when closed or deleted (US-56).
+
+## Deterministic Sanitizer Crash Report Parsing (US-73, FR39.1, FR39.2, DR5)
+
+The deterministic sanitizer parser (`app.sanitizer.parse_sanitizer_report`) parses compiler diagnostics from AddressSanitizer (ASan) and UndefinedBehaviorSanitizer (UBSan) for C and C++ programs without invoking external AI models.
+
+### Recognized Error Types
+- **AddressSanitizer:** `heap-buffer-overflow`, `stack-buffer-overflow`, `global-buffer-overflow`, `heap-use-after-free`, `double-free`.
+- **UndefinedBehaviorSanitizer:** `signed-integer-overflow`, `shift-out-of-bounds`, `index-out-of-bounds`, `null-pointer-dereference`, `division-by-zero`.
+
+### Line Extraction & Edge Cases
+- **Line Extraction:** Extracts the 1-based source line from the innermost frame (e.g. `#0 0x... in func /workspace/solution.cpp:14` or `/sandbox/code/solution.c:14:5: runtime error:`).
+- **Line Not Found:** When no source line can be determined, returns `line_number=None` and formats summary as `Detected <error_type>.`.
+- **Clean Runs:** When no sanitizer error is reported and the program executes successfully, returns `error_type=None`, `line_number=None`, and `summary=""` (empty summary, not an error).
+- **Non-Sanitizer Crashes:** Standard crashes (e.g. segmentation faults without sanitizer instrumentation) preserve exit information (e.g. `Process exited with exit code 139 (no sanitizer finding).`) without inventing a sanitizer error type.
+- **Compiler Compatibility:** Tested against diagnostic outputs from GCC 12+ and Clang/LLVM 14+.
