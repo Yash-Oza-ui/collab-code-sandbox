@@ -9,16 +9,21 @@ from typing import Any, Literal, Optional
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
+from app.counters import record_fallback
 from app.llm import (
     AIDisabledError,
     ConsentMissingError,
+    CostCapReachedError,
     LLMProviderError,
     LLMRateLimitError,
     LLMTimeoutError,
     RoomRateLimitedError,
     generate_explanation,
 )
-from app.rules.patterns import run_rule_based_analysis_with_ai_fallback
+from app.rules.patterns import (
+    detect_slow_patterns,
+    run_rule_based_analysis_with_ai_fallback,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -154,6 +159,21 @@ async def explain_failure(payload: ExplainRequest, request: Request) -> ExplainR
                 status="ok",
                 error_code=None,
                 suggested_fix=explanation,
+            ),
+        )
+
+    except CostCapReachedError:
+        record_fallback(payload.room_id)
+        request.state.error_code = "COST_CAP_REACHED"
+        patterns = detect_slow_patterns(payload.code, language=payload.language)
+        return ExplainResponse(
+            request_id=payload.request_id,
+            explanation=None,
+            slow_patterns=patterns,
+            ai_step=AIStep(
+                status="skipped",
+                error_code="COST_CAP_REACHED",
+                suggested_fix=None,
             ),
         )
 
