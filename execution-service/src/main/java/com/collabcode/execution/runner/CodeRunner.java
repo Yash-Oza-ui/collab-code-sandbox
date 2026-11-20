@@ -14,7 +14,7 @@ import com.collabcode.execution.model.RunSpec;
  *  - Never execute user code on the host, even in tests (FR5.1, NFR3).
  *  - Implementations must return an ExecutionResult for every outcome.
  */
-public interface CodeRunner {
+public interface CodeRunner extends BatchRunner {
 
     /**
      * Runs code described by {@code spec}.

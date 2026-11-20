@@ -27,6 +27,7 @@ public class RunBudgetExceededException extends RuntimeException {
     private final long aggregateTimeBudgetMs;
     private final int retryAfterSeconds;
     private final List<ExecutionResult> completedResults;
+    private final List<java.util.Map<String, Object>> batchResults;
 
     public RunBudgetExceededException(
             String requestId,
@@ -37,6 +38,19 @@ public class RunBudgetExceededException extends RuntimeException {
             long aggregateTimeBudgetMs,
             int retryAfterSeconds,
             List<ExecutionResult> completedResults) {
+        this(requestId, limitKind, runsCompleted, maxRuns, elapsedTimeMs, aggregateTimeBudgetMs, retryAfterSeconds, completedResults, null);
+    }
+
+    public RunBudgetExceededException(
+            String requestId,
+            BudgetLimitKind limitKind,
+            int runsCompleted,
+            int maxRuns,
+            long elapsedTimeMs,
+            long aggregateTimeBudgetMs,
+            int retryAfterSeconds,
+            List<ExecutionResult> completedResults,
+            List<java.util.Map<String, Object>> batchResults) {
         super(formatMessage(limitKind, maxRuns, aggregateTimeBudgetMs));
         this.requestId = requestId;
         this.limitKind = limitKind;
@@ -47,6 +61,9 @@ public class RunBudgetExceededException extends RuntimeException {
         this.retryAfterSeconds = retryAfterSeconds;
         this.completedResults = completedResults != null
                 ? List.copyOf(completedResults)
+                : Collections.emptyList();
+        this.batchResults = batchResults != null
+                ? List.copyOf(batchResults)
                 : Collections.emptyList();
     }
 
@@ -69,4 +86,5 @@ public class RunBudgetExceededException extends RuntimeException {
     public long getAggregateTimeBudgetMs()          { return aggregateTimeBudgetMs; }
     public int getRetryAfterSeconds()               { return retryAfterSeconds; }
     public List<ExecutionResult> getCompletedResults() { return completedResults; }
+    public List<java.util.Map<String, Object>> getBatchResults() { return batchResults; }
 }
