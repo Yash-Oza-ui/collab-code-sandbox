@@ -208,4 +208,32 @@ class RoomServiceTest {
         assertThat(freshName.getRefusedReason()).isEqualTo("APPROVAL_PENDING");
     }
 
+    @Test
+    void setEditAccess_updatesMemberAndReturnsMember() {
+        Room room = pairRoom("teach_interview", "secret");
+        JoinOutcome guest = service.join(room.getRoomId(), "sess-guest", "Lin", null);
+        String guestId = guest.getMember().getMemberId();
+
+        assertThat(guest.getMember().isCanEdit()).isFalse();
+
+        Member updated = service.setEditAccess(room.getRoomId(), guestId, true);
+        assertThat(updated).isNotNull();
+        assertThat(updated.isCanEdit()).isTrue();
+        assertThat(guest.getMember().isCanEdit()).isTrue();
+
+        Member revoked = service.setEditAccess(room.getRoomId(), guestId, false);
+        assertThat(revoked).isNotNull();
+        assertThat(revoked.isCanEdit()).isFalse();
+        assertThat(guest.getMember().isCanEdit()).isFalse();
+    }
+
+    @Test
+    void setEditAccess_returnsNullWhenUnknownRoomOrMember() {
+        Room room = pairRoom("teach_interview", "secret");
+        service.join(room.getRoomId(), "sess-guest", "Lin", null);
+
+        assertThat(service.setEditAccess("non-existent-room", "m-1", true)).isNull();
+        assertThat(service.setEditAccess(room.getRoomId(), "non-existent-member", true)).isNull();
+    }
+
 }
