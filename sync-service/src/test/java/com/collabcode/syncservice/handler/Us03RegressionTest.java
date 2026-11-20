@@ -162,6 +162,48 @@ class Us03RegressionTest {
         verify(attackerWs, times(1)).sendMessage(any(BinaryMessage.class));
     }
 
+    @Test
+    void documentHandlerHandlesLargeClientIdsFailsClosedAndCleansUpOwners() throws Exception {
+        RoomStore store = new RoomStore();
+        Room room = new Room("room4", RoomMode.PAIR, "default", "python", "hash");
+        store.put(room);
+        RoomService roomService = new RoomService(store);
+        RoomRegistry registry = new RoomRegistry();
+        DocumentHandler docHandler = new DocumentHandler(
+                store, roomService, mock(ModuleService.class), registry);
+
+        String hostSession = "11111111-1111-4111-8111-111111111111";
+        Member host = roomService.join("room4", hostSession, "Host", null).getMember();
+        WebSocketSession hostWs = mockSession("ws-host-4", "room4", hostSession, "main", true);
+        registry.add("room4", hostWs);
+
+        // 1. Large 32-bit unsigned Yjs clientId (> Integer.MAX_VALUE) must not overflow
+        long largeClientId = 3_500_000_000L;
+        byte[] largeFrame = buildAwarenessFrame(
+                largeClientId, 1L, "{\"user\":{\"name\":\"Fake\",\"color\":\"#2563eb\"}}");
+        docHandler.handleBinaryMessage(hostWs, new BinaryMessage(largeFrame));
+        verify(hostWs, times(1)).sendMessage(any(BinaryMessage.class));
+
+        // 2. Malformed awareness frame must fail closed (dropped, not forwarded)
+        docHandler.handleBinaryMessage(hostWs, new BinaryMessage(new byte[]{1, 10, 1, 5, 1, 2, 3, 4}));
+        verify(hostWs, times(1)).sendMessage(any(BinaryMessage.class));
+
+        // 3. Non-member sender must fail closed (dropped)
+        WebSocketSession nonMemberWs = mockSession(
+                "ws-stranger", "room4", "99999999-9999-4999-9999-999999999999", "main", true);
+        registry.add("room4", nonMemberWs);
+        byte[] strangerFrame = buildAwarenessFrame(
+                99L, 1L, "{\"user\":{\"name\":\"Stranger\",\"color\":\"#e11d48\"}}");
+        docHandler.handleBinaryMessage(nonMemberWs, new BinaryMessage(strangerFrame));
+        verify(hostWs, times(1)).sendMessage(any(BinaryMessage.class));
+
+        // 4. Closing hostWs cleans up awarenessClientOwners so another session can reuse/clean state
+        docHandler.afterConnectionClosed(hostWs, CloseStatus.NORMAL);
+        docHandler.afterConnectionClosed(nonMemberWs, CloseStatus.NORMAL);
+        assertThat(registry.hasRoom("room4")).isFalse();
+        assertThat(host.getMemberId()).isNotBlank();
+    }
+
     private static byte[] buildAwarenessFrame(long clientId, long clock, String json) throws Exception {
         ByteArrayOutputStream payload = new ByteArrayOutputStream();
         writeVarUint(payload, 1);
