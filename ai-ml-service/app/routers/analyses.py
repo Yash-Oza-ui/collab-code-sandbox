@@ -343,12 +343,30 @@ async def explain_crash(payload: CrashExplanationRequest, request: Request) -> C
             ai_step=ai_step,
         )
 
-    # 3. Controlled AI pipeline using Central Method Chain (US-77, FR40.3)
+    # 3. Extract relevant localized code section around sanitizer line_number (FR40.2, US-74, US-76)
+    snippet_lines = payload.code_snippet.splitlines()
+    if line_number is not None and line_number <= len(snippet_lines):
+        localized_code = extract_relevant_section(
+            code=payload.code_snippet,
+            language=payload.language,
+            error_line=line_number,
+        )
+    else:
+        if len(snippet_lines) > settings.SECTION_MAX_LINES:
+            localized_code = extract_relevant_section(
+                code=payload.code_snippet,
+                language=payload.language,
+                error_line=line_number,
+            )
+        else:
+            localized_code = payload.code_snippet
+
+    # 4. Controlled AI pipeline using Central Method Chain (US-77, FR40.3)
     req_type = payload.request_type or "crash_explanation"
     err_sig = f"{error_type}:{line_number}" if error_type and line_number else (error_type or "")
     chain_req = ChainRequest(
         request_type=req_type,
-        code=payload.code_snippet,
+        code=localized_code,
         language=payload.language,
         room_id=payload.room_id,
         request_id=payload.request_id,
@@ -358,9 +376,10 @@ async def explain_crash(payload: CrashExplanationRequest, request: Request) -> C
         exit_code=139,
         error_output=payload.sanitizer_output,
         sanitizer_output=payload.sanitizer_output,
+        sanitizer_summary=summary,
         error_signature=err_sig,
         error_line=line_number,
-        pre_sliced=True,
+        rules_first=False,
     )
     chain_resp = await chain.answer(chain_req)
     c_step = chain_resp.ai_step

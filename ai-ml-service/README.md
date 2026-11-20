@@ -521,6 +521,27 @@ The deterministic sanitizer parser (`app.sanitizer.parse_sanitizer_report`) pars
 - **Non-Sanitizer Crashes:** Standard crashes (e.g. segmentation faults without sanitizer instrumentation) preserve exit information (e.g. `Process exited with exit code 139 (no sanitizer finding).`) without inventing a sanitizer error type.
 - **Compiler Compatibility:** Tested against diagnostic outputs from GCC 12+ and Clang/LLVM 14+.
 
+## Plain-Language Crash Explanation (US-74, FR13.1, FR39.3, FR40.2, DR5)
+
+The crash explanation endpoint (`POST /v1/analyses/crash-explanation`) generates plain-language failure explanations and suggested fixes for compiler sanitizer crashes in C and C++ programs.
+
+### 1. Language Restriction (DR5)
+- **Supported Languages:** C (`c`) and C++ (`cpp`) only.
+- **Unsupported Languages:** Any request specifying other coursework languages (e.g. `python`, `java`, `javascript`) is immediately rejected with HTTP `422 Unprocessable Entity` and error code `UNSUPPORTED_LANGUAGE` without invoking any AI models.
+
+### 2. Privacy & Data Minimization (FR40.2, US-76)
+- **Localized Code Only:** Uses `app.section.extract_relevant_section` to extract a small, bounded window of code lines centered on the crash `line_number`. Full files and unrelated modules are never sent.
+- **Dedicated Prompt:** The outbound LLM prompt contains strictly the deterministic sanitizer summary and the localized code section. Raw ASan/UBSan stack traces, container exit codes, and execution context metadata are excluded.
+- **Canary Isolation:** Code outside the localized window (including canary markers or secrets) is guaranteed never to leak into prompts.
+
+### 3. Output Limitation & Response Schema (FR13.1, T-18 v2 §16.4)
+- **Three-Sentence Cap:** The generated explanation (`ai_step.explanation`) is strictly constrained to at most three sentences in plain prose without markdown headers, bold asterisks, backticks, or filler greetings.
+- **Suggested Fix:** A practical code or algorithmic remediation is extracted and returned in `ai_step.suggested_fix`.
+- **AI Gating:** When consent is missing (`CONSENT_MISSING`), AI is disabled by Host (`AI_DISABLED`), or the monthly budget cap is reached (`COST_CAP_REACHED`), the endpoint returns HTTP 200 with deterministic `error_type`, `line_number`, and `summary` preserved, and `ai_step.status = "skipped"`.
+
+### 4. Method Chain Integration (US-77)
+- Evaluated through the central method chain (`app.chain.answer`) with `rules_first = False` to prevent code containing loops from being prematurely intercepted by complexity pattern rules.
+
 ## Cheapest-Method-First AI Chain (US-77, FR40.3, FR40.4)
 
 To minimize unnecessary external API expenditure and latency, all AI-enabled analysis and explanation endpoints (`POST /v1/analyses/complexity`, `POST /v1/analyses/crash-explanation`, `POST /v1/explain`) route requests through a single central method chain: `app.chain.answer(request)`.
