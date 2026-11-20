@@ -1440,7 +1440,7 @@ A malformed `audience` (V2.10) is also `INVALID_MESSAGE`. The new internal calls
 
 **Not decided in version 2.** These are listed so that nobody assumes they are covered:
 
-- Host controls other than modules, the Observer role (V2.17), remove / re-admit / regenerate link (V2.18), Run control (V2.20) and Pair edit access (V2.21) have no message or endpoint yet: edit requests in Pair mode (FR19.3), join approval (FR9.3), the AI switch (FR35.1), transferring the Host role (FR31.1), the audit log (FR34), export (FR33) and deleting a room (FR32). They need a contract entry before the stories that build them.
+- Host controls other than modules, the Observer role (V2.17), remove / re-admit / regenerate link (V2.18), Run control (V2.20) and Pair edit access (V2.21) have no message or endpoint yet: join approval (FR9.3), the AI switch (FR35.1), transferring the Host role (FR31.1), the audit log (FR34), export (FR33) and deleting a room (FR32). They need a contract entry before the stories that build them.
 - Reassigning the modules a removed member owned, and pruning a retired `member_id` from `writers` (V2.6, V2.18). Deferred to US-42.
 - What a run does with a module that has never been saved (FR24.1, FR25.1).
 - A joiner syncs from a connected writer: a read-only peer's sync step 2 is dropped (V2.12). If no writer is connected, a late joiner receives nothing. To be checked when the relay is built.
@@ -1842,6 +1842,71 @@ Edit access changes are made in one place in sync-service (`RoomService.setEditA
 
 ---
 
+---
+
+## V2.22 Request edit access in Pair mode (US-38) - Proposed
+
+Added so that US-38 has a contract to build on (FR19.3). In a Pair mode room, a participant without edit access can ask the Host for edit access over the control socket. The Host sees the pending request and approves or declines it using the owner token (T-10). Approval reuses the exact same `RoomService.setEditAccess` path as V2.21.
+
+### 1. Participant requests edit access (Control WebSocket, V2.5)
+
+Client -> Server (`docs/examples/v2-edit-request-ws.json`):
+
+```json
+{
+  "type": "request-edit-access"
+}
+```
+
+Rules:
+
+1. **Pair mode only.** In Open mode, refused with `error` (`code: "INVALID_REQUEST"`, `"Edit-access requests apply only in Pair mode; Open mode uses module requests."`).
+2. **Participant without `can_edit` only.**
+   - Host or a participant who already has `can_edit: true` is refused with `INVALID_REQUEST` (`"You already have edit access."`).
+   - An **Observer** cannot request edit access (`INVALID_REQUEST`: `"Observers cannot request edit access; ask the Host to make you a participant first."`).
+3. **One pending request per member.** If the member already has a pending request, asking again is a no-op (no duplicate request is created or pushed to the Host).
+4. **Server -> Host notification** (`docs/examples/v2-edit-request-host-ws.json`), pushed to all joined control sockets of the Host (identifies the requester by public `member_id` and `display_name`, never `session_id`):
+
+```json
+{
+  "type": "edit-access-requested",
+  "member_id": "m_4b19d2",
+  "display_name": "Lin",
+  "requested_at": "2026-11-20T18:00:00Z"
+}
+```
+
+### 2. Host approves or declines (REST, Host-only)
+
+```text
+POST http://localhost:8081/v1/rooms/{room_id}/edit-requests/{member_id}/approve
+POST http://localhost:8081/v1/rooms/{room_id}/edit-requests/{member_id}/decline
+X-Session-Id: <caller-session-id>
+X-Owner-Token: <owner-token>
+```
+
+Response `200` (updated member on `approve`, or `{ "member_id": "m_4b19d2", "status": "declined" }` on `decline`).
+
+Rules:
+
+1. Only the Host can call either endpoint (`403 NOT_OWNER` otherwise; same check order as V2.17 / V2.21).
+2. **Pair mode only** (`422 INVALID_REQUEST` in Open mode).
+3. If no pending request exists for `member_id` (or `member_id` is unknown), returns `404 MEMBER_NOT_FOUND`.
+4. On **approve**: revalidates that the target is still a current **participant** without edit access. If they are no longer an eligible participant (for example, they were changed to `observer` via V2.17 or became `host` via V2.19), clears the stale pending request and refuses with `422 INVALID_REQUEST` (`"Observers cannot have edit access; make them a participant first."` / `"The Host's edit access cannot be changed."`). Otherwise, calls `RoomService.setEditAccess(roomId, memberId, true)` (V2.21), clears the pending request, broadcasts the updated `roster` to the room (V2.4), and sends `edit-access-responded` (`approved: true`) to the requester's control sockets.
+5. On **decline**: clears the pending request without changing `can_edit`, and sends `edit-access-responded` (`approved: false`) to the requester's control sockets (`docs/examples/v2-edit-request-responded-ws.json`):
+
+```json
+{
+  "type": "edit-access-responded",
+  "member_id": "m_4b19d2",
+  "approved": false,
+  "message": "The Host declined your edit access request."
+}
+```
+
+6. **Automatic clearing:** A pending request is cleared (and Host sockets receive `{ "type": "edit-access-request-cleared", "member_id": "...", "reason": "granted" | "role_changed" | "removed" | "left" }`) if the requester gets `can_edit` via V2.21, has their role changed (V2.17) or becomes Host (V2.19), is removed (V2.18), or disconnects from all control sockets.
+7. Errors (V2.12): `404 ROOM_NOT_FOUND`, `404 SESSION_NOT_FOUND`, `404 MEMBER_NOT_FOUND`, `403 NOT_OWNER`, `422 INVALID_REQUEST`.
+
 ## Changes
 
 | Version | Date | Change |
@@ -1860,6 +1925,7 @@ Edit access changes are made in one place in sync-service (`RoomService.setEditA
 | v2 (host transfer) | 17 Nov 2026 | V2.19 added (US-54): `POST /v1/rooms/{room_id}/members/{member_id}/make-host` transfers the Host role (FR31.1). The server issues a new owner token to the new Host (old token invalidated), delivered over their control socket as a new `host-granted` message; exactly one Host at all times. (Numbered V2.19 to follow US-28's V2.18; merge that contract first.) |
 | v2 (run permission) | 19 Nov 2026 | V2.20 added (US-60): `PATCH /v1/rooms/{room_id}/members/{member_id}/run-permission` takes Run away from a participant and gives it back (FR41.2), and `PATCH /v1/rooms/{room_id}/run-policy` switches Host-only running (FR41.3), both Host-only (`NOT_OWNER` otherwise). The reasons `observer`, `run_revoked`, `host_only` are those of V2.12 and the lookup (V2.11) is unchanged in shape. `roster` and `joined` gain `permissions.run_denied_reason`, and `roster` gains `host_only_run` (V2.4). Restricting Run removed from the undecided list in V2.15. |
 | v2 (edit access) | Nov 2026 | V2.21 added (US-36): `PATCH /v1/rooms/{room_id}/members/{member_id}/edit-access` gives or takes back edit access in Pair mode (FR19.1). Edit access controls apply only in Pair mode (Open mode refuses with `422 INVALID_REQUEST`). Host access cannot be changed (`422`) and Observers cannot have edit access (`422`). Broadcasts updated roster on change. |
+| v2 (edit request) | 20 Nov 2026 | V2.22 added (US-38): control-socket `request-edit-access` / `edit-access-requested` / `edit-access-responded` / `edit-access-request-cleared` and Host-only `POST /v1/rooms/{room_id}/edit-requests/{member_id}/approve` and `/decline` in Pair mode (FR19.3). Reuses `RoomService.setEditAccess` (V2.21). Edit requests removed from V2.15 undecided list. |
 
 ### Runner infrastructure error (v1 proposal addition)
 
