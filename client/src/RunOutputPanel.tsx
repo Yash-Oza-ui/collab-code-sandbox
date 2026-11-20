@@ -1,7 +1,9 @@
 import type { RunResponseData } from './runCode'
+import type { AnalysisResultMessage } from './awarenessWs'
 
 export interface RunOutputPanelProps {
   result: RunResponseData
+  analysisResult?: AnalysisResultMessage | null
 }
 
 function formatRanAt(ranAt: string): string {
@@ -17,7 +19,7 @@ function formatRanAt(ranAt: string): string {
  * and local time (with raw timestamp in tooltip). In Open mode, labels the saved
  * versions that were run. Member IDs are never rendered.
  */
-export default function RunOutputPanel({ result }: RunOutputPanelProps) {
+export default function RunOutputPanel({ result, analysisResult }: RunOutputPanelProps) {
   const runnerName = result.runner?.display_name
   const noOutput = !result.stdout && !result.stderr
 
@@ -92,6 +94,23 @@ export default function RunOutputPanel({ result }: RunOutputPanelProps) {
       {result.message && (
         <div className="run-output-notice" data-testid="run-output-message">
           {result.message}
+        </div>
+      )}
+
+      {analysisResult && (
+        <div
+          className={`run-output-notice ${
+            analysisResult.status === 'fallback'
+              ? 'analysis-fallback-notice'
+              : 'analysis-success-notice'
+          }`}
+          data-testid="analysis-result-message"
+          role="status"
+        >
+          <span className="analysis-result-label">
+            {analysisResult.status === 'fallback' ? 'AI Analysis: ' : 'Analysis: '}
+          </span>
+          {analysisResult.message}
         </div>
       )}
 
