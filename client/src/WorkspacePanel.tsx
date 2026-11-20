@@ -28,12 +28,15 @@ export default function WorkspacePanel({
 }: WorkspacePanelProps) {
   const [newModuleName, setNewModuleName] = useState('')
 
-  const handleSubmit = (e: FormEvent) => {
+  const handleSubmit = (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault()
-    const trimmed = newModuleName.trim()
+    const form = e.currentTarget
+    const formData = new FormData(form)
+    const rawVal = (formData.get('moduleName') as string | null) ?? newModuleName
+    const trimmed = (rawVal || newModuleName).trim()
     if (!trimmed || !onCreateModule || isCreating) return
     void Promise.resolve(onCreateModule(trimmed)).then(() => {
-      // Do not clear if there was an immediate error synchronously surfaced
+      setNewModuleName('')
     })
   }
 
@@ -107,6 +110,7 @@ export default function WorkspacePanel({
         >
           <input
             type="text"
+            name="moduleName"
             data-testid="new-module-name-input"
             className="workspace-module-input"
             placeholder={`e.g. main.${defaultExt}`}
@@ -118,7 +122,7 @@ export default function WorkspacePanel({
             type="submit"
             data-testid="create-module-button"
             className="workspace-create-button"
-            disabled={isCreating || !newModuleName.trim()}
+            disabled={isCreating}
           >
             {isCreating ? 'Creating...' : 'New Module'}
           </button>
