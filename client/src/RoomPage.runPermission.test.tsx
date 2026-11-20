@@ -187,9 +187,17 @@ describe('RoomPage run permission (US-60)', () => {
   })
 
   describe('as the Host', () => {
+    // The Host also reads the removed-members list on joining (US-28, GET), which these tests
+    // ignore: they look only at the PATCH calls.
     function hostFetch() {
-      return vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({}) })
+      return vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => ({
+        ok: true,
+        status: 200,
+        json: async () => (init?.method === 'GET' ? { blocked: [] } : {}),
+      }))
     }
+    const patchCalls = (fetchFn: ReturnType<typeof hostFetch>) =>
+      fetchFn.mock.calls.filter(([, init]) => (init as RequestInit | undefined)?.method === 'PATCH')
 
     beforeEach(() => {
       FakeSocket.role = 'host'
@@ -216,8 +224,8 @@ describe('RoomPage run permission (US-60)', () => {
         container?.querySelector<HTMLButtonElement>('[data-testid="run-off-m_bob"]')?.click()
       })
 
-      expect(fetchFn).toHaveBeenCalledTimes(1)
-      const [url, init] = fetchFn.mock.calls[0] as [string, RequestInit]
+      expect(patchCalls(fetchFn)).toHaveLength(1)
+      const [url, init] = patchCalls(fetchFn)[0] as [string, RequestInit]
       expect(url).toContain(`/v1/rooms/${ROOM_ID}/members/m_bob/run-permission`)
       expect(init.method).toBe('PATCH')
       expect(JSON.parse(init.body as string)).toEqual({ can_run: false })
@@ -239,7 +247,7 @@ describe('RoomPage run permission (US-60)', () => {
         container?.querySelector<HTMLButtonElement>('[data-testid="run-on-m_bob"]')?.click()
       })
 
-      const [, init] = fetchFn.mock.calls[0] as [string, RequestInit]
+      const [, init] = patchCalls(fetchFn)[0] as [string, RequestInit]
       expect(JSON.parse(init.body as string)).toEqual({ can_run: true })
     })
 
@@ -265,7 +273,7 @@ describe('RoomPage run permission (US-60)', () => {
         toggle()?.click()
       })
 
-      const [url, init] = fetchFn.mock.calls[0] as [string, RequestInit]
+      const [url, init] = patchCalls(fetchFn)[0] as [string, RequestInit]
       expect(url).toContain(`/v1/rooms/${ROOM_ID}/run-policy`)
       expect(init.method).toBe('PATCH')
       expect(JSON.parse(init.body as string)).toEqual({ host_only_run: true })
