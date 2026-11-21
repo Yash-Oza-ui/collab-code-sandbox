@@ -266,5 +266,58 @@ describe('RunOutputPanel (T-11 / US-08)', () => {
       expect(timeEl?.getAttribute('title')).toBe('2026-11-01T10:20:05.087Z')
       expect(timeEl?.textContent).toContain('Ran at')
     })
+
+    it('displays fallback message beside execution output when status is fallback (US-78)', async () => {
+      container = document.createElement('div')
+      document.body.appendChild(container)
+      root = createRoot(container)
+      const fallbackAnalysis = {
+        type: 'analysis-result' as const,
+        request_id: base.request_id,
+        analysis_id: 'an-123',
+        room_id: base.room_id,
+        task: 'complexity',
+        status: 'fallback' as const,
+        ai_step: { status: 'skipped' as const, error_code: 'COST_CAP_REACHED' },
+        message: 'AI analysis is temporarily unavailable because the monthly AI limit has been reached.',
+      }
+      await act(async () =>
+        root?.render(<RunOutputPanel result={base} analysisResult={fallbackAnalysis} />),
+      )
+      const el = container.querySelector('[data-testid="analysis-result-message"]')
+      expect(el).not.toBeNull()
+      expect(el?.className).toContain('analysis-fallback-notice')
+      expect(el?.textContent).toContain('AI Analysis: ')
+      expect(el?.textContent).toContain(
+        'AI analysis is temporarily unavailable because the monthly AI limit has been reached.',
+      )
+      // Normal run result remains completely unaffected
+      expect(text(container, 'run-stdout')).toBe('hello\n')
+      expect(text(container, 'run-output-outcome')).toBe('Exited with code 0')
+    })
+
+    it('displays analysis success message when status is ok', async () => {
+      container = document.createElement('div')
+      document.body.appendChild(container)
+      root = createRoot(container)
+      const successAnalysis = {
+        type: 'analysis-result' as const,
+        request_id: base.request_id,
+        analysis_id: 'an-123',
+        room_id: base.room_id,
+        task: 'complexity',
+        status: 'ok' as const,
+        ai_step: { status: 'ok' as const, error_code: null },
+        message: 'Time complexity estimated as O(n^2).',
+      }
+      await act(async () =>
+        root?.render(<RunOutputPanel result={base} analysisResult={successAnalysis} />),
+      )
+      const el = container.querySelector('[data-testid="analysis-result-message"]')
+      expect(el).not.toBeNull()
+      expect(el?.className).toContain('analysis-success-notice')
+      expect(el?.textContent).toContain('Analysis: ')
+      expect(el?.textContent).toContain('Time complexity estimated as O(n^2).')
+    })
   })
 })

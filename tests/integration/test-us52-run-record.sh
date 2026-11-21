@@ -69,6 +69,12 @@ pass us52-run-record "GET/DELETE /internal/rooms/{id}/runs enforce X-Internal-To
 # Compute canonical SHA-256 input hashes in Python (matches InputHasher)
 HASH_A="$("$PYTHON_BIN" -c 'import hashlib; print(hashlib.sha256(b"same-stdin-input\n").hexdigest())')"
 HASH_B="$("$PYTHON_BIN" -c 'import hashlib; print(hashlib.sha256(b"different-stdin-input\n").hexdigest())')"
+# Use recent UTC timestamps. Fixed November 2026 dates are now older than
+# the US-30 retention window and are correctly removed by its scheduled sweep.
+RUN_AT_1="$("$PYTHON_BIN" -c 'from datetime import datetime,timedelta,timezone; print((datetime.now(timezone.utc)-timedelta(minutes=4)).isoformat(timespec="milliseconds").replace("+00:00","Z"))')"
+RUN_AT_2="$("$PYTHON_BIN" -c 'from datetime import datetime,timedelta,timezone; print((datetime.now(timezone.utc)-timedelta(minutes=3)).isoformat(timespec="milliseconds").replace("+00:00","Z"))')"
+RUN_AT_3="$("$PYTHON_BIN" -c 'from datetime import datetime,timedelta,timezone; print((datetime.now(timezone.utc)-timedelta(minutes=2)).isoformat(timespec="milliseconds").replace("+00:00","Z"))')"
+RUN_AT_ROOM2="$("$PYTHON_BIN" -c 'from datetime import datetime,timedelta,timezone; print((datetime.now(timezone.utc)-timedelta(minutes=1)).isoformat(timespec="milliseconds").replace("+00:00","Z"))')"
 SECRET_SESSION="99999999-9999-4999-8999-999999999999"
 RAW_STDIN="same-stdin-input"
 SOURCE_CODE="print('SECRET_SOURCE_CODE_US52')"
@@ -100,7 +106,7 @@ payload_1="$(cat <<EOF
     "display_name": "Ada",
     "session_id": "$SECRET_SESSION"
   },
-  "ran_at": "2026-11-01T10:00:01.000Z",
+  "ran_at": "$RUN_AT_1",
   "visibility": "room",
   "saved_versions": [],
   "files": [{ "name": "main.py", "content": "$SOURCE_CODE" }]
@@ -121,7 +127,7 @@ payload_2="$(cat <<EOF
   "execution_time_ms": 95.0,
   "peak_memory_mb": 9.3,
   "runner": { "member_id": "m_lin", "display_name": "Lin" },
-  "ran_at": "2026-11-01T10:00:05.000Z",
+  "ran_at": "$RUN_AT_2",
   "visibility": "room",
   "saved_versions": [],
   "input_hash": "$HASH_B",
@@ -143,7 +149,7 @@ payload_3="$(cat <<EOF
   "execution_time_ms": 310.0,
   "peak_memory_mb": 11.4,
   "runner": { "member_id": "m_ada", "display_name": "Ada" },
-  "ran_at": "2026-11-01T10:00:10.000Z",
+  "ran_at": "$RUN_AT_3",
   "visibility": "room",
   "saved_versions": [],
   "input_hash": "$HASH_A",
@@ -165,7 +171,7 @@ payload_room2="$(cat <<EOF
   "execution_time_ms": 15.0,
   "peak_memory_mb": 6.0,
   "runner": { "member_id": "m_bob", "display_name": "Bob" },
-  "ran_at": "2026-11-01T10:00:15.000Z",
+  "ran_at": "$RUN_AT_ROOM2",
   "visibility": "room",
   "saved_versions": [],
   "input_hash": "$HASH_A",
@@ -188,10 +194,10 @@ status="${r##*HTTP_STATUS:}"
 body="${r%$'\n'HTTP_STATUS:*}"
 [ "$status" = "200" ] || { fail us52-run-record "GET /runs?input_hash failed with HTTP $status"; exit 1; }
 
-"$PYTHON_BIN" - "$body" "$ROOM1" "$HASH_A" "$OWNER1" "$SECRET_SESSION" "$RAW_STDIN" "$SOURCE_CODE" <<'PY'
+"$PYTHON_BIN" - "$body" "$ROOM1" "$HASH_A" "$OWNER1" "$SECRET_SESSION" "$RAW_STDIN" "$SOURCE_CODE" "$RUN_AT_1" "$RUN_AT_3" <<'PY'
 import json, sys
 
-body, room_id, hash_a, owner_token, secret_session, raw_stdin, source_code = sys.argv[1:8]
+body, room_id, hash_a, owner_token, secret_session, raw_stdin, source_code, run_at_1, run_at_3 = sys.argv[1:10]
 
 # Secret exclusion checks (AC2)
 for forbidden in [owner_token, secret_session, raw_stdin, source_code, "session_id", "owner_token"]:
@@ -204,11 +210,11 @@ runs = data["runs"]
 assert len(runs) == 2, f"expected 2 matching runs for HASH_A, got {len(runs)}"
 
 # Newest first ordering (US-68)
-assert runs[0]["ran_at"] == "2026-11-01T10:00:10.000Z", f"expected newest first, got {runs[0]['ran_at']}"
+assert runs[0]["ran_at"] == run_at_3, f"expected newest first, got {runs[0]['ran_at']}"
 assert runs[0]["execution_time_ms"] == 310.0
 assert runs[0]["peak_memory_mb"] == 11.4
 
-assert runs[1]["ran_at"] == "2026-11-01T10:00:01.000Z"
+assert runs[1]["ran_at"] == run_at_1
 assert runs[1]["runner_display_name"] == "Ada"
 assert runs[1]["language"] == "python"
 assert runs[1]["files"] == ["main.py"]

@@ -18,7 +18,7 @@ The AI/ML microservice for **Collab Code Sandbox** (IT-314, Group 32). This serv
   - See [docs/host-config.md](../docs/host-config.md) for details on host configuration and overrides. Final per-host values are determined only after host benchmarking.
 - **Endpoints:**
   - `GET /health`: Liveness probe for container orchestration and smoke tests.
-  - `POST /v1/analyses/complexity`: Rules-first time complexity analysis with verified AI fallback (FR36, US-17, US-22).
+  - `POST /v1/analyses/complexity`: Rules-first time complexity analysis with verified AI fallback and empirical log-log regression (FR36, US-65, US-17, US-22).
   - `POST /v1/analyses/slowdown`: Statistical slowdown detection against empirical Median and MAD baseline (FR37, US-68).
   - `POST /v1/analyses/crash-explanation`: Deterministic C/C++ sanitizer parser with crash explanation fallback (FR39, DR5).
   - `POST /v1/explain`: Execution failure explainer behind consent, normalized caching, and rate limits (T-16, US-22).
@@ -220,6 +220,98 @@ The generator uses the eight T-13 features plus a label column. It contains only
 The dataset generator and its unittest checks require only the Python standard library. The API service requires the dependencies listed above.
 
 Keep generated CSV files out of commits. The production anomaly score threshold will be chosen during Sprint 3 validation.
+
+## Empirical Time Complexity Measurement & Regression (US-65, FR36.1, FR36.2)
+
+### User Story & Purpose (US-65)
+As a student, I want an estimate of how my program's run time grows so that I can see whether it will be too slow.
+
+`ai-ml-service` measures the program at geometric input sizes $n$, $2n$, and $4n$, several times each, and calculates the median run time at each size. It fits a linear regression line to $\log(\text{input size})$ against $\log(\text{run time})$ to estimate the empirical growth rate ($m$), calculates the $R^2$ goodness-of-fit score, classifies the Big-O time complexity, and extrapolates the input size at which execution would reach the 5-second sandbox limit.
+
+### Geometric Input Sizes & Repeat Count (FR36.1, US-64, NFR14)
+- **Input Sizes:** Measurements are performed at 3 geometric points: $n$, $2n$, and $4n$ (configurable base size `COMPLEXITY_BASE_INPUT_SIZE`, default $n = 100$, yielding inputs $100, 200, 400$).
+- **Repeats:** Each size is measured 3 times (`COMPLEXITY_DEFAULT_REPEATS = 3`) to filter transient container startup overhead, giving $3 \text{ sizes} \times 3 \text{ repeats} = 9 \text{ total runs}$.
+- **Run Cap Compliance (US-64, NFR14):** In collaboration with Bhavya Vekariya, 3 repeats was selected so the 9 total runs strictly remain under the 10-run per-request ceiling (`max-runs-per-request: 10`) enforced by `execution-service`.
+- **Median Runtime:** At each input size $N_i$, the representative execution time is the median runtime across the repeats:
+  $$\tilde{t}_i = \text{median}(t_{i, 1}, t_{i, 2}, \dots, t_{i, k})$$
+- **Stage Isolation (V2.9, AC 3):** Only the actual run stage time (`execution_time_ms`) is used for statistical regression. Compile time and container queue time are strictly excluded from the regression curve.
+- **Aggregate Budget Accounting:** In compiled languages (C, C++, Java), compilation is executed on each measurement run. While compile time is excluded from `execution_time_ms`, it is counted toward the 20,000 ms aggregate execution budget in `execution-service` (`RunBudget`).
+
+### Log-Log Linear Regression Formula (FR36.2)
+For polynomial and power-law relationships $T(N) = a \cdot N^m$, taking the natural logarithm of both sides yields a linear equation:
+$$\ln(T) = m \cdot \ln(N) + c$$
+where:
+- $N$ is the input size ($n, 2n, 4n$).
+- $T$ is the median execution time in milliseconds.
+- $m$ is the slope of the line, representing the empirical growth rate (power-law exponent).
+- $c = \ln(a)$ is the intercept.
+
+The slope $m$ and intercept $c$ are determined using ordinary least squares (OLS) linear regression:
+$$m = \frac{\sum_{i=1}^k (\ln N_i - \overline{\ln N})(\ln T_i - \overline{\ln T})}{\sum_{i=1}^k (\ln N_i - \overline{\ln N})^2}$$
+$$c = \overline{\ln T} - m \cdot \overline{\ln N}$$
+
+### Big-O Complexity Classification Table
+The empirical growth rate $m$ is mapped to standard Big-O notation using calibrated boundary intervals:
+
+| Growth Rate Interval ($m$) | Estimated Complexity | Algorithmic Class |
+|---|---|---|
+| $m \le 0.20$ | $O(1)$ | Constant Time |
+| $0.20 \le m < 0.80$ | $O(\log n)$ | Logarithmic Time |
+| $0.80 \le m < 1.25$ | $O(n)$ | Linear Time |
+| $1.25 \le m < 1.75$ | $O(n \log n)$ | Linearithmic Time |
+| $1.75 \le m < 2.50$ | $O(n^2)$ | Quadratic Time |
+| $2.50 \le m < 3.50$ | $O(n^3)$ | Cubic Time |
+| $m \ge 3.50$ | $O(2^n)$ | Exponential Time |
+
+### $R^2$ Score & Poor Fit Handling
+The coefficient of determination ($R^2$) measures how well the regression line accounts for empirical variance:
+$$R^2 = 1 - \frac{\sum_{i=1}^k (\ln T_i - \widehat{\ln T}_i)^2}{\sum_{i=1}^k (\ln T_i - \overline{\ln T})^2}$$
+- **What Low $R^2$ Means:** Microbenchmark measurements at small input sizes are susceptible to noise, container scheduling jitter, garbage collection pauses, or algorithmic phase transitions (e.g. cache line thresholds). An $R^2$ score below `0.85` indicates that execution time did not scale cleanly with input size.
+- **Reporting Policy:** When $R^2 < 0.85$ (`COMPLEXITY_R2_POOR_FIT_THRESHOLD`), the response sets `is_poor_fit: true` and includes an explicit warning message:
+  `"Complexity estimate has low confidence (R² = 0.XX < 0.85). Variance or noise was high across measured sizes."`
+  A weak estimate is never presented to the student as a firm answer.
+
+### Projected Timeout Extrapolation (5 s Sandbox Limit)
+Extrapolating the log-log fit predicts the input size $N_{\text{limit}}$ at which the program would hit the 5,000 ms (5 s) sandbox timeout limit (`COMPLEXITY_TIMEOUT_MS`, NFR4.1):
+$$\ln(5000) = m \cdot \ln(N_{\text{limit}}) + c \implies N_{\text{limit}} = \operatorname{round}\left(\exp\left(\frac{\ln(5000) - c}{m}\right)\right)$$
+
+- **Flat or Falling Line Protection:** When the slope is near zero or negative ($m \le 0.05$, e.g. for $O(1)$ constant time or caching effects), solving for $N_{\text{limit}}$ would yield astronomical or meaningless negative/fractional numbers. In such cases, the service reports `projected_timeout_input_size = "limit not reached"` rather than a nonsense number.
+
+### Timeout Handling Policy (NFR4.1)
+- **Individual Timeout Detection:** If any execution run at a given input size reaches or exceeds 5,000 ms (5 s), it is classified as a timeout at that size.
+- **Minimum Points Requirement:** A valid regression curve strictly requires at least 3 distinct finished input sizes.
+- **Refusal to Fit Through Two Points:** If fewer than 3 sizes finish (for instance, a timeout occurs at size $2n$ or $4n$), the service **refuses to fit a line through two points**. It sets `growth_rate = null`, `estimated_complexity = null`, `timeout_at_size = <size>`, and returns an explicit explanatory message:
+  `"Execution timed out at input size 400 (5000 ms limit reached). No complexity estimate possible from fewer than 3 completed sizes."`
+
+### Budget Exceeded & 10-Run Limit Policy (HTTP 429 RUN_BUDGET_EXCEEDED, US-64, NFR14)
+- **Central Run Cap Enforcement:** `execution-service` centrally enforces the 10-run limit (`app.execution.limits.max-runs-per-request: 10`) via `RunBudget.java`. Each measurement run passes through `RunBudget.execute()`, which checks `runsCompleted >= maxRuns` before acquiring a queue slot or launching a container.
+- **Client Pre-Validation:** `ai-ml-service` pre-validates `len(inputs) * repeats <= 10` before dispatching. If a request demands $> 10$ runs (e.g. 4 inputs $\times$ 3 repeats = 12 runs), it is immediately refused with HTTP 429 `RUN_BUDGET_EXCEEDED` (`reason: "max_runs_per_request"`, `Retry-After: 30`), preventing wasted container starts.
+- **Aggregate Time Budget (20,000 ms):** When repeated measurements exceed the 20,000 ms aggregate runtime budget in `execution-service`, it returns HTTP 429 `RUN_BUDGET_EXCEEDED` (`reason: "aggregate_time_budget"`, `Retry-After: 30`).
+- **No Incomplete Estimates:** `ai-ml-service` never attempts to construct a partial estimate from truncated runs. The specific budget hit is surfaced in `error.reason` and response message:
+  `"Repeated-run execution budget exceeded (aggregate_time_budget). No estimate possible from incomplete data."`
+
+### Incomplete Measurements Protection
+- **Missing Sizes & Incomplete Repeats:** If `execution-service` returns fewer than the requested input sizes or if any size has fewer completed runs than the requested `repeats`, `HttpInternalRunClient` marks the result as incomplete (`incomplete: true`).
+- `fit_complexity_curve` safely refuses estimation:
+  `"No estimate possible from incomplete data: Incomplete repeats for input size '200' (received 1 of 3 required repeats)."`
+- **Minimum 3 Distinct Finished Sizes:** If duplicate sizes are supplied or fewer than 3 distinct sizes finish, the service safely returns `can_estimate: false` and `estimated_complexity: "no estimate"`.
+
+### Internal Run Architecture & Dual Runner Pattern (T-18 Decision 7)
+`ai-ml-service` never spawns Docker containers directly. It interacts with `execution-service` via `POST /internal/runs` (`purpose: "measurement"`) authenticated by the shared header `X-Internal-Token`.
+- **`MeasurementRunner` Interface:** Defines the contract for executing repeated runs at geometric input sizes.
+- **Real Runner Default in Production (`USE_STUB_RUNNER=false`):** `HttpInternalRunClient` is the default measurement runner in deployed configurations.
+- **Zero Synthetic Fallback in Production:** In production, `HttpInternalRunClient` **never** falls back to synthetic measurements on connection or execution failures. If `execution-service` cannot be reached or is saturated, the service raises an `ExecutionServiceUnavailableError` resulting in HTTP 503 `ROOM_SERVICE_UNAVAILABLE` with `Retry-After: 5`, ensuring students never receive artificial complexity ratings.
+- **`StubMeasurementRunner` Restricted to Tests/Dev:** Stubs are strictly isolated to development/unit tests via explicit test fixture injection (`set_measurement_runner()` in `tests/conftest.py`) or setting `USE_STUB_RUNNER=true`.
+- **`HttpInternalRunClient`:** Production client connecting to `execution-service` container runner over HTTP. Propagates internal credentials, parses `completed_runs`, detects timeouts, validates full batch completion, and extracts 429 budget refusal metadata.
+
+### Asynchronous Delivery & Zero Execution Delay (NFR9, CR08)
+- **Zero Run Delay:** Code execution results are returned immediately to the student without waiting for complexity measurements.
+- **Separate WebSocket Message:** Complexity analysis is performed asynchronously and dispatched as a separate `analysis-result` message with `task: "complexity"`.
+- **Identical Audience:** Dispatched to the same room or sessions that received the original run result.
+
+### Privacy & Data Minimization (NFR7.5, NFR8.2)
+- **No AI Call Required (NFR7.5):** Complexity curve fitting is pure mathematical statistics. It operates unconditionally regardless of user consent (`consent: false`) or the room AI switch (`ai_enabled: false`).
+- **Metadata-Only Logging (NFR8.2):** Service logs record only request identifiers, input sizes, slope, $R^2$, and status codes. User source code and stdin input text are **never logged**.
 
 ## Slowdown Detection in Run History (US-68, FR37, T-18 v2 §16.2)
 
@@ -521,6 +613,27 @@ The deterministic sanitizer parser (`app.sanitizer.parse_sanitizer_report`) pars
 - **Non-Sanitizer Crashes:** Standard crashes (e.g. segmentation faults without sanitizer instrumentation) preserve exit information (e.g. `Process exited with exit code 139 (no sanitizer finding).`) without inventing a sanitizer error type.
 - **Compiler Compatibility:** Tested against diagnostic outputs from GCC 12+ and Clang/LLVM 14+.
 
+## Plain-Language Crash Explanation (US-74, FR13.1, FR39.3, FR40.2, DR5)
+
+The crash explanation endpoint (`POST /v1/analyses/crash-explanation`) generates plain-language failure explanations and suggested fixes for compiler sanitizer crashes in C and C++ programs.
+
+### 1. Language Restriction (DR5)
+- **Supported Languages:** C (`c`) and C++ (`cpp`) only.
+- **Unsupported Languages:** Any request specifying other coursework languages (e.g. `python`, `java`, `javascript`) is immediately rejected with HTTP `422 Unprocessable Entity` and error code `UNSUPPORTED_LANGUAGE` without invoking any AI models.
+
+### 2. Privacy & Data Minimization (FR40.2, US-76)
+- **Localized Code Only:** Uses `app.section.extract_relevant_section` to extract a small, bounded window of code lines centered on the crash `line_number`. Full files and unrelated modules are never sent.
+- **Dedicated Prompt:** The outbound LLM prompt contains strictly the deterministic sanitizer summary and the localized code section. Raw ASan/UBSan stack traces, container exit codes, and execution context metadata are excluded.
+- **Canary Isolation:** Code outside the localized window (including canary markers or secrets) is guaranteed never to leak into prompts.
+
+### 3. Output Limitation & Response Schema (FR13.1, T-18 v2 §16.4)
+- **Three-Sentence Cap:** The generated explanation (`ai_step.explanation`) is strictly constrained to at most three sentences in plain prose without markdown headers, bold asterisks, backticks, or filler greetings.
+- **Suggested Fix:** A practical code or algorithmic remediation is extracted and returned in `ai_step.suggested_fix`.
+- **AI Gating:** When consent is missing (`CONSENT_MISSING`), AI is disabled by Host (`AI_DISABLED`), or the monthly budget cap is reached (`COST_CAP_REACHED`), the endpoint returns HTTP 200 with deterministic `error_type`, `line_number`, and `summary` preserved, and `ai_step.status = "skipped"`.
+
+### 4. Method Chain Integration (US-77)
+- Evaluated through the central method chain (`app.chain.answer`) with `rules_first = False` to prevent code containing loops from being prematurely intercepted by complexity pattern rules.
+
 ## Cheapest-Method-First AI Chain (US-77, FR40.3, FR40.4)
 
 To minimize unnecessary external API expenditure and latency, all AI-enabled analysis and explanation endpoints (`POST /v1/analyses/complexity`, `POST /v1/analyses/crash-explanation`, `POST /v1/explain`) route requests through a single central method chain: `app.chain.answer(request)`.
@@ -615,3 +728,42 @@ Counters and application logs record **only** numeric counts, token consumption,
 
 - **Base Dependency:** US-77 is rebased directly on `feature/US-24-monthly-cost-cap` (PR #156), inheriting the persistent `UsageTracker`, atomic reservation lifecycle (`reserve_call()`), non-blocking webhook delivery (`ThreadPoolExecutor`), and `CostCapReachedError`.
 - **Zero Duplication:** Stage telemetry counters (`record_rules_answer()`, `record_local_model_answer()`, `get_stage_counters()`) cleanly extend `UsageTracker` without duplicating cost-cap accounting code.
+
+
+## US-70: Failing-input search
+
+`POST /v1/analyses/failing-input` uses the v2 request and response schemas in
+`docs/schemas/failing-input-*.json`. Requests begin with conservative deterministic
+edge cases: empty stdin and `1`. For evident whitespace-separated numeric input,
+duplicate and negative examples are also tried. Maximum bounds and any unknown
+input grammar are **not guessed**. The response headers
+`X-Failing-Input-Skipped-Cases`, `X-Failing-Input-Reference` and
+`X-Failing-Input-Scope` communicate omissions and the search's limitations.
+
+No reference: only crashes/timeouts can be established; a pass is **not proof of
+correctness**. To compare output, an authoritative reference supplied by the
+internal orchestrator is required with `X-Internal-Token`. The reference is
+executed in execution-service Docker using `purpose=test_batch` to obtain
+expected stdout; the student's batch is then executed against those outputs.
+The current US-71 contract does not execute `reference_solution` itself.
+The reference source must be server-controlled and must never be taken from
+untrusted public clients. If the reference fails, comparison is disabled.
+
+An AI-generated Python input script is optional, only with consent and AI on.
+It is obtained through the US-77 cheapest-method chain and US-22 cache. Its
+output is accepted only after the script has run as a Docker `test_batch`
+inside execution-service. No generated or submitted code is executed by
+ai-ml-service. A per-analysis process cap and time budget apply across both
+reference and candidate batches; 429 budget refusals preserve partial results.
+US-72 owns actual input minimization: US-70 preserves the original value in
+`minimized_input` only as a placeholder, not as evidence of shrinking.
+
+Set `EXECUTION_SERVICE_URL` to the internal execution-service origin and
+`INTERNAL_API_TOKEN` to the shared internal secret. Additional configurable
+limits: `FAILING_INPUT_MAX_RUNS` (default 8; max 10),
+`FAILING_INPUT_BUDGET_SECONDS` (default/max 20),
+`FAILING_INPUT_HTTP_TIMEOUT_SECONDS` (default 35), and
+`FAILING_INPUT_SCRIPT_MAX_CHARS` (default 4000).
+
+Run `pytest -k "failing_input or edge"` in `ai-ml-service/`. The unit tests
+mock Docker execution, so user code never runs on the host.

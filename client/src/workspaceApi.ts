@@ -525,3 +525,123 @@ export async function setModuleEntry(
     }
   }
 }
+
+/**
+ * Grants write access to a member for a module (US-43, FR22.1).
+ */
+export async function grantWriteAccess(
+  ctx: WorkspaceApiContext,
+  moduleId: string,
+  memberId: string,
+): Promise<WorkspaceApiResult<WorkspaceModule>> {
+  const fetchFn = ctx.fetchFn ?? fetch
+  const base = (
+    ctx.baseUrl ??
+    config.syncWsUrl.replace(/^ws/, 'http').replace(/\/ws\/rooms.*$/, '')
+  ).replace(/\/$/, '')
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'X-Session-Id': ctx.sessionId,
+  }
+  if (ctx.ownerToken) {
+    headers['X-Owner-Token'] = ctx.ownerToken
+  }
+
+  try {
+    const res = await fetchFn(
+      `${base}/v1/rooms/${encodeURIComponent(ctx.roomId)}/modules/${encodeURIComponent(moduleId)}/writers`,
+      {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ member_id: memberId }),
+      },
+    )
+
+    if (!res.ok) {
+      let code: string | undefined
+      let message: string | undefined
+      try {
+        const body = (await res.json()) as { error?: { code?: string; message?: string } }
+        code = body?.error?.code
+        message = body?.error?.message
+      } catch {
+        // non-json
+      }
+      return {
+        ok: false,
+        status: res.status,
+        code,
+        error: message || code || `Failed to grant write access (HTTP ${res.status}).`,
+      }
+    }
+
+    const data = (await res.json()) as WorkspaceModule
+    return { ok: true, data }
+  } catch (err) {
+    return {
+      ok: false,
+      status: 0,
+      error: err instanceof Error ? err.message : 'Network error while granting write access.',
+    }
+  }
+}
+
+/**
+ * Revokes write access from a member for a module (US-43, FR22.1).
+ */
+export async function revokeWriteAccess(
+  ctx: WorkspaceApiContext,
+  moduleId: string,
+  memberId: string,
+): Promise<WorkspaceApiResult<WorkspaceModule>> {
+  const fetchFn = ctx.fetchFn ?? fetch
+  const base = (
+    ctx.baseUrl ??
+    config.syncWsUrl.replace(/^ws/, 'http').replace(/\/ws\/rooms.*$/, '')
+  ).replace(/\/$/, '')
+
+  const headers: Record<string, string> = {
+    'X-Session-Id': ctx.sessionId,
+  }
+  if (ctx.ownerToken) {
+    headers['X-Owner-Token'] = ctx.ownerToken
+  }
+
+  try {
+    const res = await fetchFn(
+      `${base}/v1/rooms/${encodeURIComponent(ctx.roomId)}/modules/${encodeURIComponent(moduleId)}/writers/${encodeURIComponent(memberId)}`,
+      {
+        method: 'DELETE',
+        headers,
+      },
+    )
+
+    if (!res.ok) {
+      let code: string | undefined
+      let message: string | undefined
+      try {
+        const body = (await res.json()) as { error?: { code?: string; message?: string } }
+        code = body?.error?.code
+        message = body?.error?.message
+      } catch {
+        // non-json
+      }
+      return {
+        ok: false,
+        status: res.status,
+        code,
+        error: message || code || `Failed to revoke write access (HTTP ${res.status}).`,
+      }
+    }
+
+    const data = (await res.json()) as WorkspaceModule
+    return { ok: true, data }
+  } catch (err) {
+    return {
+      ok: false,
+      status: 0,
+      error: err instanceof Error ? err.message : 'Network error while revoking write access.',
+    }
+  }
+}

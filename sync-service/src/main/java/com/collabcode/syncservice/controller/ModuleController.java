@@ -16,6 +16,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -323,6 +324,133 @@ public class ModuleController {
     }
 
     /**
+     * Grant write access to a member for a module (US-43, FR22.1, V2.6).
+     *
+     * <p>Allowed callers: module owner or the Host (with valid X-Owner-Token).
+     */
+    @PostMapping("/rooms/{roomId}/modules/{moduleId}/writers")
+    public ResponseEntity<?> grantWriteAccess(
+            @PathVariable String roomId,
+            @PathVariable String moduleId,
+            @RequestHeader(value = "X-Session-Id", required = false) String sessionId,
+            @RequestHeader(value = "X-Owner-Token", required = false) String ownerToken,
+            @RequestBody(required = false) Map<String, Object> body) {
+
+        Room room = store.get(roomId);
+        if (room == null) {
+            return moduleError(HttpStatus.NOT_FOUND, "ROOM_NOT_FOUND", "Room not found.");
+        }
+        if (room.getMode() != RoomMode.OPEN) {
+            return moduleError(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_REQUEST", "Pair mode rooms do not have modules.");
+        }
+        if (sessionId == null || sessionId.isBlank()) {
+            return moduleError(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_REQUEST", "Header 'X-Session-Id' is required.");
+        }
+        Member member = roomService.findMemberBySession(roomId, sessionId);
+        if (member == null) {
+            return moduleError(HttpStatus.NOT_FOUND, "SESSION_NOT_FOUND", "Session has not joined the room.");
+        }
+
+        Object rawTarget = body == null ? null : body.get("member_id");
+        String targetMemberId = rawTarget instanceof String s ? s : null;
+        if (targetMemberId == null || targetMemberId.isBlank()) {
+            return moduleError(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_REQUEST", "Field 'member_id' is required.");
+        }
+
+        try {
+            ModuleRecord module = moduleService.grantWriteAccess(roomId, moduleId, member, ownerToken, targetMemberId);
+
+            // Broadcast module-updated to all connected control sockets
+            controlHandler.broadcastModuleUpdated(roomId, RoomMessages.moduleUpdated(module, false));
+
+            return ResponseEntity.ok(moduleBody(module));
+        } catch (SecurityException e) {
+            String code = "NOT_OWNER".equals(e.getMessage()) ? "NOT_OWNER" : "NOT_MODULE_OWNER";
+            String msg = "NOT_OWNER".equals(code)
+                    ? "Invalid owner token."
+                    : "Only the module owner or the Host can change write access.";
+            return moduleError(HttpStatus.FORBIDDEN, code, msg);
+        } catch (IllegalArgumentException e) {
+            String msg = e.getMessage();
+            if ("PAIR_MODE_NO_MODULES".equals(msg)) {
+                return moduleError(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_REQUEST", "Pair mode rooms do not have modules.");
+            }
+            if ("MEMBER_NOT_FOUND".equals(msg)) {
+                return moduleError(HttpStatus.NOT_FOUND, "MEMBER_NOT_FOUND", "Target member not found in this room.");
+            }
+            HttpStatus status = ("SESSION_NOT_FOUND".equals(msg) || "ROOM_NOT_FOUND".equals(msg))
+                    ? HttpStatus.NOT_FOUND : HttpStatus.UNPROCESSABLE_ENTITY;
+            return moduleError(status, msg, msg);
+        } catch (IllegalStateException e) {
+            return moduleError(HttpStatus.NOT_FOUND, "MODULE_NOT_FOUND", "Module not found.");
+        }
+    }
+
+    /**
+     * Revoke write access from a member for a module (US-43, FR22.1, V2.6).
+     *
+     * <p>Allowed callers: module owner or the Host (with valid X-Owner-Token).
+     */
+    @DeleteMapping("/rooms/{roomId}/modules/{moduleId}/writers/{memberId}")
+    public ResponseEntity<?> revokeWriteAccess(
+            @PathVariable String roomId,
+            @PathVariable String moduleId,
+            @PathVariable String memberId,
+            @RequestHeader(value = "X-Session-Id", required = false) String sessionId,
+            @RequestHeader(value = "X-Owner-Token", required = false) String ownerToken) {
+
+        Room room = store.get(roomId);
+        if (room == null) {
+            return moduleError(HttpStatus.NOT_FOUND, "ROOM_NOT_FOUND", "Room not found.");
+        }
+        if (room.getMode() != RoomMode.OPEN) {
+            return moduleError(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_REQUEST", "Pair mode rooms do not have modules.");
+        }
+        if (sessionId == null || sessionId.isBlank()) {
+            return moduleError(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_REQUEST", "Header 'X-Session-Id' is required.");
+        }
+        Member member = roomService.findMemberBySession(roomId, sessionId);
+        if (member == null) {
+            return moduleError(HttpStatus.NOT_FOUND, "SESSION_NOT_FOUND", "Session has not joined the room.");
+        }
+
+        if (memberId == null || memberId.isBlank()) {
+            return moduleError(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_REQUEST", "Path parameter 'member_id' is required.");
+        }
+
+        try {
+            ModuleRecord module = moduleService.revokeWriteAccess(roomId, moduleId, member, ownerToken, memberId);
+
+            // Broadcast module-updated to all connected control sockets
+            controlHandler.broadcastModuleUpdated(roomId, RoomMessages.moduleUpdated(module, false));
+
+            return ResponseEntity.ok(moduleBody(module));
+        } catch (SecurityException e) {
+            String code = "NOT_OWNER".equals(e.getMessage()) ? "NOT_OWNER" : "NOT_MODULE_OWNER";
+            String msg = "NOT_OWNER".equals(code)
+                    ? "Invalid owner token."
+                    : "Only the module owner or the Host can change write access.";
+            return moduleError(HttpStatus.FORBIDDEN, code, msg);
+        } catch (IllegalArgumentException e) {
+            String msg = e.getMessage();
+            if ("PAIR_MODE_NO_MODULES".equals(msg)) {
+                return moduleError(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_REQUEST", "Pair mode rooms do not have modules.");
+            }
+            if ("OWNER_CANNOT_LOSE_WRITE_ACCESS".equals(msg)) {
+                return moduleError(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_REQUEST", "Module owner always keeps write access.");
+            }
+            if ("MEMBER_NOT_FOUND".equals(msg)) {
+                return moduleError(HttpStatus.NOT_FOUND, "MEMBER_NOT_FOUND", "Target member not found in this room.");
+            }
+            HttpStatus status = ("SESSION_NOT_FOUND".equals(msg) || "ROOM_NOT_FOUND".equals(msg))
+                    ? HttpStatus.NOT_FOUND : HttpStatus.UNPROCESSABLE_ENTITY;
+            return moduleError(status, msg, msg);
+        } catch (IllegalStateException e) {
+            return moduleError(HttpStatus.NOT_FOUND, "MODULE_NOT_FOUND", "Module not found.");
+        }
+    }
+
+    /**
      * Update module attributes: runnable or is_entry (V2.6, decision 7, FR20.2, FR20.3, US-46).
      *
      * A PATCH carries exactly one of runnable or is_entry. Sending zero or more than one is INVALID_REQUEST.
@@ -379,7 +507,7 @@ public class ModuleController {
                 }
                 boolean runnable = json.get("runnable").asBoolean();
                 ModuleRecord updated = moduleService.setRunnable(roomId, moduleId, member, runnable);
-                controlHandler.broadcastModuleUpdated(roomId, moduleUpdatedPayload(updated, false));
+                controlHandler.broadcastModuleUpdated(roomId, RoomMessages.moduleUpdated(updated, false));
                 return ResponseEntity.ok(moduleBody(updated));
             } else if (hasEntry) {
                 if (!json.get("is_entry").isBoolean()) {
@@ -388,9 +516,9 @@ public class ModuleController {
                 boolean isEntry = json.get("is_entry").asBoolean();
                 ModuleService.EntryChangeResult result = moduleService.setEntry(roomId, moduleId, member, ownerToken, isEntry);
                 if (result.replaced() != null) {
-                    controlHandler.broadcastModuleUpdated(roomId, moduleUpdatedPayload(result.replaced(), false));
+                    controlHandler.broadcastModuleUpdated(roomId, RoomMessages.moduleUpdated(result.replaced(), false));
                 }
-                controlHandler.broadcastModuleUpdated(roomId, moduleUpdatedPayload(result.updated(), false));
+                controlHandler.broadcastModuleUpdated(roomId, RoomMessages.moduleUpdated(result.updated(), false));
                 return ResponseEntity.ok(moduleBody(result.updated()));
             } else {
                 return moduleError(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_REQUEST", "Field 'name' rename is not supported in this version.");

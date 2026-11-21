@@ -80,6 +80,9 @@ services:
     build: ./ai-ml-service
     environment:
       PORT: ${AI_ML_SERVICE_PORT:-8000}
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-}
+      EXECUTION_SERVICE_URL: http://execution-service:${EXECUTION_SERVICE_PORT:-8082}
+      USE_STUB_RUNNER: ${USE_STUB_RUNNER:-false}
       # AI/LLM limits (DR3, FR37.2, FR40.4, NFR5.3, NFR7.2, US-16)
       AI_SLOWDOWN_FACTOR: ${AI_SLOWDOWN_FACTOR:-1.0}
       AI_MAX_TOKENS_PER_REQUEST: ${AI_MAX_TOKENS_PER_REQUEST:-4096}

@@ -1,5 +1,6 @@
 package com.collabcode.syncservice.handler;
 
+import com.collabcode.syncservice.room.HostDepartureManager;
 import com.collabcode.syncservice.room.JoinOutcome;
 import com.collabcode.syncservice.room.Member;
 import com.collabcode.syncservice.room.Room;
@@ -85,6 +86,11 @@ public class ControlHandler extends AbstractWebSocketHandler {
     private final RoomService roomService;
     private final RoomRegistry registry;
     private final ObjectMapper objectMapper;
+    private HostDepartureManager hostDepartures;
+
+    public void setHostDepartureManager(HostDepartureManager hostDepartures) {
+        this.hostDepartures = hostDepartures;
+    }
 
     public ControlHandler(RoomStore roomStore,
                           RoomService roomService,
@@ -164,6 +170,7 @@ public class ControlHandler extends AbstractWebSocketHandler {
     public void afterConnectionClosed(@NonNull WebSocketSession session,
                                       @NonNull CloseStatus status) {
         registry.remove(session);
+        checkHostDeparture(session);
         log.info("Control: closed wsSession={} room={} status={}",
                 session.getId(), session.getAttributes().get(ATTR_ROOM_ID), status);
     }
@@ -172,7 +179,16 @@ public class ControlHandler extends AbstractWebSocketHandler {
     public void handleTransportError(@NonNull WebSocketSession session,
                                      @NonNull Throwable ex) {
         registry.remove(session);
+        checkHostDeparture(session);
         log.warn("Control: transport error wsSession={}: {}", session.getId(), ex.getMessage());
+    }
+
+    private void checkHostDeparture(WebSocketSession session) {
+        if (hostDepartures != null && Boolean.TRUE.equals(session.getAttributes().get(ATTR_JOINED))) {
+            hostDepartures.hostDisconnected(
+                    (String) session.getAttributes().get(ATTR_ROOM_ID),
+                    (String) session.getAttributes().get(ATTR_SESSION_ID));
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -245,6 +261,10 @@ public class ControlHandler extends AbstractWebSocketHandler {
         String clientSessionId = (String) session.getAttributes().get(ATTR_SESSION_ID);
 
         JoinOutcome outcome = roomService.join(roomId, clientSessionId, displayName, ownerToken);
+        if (!outcome.isJoined() && "ROOM_CLOSED".equals(outcome.getRefusedReason())) {
+            session.close(new CloseStatus(CLOSE_ROOM_CLOSED, "Room is closed"));
+            return;
+        }
 
         if (!outcome.isJoined()) {
             String reason = outcome.getRefusedReason();
@@ -273,6 +293,7 @@ public class ControlHandler extends AbstractWebSocketHandler {
         // Successful join
         session.getAttributes().put(ATTR_JOINED, true);
         Member member = outcome.getMember();
+        if (hostDepartures != null) hostDepartures.hostReturned(roomId, member);
         Room room = roomStore.get(roomId);
 
         // 1. Reply to the joining session with 'joined'
@@ -307,6 +328,7 @@ public class ControlHandler extends AbstractWebSocketHandler {
             log.error("Control: failed to broadcast roster for room={}: {}", roomId, e.getMessage());
         }
     }
+
 
     /**
      * Broadcast a {@code module-updated} message to every control socket in the room (V2.6, US-39).
