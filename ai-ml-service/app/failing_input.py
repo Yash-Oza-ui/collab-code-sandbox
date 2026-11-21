@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from app import chain
 from app.chain import ChainRequest
 from app.config import settings
+from app.counters import record_fallback
 from app.section import extract_relevant_section
 
 router = APIRouter(prefix="/v1", tags=["analyses"])
@@ -87,9 +88,17 @@ def edge_cases(code: str) -> tuple[list[str], list[str]]:
     """Conservative cases requiring no assumed input grammar. Never fabricate bounds."""
     values = ["", "1"]
     skipped = ["maximum_bounds (not supplied)", "negative_values (format not supplied)"]
-    # A whitespace-separated numeric input is evident only for this simple parsing idiom.
-    if re.search(r"(?:input\(\)\.split\(\)|stdin\.read\(\)\.split\(\))", code):
+    # Only add multi-token inputs when a common token-based reader is evident.
+    # This is not a full parser: unknown formats/bounds are explicitly skipped.
+    token_reader = (
+        r"input\(\)\.split\(\)|stdin\.read\(\)\.split\(\)"
+        r"|\bcin\s*>>\s*\w+\s*>>|\bscanf\s*\("
+        r"|\bScanner\s*\(|\bnextInt\s*\("
+        r"|\breadFileSync\s*\("
+    )
+    if re.search(token_reader, code):
         values.extend(["1 1", "1 2 3", "10 -5 20"])
+        skipped.remove("negative_values (format not supplied)")
     else:
         skipped.extend(["duplicates (format not supplied)", "multiple_values (format not supplied)"])
     return values, skipped
@@ -199,10 +208,9 @@ def as_response(payload: FailingInputRequest, step: AIStep, records: list[dict],
 def _extract_script(answer: str | None) -> str | None:
     if not answer:
         return None
-    script = answer.strip()
-    match = re.fullmatch(r"```(?:python)?\s*\n([\s\S]*?)\n```", script)
-    if match:
-        script = match.group(1)
+    text = answer.strip()
+    match = re.search(r"```(?:python)?\s*\n([\s\S]*?)\n```", text)
+    script = match.group(1).strip() if match else text
     # Text must be executable Python, not prose; still ALWAYS run it in Docker.
     if not script or len(script) > settings.FAILING_INPUT_SCRIPT_MAX_CHARS:
         return None
@@ -225,10 +233,10 @@ async def ai_inputs(payload: FailingInputRequest, budget: Budget) -> tuple[list[
         f"Language: {payload.language}\nRelevant code:\n{relevant}"
     )
     result = await chain.answer(ChainRequest(
-        request_type="failing_input", code=payload.code,
+        request_type="failing_input", code=relevant,
         language=payload.language, room_id=payload.room_id,
         request_id=payload.request_id, consent=True, ai_enabled=True,
-        rules_first=False, prompt=prompt,
+        rules_first=False, prompt=prompt, pre_sliced=True, max_tokens=1024,
     ))
     step = AIStep(status=result.ai_step.get("status", "skipped"),
                   error_code=result.ai_step.get("error_code"))
@@ -272,10 +280,13 @@ async def failing_input(
         cases = cases[:max(1, budget.remaining // 2)]
     else:
         cases = cases[:budget.remaining]
-    step = AIStep(status="skipped", error_code=(
-        "CONSENT_MISSING" if not payload.consent else
-        "AI_DISABLED" if not payload.ai_enabled else None
-    ))
+    if not payload.consent:
+        step = AIStep(status="skipped", error_code="CONSENT_MISSING")
+    elif not payload.ai_enabled:
+        step = AIStep(status="skipped", error_code="AI_DISABLED")
+    else:
+        # A deterministic finding is a successful analysis even without an AI call.
+        step = AIStep(status="ok", error_code=None)
     records: list[dict] = []
     reference_valid = with_reference
 
@@ -304,7 +315,9 @@ async def failing_input(
 
     await check(cases)
     found = any(identify_failure(r, reference_valid) for r in records)
+    chain_used = False
     if not found and not budget.exhausted and payload.consent and payload.ai_enabled:
+        chain_used = True
         generated, step = await ai_inputs(payload, budget)
         generated = [s for s in dict.fromkeys(generated) if s not in cases]
         # With a reference, two process slots are required for each candidate.
@@ -316,5 +329,9 @@ async def failing_input(
     if not reference_valid:
         response.headers["X-Failing-Input-Scope"] = "crash-and-timeout-only"
     final = as_response(payload, step, records, reference_valid, budget.exhausted)
+    # US-77 already records fallback when its provider gates reject a request.
+    # Count the AI-free skipped path here without double-counting chain failures.
+    if step.error_code and not chain_used:
+        record_fallback(payload.room_id)
     request.state.error_code = step.error_code
     return final

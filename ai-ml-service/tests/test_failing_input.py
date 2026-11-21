@@ -183,3 +183,88 @@ def test_generated_script_must_be_sandboxed(monkeypatch):
     assert res.status_code == 200
     assert any(kwargs.get("language") == "python" for _, _, kwargs in calls)
     assert any("7" in ins for _, ins, _ in calls)
+
+
+def test_approved_ai_deterministic_crash_is_not_fallback(monkeypatch):
+    async def fake_batch(p, b, code, inputs, **kwargs):
+        rows = [record(i, "crash" if i == "" else "pass") for i in inputs]
+        b.record(len(rows))
+        return rows, False
+    forbidden = AsyncMock(side_effect=AssertionError("deterministic failure should not call model"))
+    monkeypatch.setattr(target, "sandbox_batch", fake_batch)
+    monkeypatch.setattr(target.chain, "answer", forbidden)
+    response = TestClient(app).post("/v1/analyses/failing-input", json=payload(
+        consent=True, ai_enabled=True))
+    assert response.status_code == 200
+    assert response.json()["failure_found"]
+    assert response.json()["ai_step"] == {"status": "ok", "error_code": None}
+    forbidden.assert_not_called()
+
+
+def test_fallback_telemetry_when_consent_missing(monkeypatch):
+    from app.counters import get_room_usage
+    async def fake_batch(p, b, code, inputs, **kwargs):
+        rows = [record(i) for i in inputs]
+        b.record(len(rows))
+        return rows, False
+    monkeypatch.setattr(target, "sandbox_batch", fake_batch)
+    before = get_room_usage(ROOM).get("fallback_activations", 0)
+    response = TestClient(app).post("/v1/analyses/failing-input", json=payload())
+    after = get_room_usage(ROOM).get("fallbacks", 0)
+    assert response.status_code == 200
+    assert after == before + 1
+
+
+def test_extract_script_from_conversational_markdown():
+    source = "print('[]')"
+    newline = chr(10)
+    wrapped = "Here is a script:" + newline + "```python" + newline + source + newline + "```"
+    assert target._extract_script(wrapped) == source
+
+def test_multilanguage_token_readers():
+    for source in (
+        "cin >> x >> y;",
+        'scanf("%d %d", &x, &y);',
+        "Scanner sc = new Scanner(System.in);",
+        "const raw = fs.readFileSync(0, 'utf8');",
+    ):
+        cases, skipped = target.edge_cases(source)
+        assert "1 1" in cases and "10 -5 20" in cases
+        assert "maximum_bounds (not supplied)" in skipped
+
+
+def test_failing_input_prompt_recovery_preserves_task():
+    from app.chain import ChainRequest, _build_default_prompt, _enforce_prompt_size
+    req = ChainRequest(
+        request_type="failing_input", language="python",
+        code=chr(10).join(["x = 1"] * 1000), pre_sliced=True,
+        prompt="X" * 10000,
+    )
+    shortened = _enforce_prompt_size(req.prompt, req, 550)
+    assert shortened is not None
+    assert "prints a JSON array" in shortened
+    assert "performance issues" not in shortened
+    assert "Review and analyze" not in shortened
+
+
+def test_ai_chain_uses_relevant_code_and_token_budget(monkeypatch):
+    from app.chain import ChainRequest
+    calls = []
+    async def fake_chain(req):
+        calls.append(req)
+        return type("R", (), {"answer": "print('[]')",
+                              "ai_step": {"status": "ok", "error_code": None}})()
+    async def fake_batch(p, b, code, inputs, **kwargs):
+        rows = [record(i, stdout="[]") for i in inputs]
+        b.record(len(rows))
+        return rows, False
+    monkeypatch.setattr(target.chain, "answer", fake_chain)
+    monkeypatch.setattr(target, "sandbox_batch", fake_batch)
+    response = TestClient(app).post("/v1/analyses/failing-input", json=payload(
+        consent=True, ai_enabled=True))
+    assert response.status_code == 200
+    assert len(calls) == 1
+    assert isinstance(calls[0], ChainRequest)
+    assert calls[0].max_tokens == 1024
+    assert calls[0].pre_sliced is True
+    assert calls[0].request_type == "failing_input"
