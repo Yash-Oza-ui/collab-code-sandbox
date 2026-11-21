@@ -3,6 +3,7 @@ package com.collabcode.syncservice.config;
 import com.collabcode.syncservice.handler.ControlHandler;
 import com.collabcode.syncservice.handler.DocumentHandler;
 import com.collabcode.syncservice.module.ModuleService;
+import com.collabcode.syncservice.room.HostDepartureManager;
 import com.collabcode.syncservice.room.RoomRegistry;
 import com.collabcode.syncservice.room.RoomService;
 import com.collabcode.syncservice.room.RoomStore;
@@ -59,17 +60,20 @@ public class WebSocketConfig implements WebSocketConfigurer {
     private final RoomService roomService;
     private final ModuleService moduleService;
     private final RoomRegistry roomRegistry;
+    private final HostDepartureManager hostDepartures;
 
     public WebSocketConfig(RoomStore roomStore,
                            RoomService roomService,
                            ModuleService moduleService,
                            RoomRegistry roomRegistry,
+                           HostDepartureManager hostDepartures,
                            Environment environment) {
         this.environment = environment;
         this.roomStore = roomStore;
         this.roomService = roomService;
         this.moduleService = moduleService;
         this.roomRegistry = roomRegistry;
+        this.hostDepartures = hostDepartures;
     }
 
     // -----------------------------------------------------------------------
@@ -78,7 +82,9 @@ public class WebSocketConfig implements WebSocketConfigurer {
 
     @Bean
     public ControlHandler controlHandler() {
-        return new ControlHandler(roomStore, roomService, roomRegistry);
+        ControlHandler handler = new ControlHandler(roomStore, roomService, roomRegistry);
+        handler.setHostDepartureManager(hostDepartures);
+        return handler;
     }
 
     @Bean
