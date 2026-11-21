@@ -147,6 +147,16 @@ public class RoomRegistry {
     /**
      * Check if there are active connections currently in the room.
      */
+    /** Remove even stale/closed session registrations for a destroyed room. */
+    public void clearRoom(String roomId) {
+        List<WebSocketSession> sessions = rooms.remove(roomId);
+        if (sessions != null) {
+            for (WebSocketSession session : sessions) {
+                sessionToRoom.remove(session.getId(), roomId);
+            }
+        }
+    }
+
     public boolean hasRoom(String roomId) {
         List<WebSocketSession> list = rooms.get(roomId);
         return list != null && !list.isEmpty();
