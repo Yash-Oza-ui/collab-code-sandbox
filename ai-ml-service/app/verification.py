@@ -50,8 +50,12 @@ def compare_runtimes(
     Returns:
         (verified, verified_speedup_pct, reason)
     """
+    if not np.isfinite(orig_median) or not np.isfinite(fix_median):
+        return False, None, "Runtime values must be finite numbers."
     if orig_median <= 0.0:
         return False, None, "Original runtime was 0 ms; cannot calculate speedup."
+    if fix_median < 0.0:
+        return False, None, "Fix runtime cannot be negative."
 
     speedup_pct = ((orig_median - fix_median) / orig_median) * 100.0
 
@@ -96,6 +100,8 @@ async def verify_suggested_fix(
     )
 
     # 1. Determine original runs and baseline measurements
+    # When original execution runs occur, baseline measurements MUST be derived directly
+    # from sandbox execution, completely discarding any untrusted input from the caller (FR36.3, US-66).
     if not original_runs:
         try:
             orig_run_res = await runner.run_measurement(
@@ -106,31 +112,110 @@ async def verify_suggested_fix(
                 inputs=inputs,
                 repeats=repeats,
             )
-            if orig_run_res.completed_runs:
-                original_runs = orig_run_res.completed_runs
-                if not original_measurements and orig_run_res.measurements:
-                    original_measurements = orig_run_res.measurements
-        except Exception as e:
-            logger.warning("Could not execute original code for verification: %s", e)
+        except ExecutionServiceUnavailableError as esu:
+            logger.warning("Execution service unavailable for original code verification: %s", esu.message)
+            return FixVerificationResult(
+                verified=False,
+                reason=f"Execution service unavailable for verification: {esu.message}",
+                error_code=esu.code,
+            )
+        except RunBudgetExceededError as rbe:
+            logger.warning("Original code verification refused with RUN_BUDGET_EXCEEDED: %s", rbe.reason)
+            return FixVerificationResult(
+                verified=False,
+                reason=f"Verification could not be performed: repeated-run execution budget exceeded ({rbe.reason}).",
+                error_code="RUN_BUDGET_EXCEEDED",
+            )
+        except Exception as exc:
+            logger.error("Original code verification failed unexpectedly: %s", type(exc).__name__)
+            return FixVerificationResult(
+                verified=False,
+                reason=f"Original code verification failed unexpectedly: {type(exc).__name__}",
+                error_code="INTERNAL_ERROR",
+            )
 
-    if not original_measurements:
+        if orig_run_res.refused and orig_run_res.refusal_code == "RUN_BUDGET_EXCEEDED":
+            budget_reason = orig_run_res.refusal_reason or "aggregate_time_budget"
+            logger.warning("Original code verification refused with RUN_BUDGET_EXCEEDED (%s)", budget_reason)
+            return FixVerificationResult(
+                verified=False,
+                reason=f"Verification could not be performed: repeated-run execution budget exceeded ({budget_reason}).",
+                error_code="RUN_BUDGET_EXCEEDED",
+            )
+
+        if orig_run_res.failed:
+            fail_msg = orig_run_res.failure_reason or "Execution failure"
+            logger.info("Original code verification failed compilation or execution: %s", fail_msg)
+            return FixVerificationResult(
+                verified=False,
+                reason=f"Original code failed to compile or crashed: {fail_msg}.",
+                error_code="EXECUTION_FAILED",
+            )
+
+        if orig_run_res.timed_out:
+            timeout_sz = orig_run_res.timed_out_size or (inputs[-1] if inputs else 400)
+            logger.info("Original code execution timed out at input size %s", timeout_sz)
+            return FixVerificationResult(
+                verified=False,
+                reason=f"Original code execution timed out at input size {timeout_sz} (5000 ms limit reached).",
+                error_code="TIMEOUT",
+            )
+
+        if orig_run_res.incomplete:
+            inc_msg = orig_run_res.incomplete_reason or "Incomplete measurement runs"
+            logger.info("Original code verification incomplete: %s", inc_msg)
+            return FixVerificationResult(
+                verified=False,
+                reason=f"Original code verification incomplete: {inc_msg}.",
+                error_code="INCOMPLETE_MEASUREMENTS",
+            )
+
+        original_runs = orig_run_res.completed_runs
+
+    if not original_runs:
         return FixVerificationResult(
             verified=False,
-            reason="No original measurements available to compare.",
+            reason="No original runs available to compare.",
+            error_code="INCOMPLETE_MEASUREMENTS",
         )
 
-    orig_medians = [
-        float(np.median(m.runtimes_ms))
-        for m in original_measurements
-        if m.runtimes_ms
-    ]
-    if not orig_medians:
+    # Validate comparability and data validity of original runs
+    orig_runs_by_input = {r.input: r for r in original_runs}
+    for inp in inputs:
+        orig_run_item = orig_runs_by_input.get(inp)
+        if not orig_run_item or len(orig_run_item.runtimes_ms) < repeats:
+            logger.warning("Original code incomplete runs for input '%s': required %d repeats", inp, repeats)
+            return FixVerificationResult(
+                verified=False,
+                reason=f"Original measurements incomplete for input '{inp}': expected at least {repeats} repeats.",
+                error_code="INCOMPLETE_MEASUREMENTS",
+            )
+        for rt in orig_run_item.runtimes_ms:
+            if not np.isfinite(rt) or rt < 0.0:
+                logger.warning("Original code invalid runtime %s for input '%s'", rt, inp)
+                return FixVerificationResult(
+                    verified=False,
+                    reason="Original code produced invalid or non-finite runtime measurements.",
+                    error_code="INVALID_MEASUREMENTS",
+                )
+            if rt >= 5000.0:
+                logger.info("Original code runtime %s ms >= 5000 ms limit at input '%s'", rt, inp)
+                return FixVerificationResult(
+                    verified=False,
+                    reason=f"Original code execution timed out at input size {inp} (5000 ms limit reached).",
+                    error_code="TIMEOUT",
+                )
+
+    target_input = inputs[-1]
+    orig_target_run = orig_runs_by_input[target_input]
+    orig_median = float(np.median(orig_target_run.runtimes_ms))
+    if orig_median <= 0.0:
         return FixVerificationResult(
             verified=False,
-            reason="Original measurements contained no runtime data.",
+            original_runtime_ms=round(orig_median, 3),
+            reason="Original runtime was <= 0 ms; cannot calculate speedup.",
+            error_code="INVALID_MEASUREMENTS",
         )
-
-    orig_median = orig_medians[-1]
 
     # 2. Execute fix via sandbox runner under identical conditions (same runner, same inputs, same repeats)
     # Caller-supplied timing data (e.g. suggested_patch_runtimes_ms) cannot bypass sandbox execution;
@@ -221,26 +306,52 @@ async def verify_suggested_fix(
             error_code="INCOMPLETE_MEASUREMENTS",
         )
 
-    # 4. Check output equivalence (A faster program with mismatched output is not an improvement)
-    patch_medians = [
-        float(np.median(m.runtimes_ms))
-        for m in patch_res.measurements
-        if m.runtimes_ms
-    ]
-    patch_median = patch_medians[-1] if patch_medians else None
-
-    # The real runner contract must provide outputs for every measured input (US-66, FR36.3).
-    # If outputs are missing/not captured, fail closed (verified: false) rather than asserting an improvement.
-    if not original_runs or not patch_res.completed_runs:
-        logger.warning("Verification cannot verify output equivalence: missing run records.")
+    # Validate comparability and data validity of fix runs
+    if not patch_res.completed_runs:
         return FixVerificationResult(
             verified=False,
             original_runtime_ms=round(orig_median, 3),
-            patch_runtime_ms=round(patch_median, 3) if patch_median is not None else None,
-            reason="Cannot verify improvement: execution outputs were not captured for output equivalence comparison.",
-            error_code="OUTPUT_NOT_CAPTURED",
+            patch_runtime_ms=None,
+            reason="Fix measurements contained no runtime data.",
+            error_code="INCOMPLETE_MEASUREMENTS",
         )
 
+    patch_runs_by_input = {r.input: r for r in patch_res.completed_runs}
+    for inp in inputs:
+        patch_run_item = patch_runs_by_input.get(inp)
+        if not patch_run_item or len(patch_run_item.runtimes_ms) < repeats:
+            logger.warning("Fix incomplete runs for input '%s': required %d repeats", inp, repeats)
+            return FixVerificationResult(
+                verified=False,
+                original_runtime_ms=round(orig_median, 3),
+                patch_runtime_ms=None,
+                reason=f"Fix measurements incomplete for input '{inp}': expected at least {repeats} repeats.",
+                error_code="INCOMPLETE_MEASUREMENTS",
+            )
+        for rt in patch_run_item.runtimes_ms:
+            if not np.isfinite(rt) or rt < 0.0:
+                logger.warning("Fix invalid runtime %s for input '%s'", rt, inp)
+                return FixVerificationResult(
+                    verified=False,
+                    original_runtime_ms=round(orig_median, 3),
+                    patch_runtime_ms=None,
+                    reason="Fix produced invalid or non-finite runtime measurements.",
+                    error_code="INVALID_MEASUREMENTS",
+                )
+            if rt >= 5000.0:
+                logger.info("Fix runtime %s ms >= 5000 ms limit at input '%s'", rt, inp)
+                return FixVerificationResult(
+                    verified=False,
+                    original_runtime_ms=round(orig_median, 3),
+                    patch_runtime_ms=None,
+                    reason=f"Fix execution timed out at input size {inp} (5000 ms limit reached).",
+                    error_code="TIMEOUT",
+                )
+
+    patch_target_run = patch_runs_by_input[target_input]
+    patch_median = float(np.median(patch_target_run.runtimes_ms))
+
+    # 3. Check output equivalence (A faster program with mismatched output is not an improvement)
     orig_outputs = {r.input: r.output for r in original_runs}
     fix_outputs = {r.input: r.output for r in patch_res.completed_runs}
 
@@ -253,7 +364,7 @@ async def verify_suggested_fix(
             return FixVerificationResult(
                 verified=False,
                 original_runtime_ms=round(orig_median, 3),
-                patch_runtime_ms=round(patch_median, 3) if patch_median is not None else None,
+                patch_runtime_ms=round(patch_median, 3),
                 reason=f"Cannot verify improvement: output was not captured for input '{inp}'.",
                 error_code="OUTPUT_NOT_CAPTURED",
             )
@@ -264,20 +375,12 @@ async def verify_suggested_fix(
                 verified=False,
                 verified_speedup_pct=None,
                 original_runtime_ms=round(orig_median, 3),
-                patch_runtime_ms=round(patch_median, 3) if patch_median is not None else None,
+                patch_runtime_ms=round(patch_median, 3),
                 reason=f"Output mismatch on input '{inp}': fix produced different output than original code.",
                 error_code="OUTPUT_MISMATCH",
             )
 
-    if patch_median is None:
-        return FixVerificationResult(
-            verified=False,
-            original_runtime_ms=round(orig_median, 3),
-            patch_runtime_ms=None,
-            reason="Fix measurements contained no runtime data.",
-        )
-
-    # 5. Evaluate speedup against noise margin
+    # 4. Evaluate speedup against noise margin
     verified, speedup, reason = compare_runtimes(orig_median, patch_median, margin)
     logger.info(
         "Fix verification completed: request_id=%s verified=%s orig_median=%.3f patch_median=%.3f speedup=%s",

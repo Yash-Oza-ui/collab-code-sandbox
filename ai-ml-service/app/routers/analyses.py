@@ -32,6 +32,7 @@ from app.counters import (
 )
 from app.internal_runner import (
     ExecutionServiceUnavailableError,
+    InternalMeasurementResult,
     RunBudgetExceededError,
     get_measurement_runner,
 )
@@ -60,7 +61,7 @@ from app.slowdown import (
     get_slowdown_store,
     validate_threshold_overrides,
 )
-from app.verification import verify_suggested_fix
+from app.verification import FixVerificationResult, verify_suggested_fix
 
 logger = logging.getLogger(__name__)
 
@@ -208,6 +209,7 @@ async def analyze_complexity(payload: ComplexityRequest, request: Request) -> Co
     incomplete_reason: Optional[str] = None
     measurements = payload.measurements
     orig_completed_runs = []
+    step1_meas_res: Optional[InternalMeasurementResult] = None
 
     if not measurements:
         base_n = payload.base_input_size or getattr(settings, "COMPLEXITY_BASE_INPUT_SIZE", 100)
@@ -258,6 +260,7 @@ async def analyze_complexity(payload: ComplexityRequest, request: Request) -> Co
             if meas_res.incomplete:
                 incomplete_reason = meas_res.incomplete_reason
 
+            step1_meas_res = meas_res
             orig_completed_runs = meas_res.completed_runs
             measurements = meas_res.measurements
         except ExecutionServiceUnavailableError as esu:
@@ -334,9 +337,32 @@ async def analyze_complexity(payload: ComplexityRequest, request: Request) -> Co
         repeats = payload.repeats or getattr(settings, "COMPLEXITY_DEFAULT_REPEATS", 3)
         runner = get_measurement_runner()
 
-        # If measurements were provided in payload instead of executing original code,
-        # run original code via runner so comparable outputs and baseline runtimes are captured (FR36.3).
-        if not orig_completed_runs:
+        orig_error: Optional[FixVerificationResult] = None
+        if step1_meas_res is not None:
+            if step1_meas_res.failed:
+                orig_error = FixVerificationResult(
+                    verified=False,
+                    reason=f"Original code failed to compile or crashed: {step1_meas_res.failure_reason or 'Execution failure'}.",
+                    error_code="EXECUTION_FAILED",
+                )
+            elif step1_meas_res.timed_out:
+                timeout_sz = step1_meas_res.timed_out_size or (meas_inputs[-1] if meas_inputs else 400)
+                orig_error = FixVerificationResult(
+                    verified=False,
+                    reason=f"Original code execution timed out at input size {timeout_sz} (5000 ms limit reached).",
+                    error_code="TIMEOUT",
+                )
+            elif step1_meas_res.incomplete:
+                orig_error = FixVerificationResult(
+                    verified=False,
+                    reason=f"Original code verification incomplete: {step1_meas_res.incomplete_reason or 'Incomplete measurement runs'}.",
+                    error_code="INCOMPLETE_MEASUREMENTS",
+                )
+        elif not orig_completed_runs:
+            # If measurements were provided in payload instead of executing original code,
+            # run original code via runner so comparable outputs and baseline runtimes are captured.
+            # Baseline measurements returned by the sandbox execution ALWAYS overwrite caller-provided
+            # measurements for verification comparisons (FR36.3, US-66).
             try:
                 orig_meas_res = await runner.run_measurement(
                     request_id=f"{payload.request_id}-orig",
@@ -346,26 +372,71 @@ async def analyze_complexity(payload: ComplexityRequest, request: Request) -> Co
                     inputs=meas_inputs,
                     repeats=repeats,
                 )
-                if not orig_meas_res.refused and not orig_meas_res.failed:
+                if orig_meas_res.refused and orig_meas_res.refusal_code == "RUN_BUDGET_EXCEEDED":
+                    budget_reason = orig_meas_res.refusal_reason or "aggregate_time_budget"
+                    orig_error = FixVerificationResult(
+                        verified=False,
+                        reason=f"Verification could not be performed: repeated-run execution budget exceeded ({budget_reason}).",
+                        error_code="RUN_BUDGET_EXCEEDED",
+                    )
+                elif orig_meas_res.failed:
+                    orig_error = FixVerificationResult(
+                        verified=False,
+                        reason=f"Original code failed to compile or crashed: {orig_meas_res.failure_reason or 'Execution failure'}.",
+                        error_code="EXECUTION_FAILED",
+                    )
+                elif orig_meas_res.timed_out:
+                    timeout_sz = orig_meas_res.timed_out_size or (meas_inputs[-1] if meas_inputs else 400)
+                    orig_error = FixVerificationResult(
+                        verified=False,
+                        reason=f"Original code execution timed out at input size {timeout_sz} (5000 ms limit reached).",
+                        error_code="TIMEOUT",
+                    )
+                elif orig_meas_res.incomplete:
+                    orig_error = FixVerificationResult(
+                        verified=False,
+                        reason=f"Original code verification incomplete: {orig_meas_res.incomplete_reason or 'Incomplete measurement runs'}.",
+                        error_code="INCOMPLETE_MEASUREMENTS",
+                    )
+                else:
                     orig_completed_runs = orig_meas_res.completed_runs
-                    if not measurements:
-                        measurements = orig_meas_res.measurements
+                    measurements = orig_meas_res.measurements
+            except ExecutionServiceUnavailableError as esu:
+                orig_error = FixVerificationResult(
+                    verified=False,
+                    reason=f"Execution service unavailable for fix verification: {esu.message}",
+                    error_code=esu.code,
+                )
+            except RunBudgetExceededError as rbe:
+                orig_error = FixVerificationResult(
+                    verified=False,
+                    reason=f"Verification could not be performed: repeated-run execution budget exceeded ({rbe.reason}).",
+                    error_code="RUN_BUDGET_EXCEEDED",
+                )
             except Exception as e:
                 logger.warning("Could not execute original code for verification comparison: %s", e)
+                orig_error = FixVerificationResult(
+                    verified=False,
+                    reason=f"Original code execution failed unexpectedly: {type(e).__name__}",
+                    error_code="INTERNAL_ERROR",
+                )
 
-        verif_res = await verify_suggested_fix(
-            runner=runner,
-            request_id=payload.request_id,
-            room_id=payload.room_id,
-            language=payload.language,
-            original_code=payload.code,
-            suggested_fix=candidate_fix,
-            inputs=meas_inputs,
-            repeats=repeats,
-            original_measurements=measurements,
-            original_runs=orig_completed_runs,
-            noise_margin_pct=getattr(settings, "VERIFICATION_NOISE_MARGIN_PCT", 5.0),
-        )
+        if orig_error is not None:
+            verif_res = orig_error
+        else:
+            verif_res = await verify_suggested_fix(
+                runner=runner,
+                request_id=payload.request_id,
+                room_id=payload.room_id,
+                language=payload.language,
+                original_code=payload.code,
+                suggested_fix=candidate_fix,
+                inputs=meas_inputs,
+                repeats=repeats,
+                original_measurements=measurements,
+                original_runs=orig_completed_runs,
+                noise_margin_pct=getattr(settings, "VERIFICATION_NOISE_MARGIN_PCT", 5.0),
+            )
         ai_step["verified"] = verif_res.verified
         ai_step["verified_speedup_pct"] = verif_res.verified_speedup_pct
         ai_step["original_runtime_ms"] = verif_res.original_runtime_ms

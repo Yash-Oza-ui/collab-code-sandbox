@@ -82,6 +82,10 @@ async def test_verify_suggested_fix_faster():
         MeasurementItem(input_size=200, runtimes_ms=[8.0, 8.0, 8.0]),
         MeasurementItem(input_size=400, runtimes_ms=[32.0, 32.0, 32.0]),
     ]
+    orig_runs = [
+        MeasurementRunItem(input=str(m.input_size), runtimes_ms=list(m.runtimes_ms), output="")
+        for m in orig_measurements
+    ]
 
     res = await verify_suggested_fix(
         runner=runner,
@@ -93,6 +97,7 @@ async def test_verify_suggested_fix_faster():
         inputs=["100", "200", "400"],
         repeats=3,
         original_measurements=orig_measurements,
+        original_runs=orig_runs,
     )
 
     assert res.verified is True
@@ -120,6 +125,10 @@ async def test_verify_suggested_fix_slower():
         MeasurementItem(input_size=200, runtimes_ms=[4.0, 4.0, 4.0]),
         MeasurementItem(input_size=400, runtimes_ms=[16.0, 16.0, 16.0]),
     ]
+    orig_runs = [
+        MeasurementRunItem(input=str(m.input_size), runtimes_ms=list(m.runtimes_ms), output="")
+        for m in orig_measurements
+    ]
 
     res = await verify_suggested_fix(
         runner=runner,
@@ -131,6 +140,7 @@ async def test_verify_suggested_fix_slower():
         inputs=["100", "200", "400"],
         repeats=3,
         original_measurements=orig_measurements,
+        original_runs=orig_runs,
     )
 
     assert res.verified is False
@@ -160,6 +170,10 @@ async def test_verify_suggested_fix_noise_margin():
         MeasurementItem(input_size=200, runtimes_ms=[20.0, 20.0, 20.0]),
         MeasurementItem(input_size=400, runtimes_ms=[40.0, 40.0, 40.0]),
     ]
+    orig_runs = [
+        MeasurementRunItem(input=str(m.input_size), runtimes_ms=list(m.runtimes_ms), output="")
+        for m in orig_measurements
+    ]
 
     res = await verify_suggested_fix(
         runner=runner,
@@ -171,6 +185,7 @@ async def test_verify_suggested_fix_noise_margin():
         inputs=["100", "200", "400"],
         repeats=3,
         original_measurements=orig_measurements,
+        original_runs=orig_runs,
         noise_margin_pct=5.0,
     )
 
@@ -199,6 +214,10 @@ async def test_verify_suggested_fix_compile_error():
         MeasurementItem(input_size=200, runtimes_ms=[2.0, 2.0, 2.0]),
         MeasurementItem(input_size=400, runtimes_ms=[4.0, 4.0, 4.0]),
     ]
+    orig_runs = [
+        MeasurementRunItem(input=str(m.input_size), runtimes_ms=list(m.runtimes_ms), output="")
+        for m in orig_measurements
+    ]
 
     res = await verify_suggested_fix(
         runner=runner,
@@ -210,6 +229,7 @@ async def test_verify_suggested_fix_compile_error():
         inputs=["100", "200", "400"],
         repeats=3,
         original_measurements=orig_measurements,
+        original_runs=orig_runs,
     )
 
     assert res.verified is False
@@ -236,6 +256,10 @@ async def test_verify_suggested_fix_timeout():
         MeasurementItem(input_size=200, runtimes_ms=[2.0, 2.0, 2.0]),
         MeasurementItem(input_size=400, runtimes_ms=[4.0, 4.0, 4.0]),
     ]
+    orig_runs = [
+        MeasurementRunItem(input=str(m.input_size), runtimes_ms=list(m.runtimes_ms), output="")
+        for m in orig_measurements
+    ]
 
     res = await verify_suggested_fix(
         runner=runner,
@@ -247,6 +271,7 @@ async def test_verify_suggested_fix_timeout():
         inputs=["100", "200", "400"],
         repeats=3,
         original_measurements=orig_measurements,
+        original_runs=orig_runs,
     )
 
     assert res.verified is False
@@ -273,6 +298,10 @@ async def test_verify_suggested_fix_budget_refusal():
         MeasurementItem(input_size=200, runtimes_ms=[2.0, 2.0, 2.0]),
         MeasurementItem(input_size=400, runtimes_ms=[4.0, 4.0, 4.0]),
     ]
+    orig_runs = [
+        MeasurementRunItem(input=str(m.input_size), runtimes_ms=list(m.runtimes_ms), output="")
+        for m in orig_measurements
+    ]
 
     res = await verify_suggested_fix(
         runner=runner,
@@ -284,6 +313,7 @@ async def test_verify_suggested_fix_budget_refusal():
         inputs=["100", "200", "400"],
         repeats=3,
         original_measurements=orig_measurements,
+        original_runs=orig_runs,
     )
 
     assert res.verified is False
@@ -687,4 +717,445 @@ async def test_verify_suggested_fix_real_contract_matching_output_verifies():
     assert res.verified_speedup_pct is not None
     assert res.verified_speedup_pct > 80.0
     assert "Verified improvement" in (res.reason or "")
+
+
+# ============================================================================
+# US-66 Correctness Audit & Regression Tests (FR36.3)
+# ============================================================================
+
+
+@pytest.mark.anyio
+async def test_regression_1_fake_fast_caller_timings_overwritten_by_sandbox():
+    """Test 1: Fake fast original timings (caller 100ms vs sandbox 1000ms) cannot influence verification;
+
+    the 1000ms sandbox baseline is strictly used.
+    """
+    runner = StubMeasurementRunner(
+        code_overrides={
+            "def solve(n)": {
+                "growth_type": "linear",
+                "base_time_ms": 250.0,  # size 400 -> 1000ms
+                "output": "expected_out\n",
+            },
+            "def solve_fast(n)": {
+                "growth_type": "linear",
+                "base_time_ms": 125.0,  # size 400 -> 500ms (50% speedup)
+                "output": "expected_out\n",
+            },
+        }
+    )
+
+    fake_measurements = [
+        MeasurementItem(input_size=100, runtimes_ms=[25.0, 25.0, 25.0]),
+        MeasurementItem(input_size=200, runtimes_ms=[50.0, 50.0, 50.0]),
+        MeasurementItem(input_size=400, runtimes_ms=[100.0, 100.0, 100.0]),
+    ]
+
+    # Caller passes fake measurements claiming 100ms at size 400 without original_runs.
+    # Sandbox rerun must overwrite caller's measurements with 1000ms.
+    res = await verify_suggested_fix(
+        runner=runner,
+        request_id="req-fake-fast",
+        room_id="room-1",
+        language="python",
+        original_code="def solve(n): pass",
+        suggested_fix="def solve_fast(n): pass",
+        inputs=["100", "200", "400"],
+        repeats=3,
+        original_measurements=fake_measurements,
+    )
+
+    assert res.verified is True
+    assert res.original_runtime_ms == 1000.0  # NOT the caller's 100ms!
+    assert res.patch_runtime_ms == 500.0
+    assert res.verified_speedup_pct == 50.0
+    assert "Verified improvement: 50.0% speedup" in (res.reason or "")
+
+
+@pytest.mark.anyio
+async def test_regression_2_fake_slow_caller_timings_cannot_manufacture_speedup():
+    """Test 2: Fake slow original timings (caller 10,000ms vs sandbox 100ms) cannot manufacture a false verified improvement when fix is 200ms."""
+    runner = StubMeasurementRunner(
+        code_overrides={
+            "def solve(n)": {
+                "growth_type": "linear",
+                "base_time_ms": 25.0,  # size 400 -> 100ms
+                "output": "expected_out\n",
+            },
+            "def solve_fix(n)": {
+                "growth_type": "linear",
+                "base_time_ms": 50.0,  # size 400 -> 200ms (100% slowdown)
+                "output": "expected_out\n",
+            },
+        }
+    )
+
+    fake_measurements = [
+        MeasurementItem(input_size=100, runtimes_ms=[2500.0, 2500.0, 2500.0]),
+        MeasurementItem(input_size=200, runtimes_ms=[5000.0, 5000.0, 5000.0]),
+        MeasurementItem(input_size=400, runtimes_ms=[10000.0, 10000.0, 10000.0]),
+    ]
+
+    res = await verify_suggested_fix(
+        runner=runner,
+        request_id="req-fake-slow",
+        room_id="room-1",
+        language="python",
+        original_code="def solve(n): pass",
+        suggested_fix="def solve_fix(n): pass",
+        inputs=["100", "200", "400"],
+        repeats=3,
+        original_measurements=fake_measurements,
+    )
+
+    # Must NOT verify: sandbox measured original as 100ms and fix as 200ms (100% slowdown)
+    assert res.verified is False
+    assert res.verified_speedup_pct is None
+    assert res.original_runtime_ms == 100.0  # NOT 10,000ms!
+    assert res.patch_runtime_ms == 200.0
+    assert "fix is slower than original" in (res.reason or "")
+
+
+def test_regression_2b_endpoint_fake_timings_overwritten_by_sandbox():
+    """Test 2b: HTTP endpoint POST /v1/analyses/complexity overwrites caller measurements with sandbox rerun."""
+    stub = StubMeasurementRunner(
+        code_overrides={
+            "def solve(n)": {
+                "growth_type": "linear",
+                "base_time_ms": 25.0,  # size 400 -> 100ms
+                "output": "res\n",
+            },
+            "def solve_fix(n)": {
+                "growth_type": "linear",
+                "base_time_ms": 50.0,  # size 400 -> 200ms
+                "output": "res\n",
+            },
+        }
+    )
+    set_measurement_runner(stub)
+
+    payload = {
+        "request_id": "9c6f5b43-8d7e-4b2a-1c34-456789abcdef",
+        "room_id": "test-room-fake-timings",
+        "analysis_id": "ad7f6c54-9e8f-4c3b-2d45-456789abcdef",
+        "request_type": "complexity",
+        "language": "python",
+        "consent": True,
+        "ai_enabled": True,
+        "code": "def solve(n): pass",
+        "suggested_patch": "def solve_fix(n): pass",
+        "measurements": [
+            {"input_size": 100, "runtimes_ms": [2500.0, 2500.0, 2500.0]},
+            {"input_size": 200, "runtimes_ms": [5000.0, 5000.0, 5000.0]},
+            {"input_size": 400, "runtimes_ms": [10000.0, 10000.0, 10000.0]},
+        ],
+    }
+
+    resp = client.post("/v1/analyses/complexity", json=payload)
+    assert resp.status_code == 200
+    data = resp.json()
+    ai_step = data["ai_step"]
+    assert ai_step["verified"] is False
+    assert ai_step["original_runtime_ms"] == 100.0
+    assert ai_step["patch_runtime_ms"] == 200.0
+    assert "fix is slower than original" in ai_step["verification_reason"]
+
+
+@pytest.mark.anyio
+async def test_regression_3_original_execution_failure_fails_closed():
+    """Test 3: Original execution compilation failure / crash -> verified: false, EXECUTION_FAILED."""
+    runner = StubMeasurementRunner(
+        code_overrides={
+            "def broken_original": {
+                "failed": True,
+                "failure_reason": "SyntaxError in original code",
+            }
+        }
+    )
+
+    res = await verify_suggested_fix(
+        runner=runner,
+        request_id="req-orig-fail",
+        room_id="room-1",
+        language="python",
+        original_code="def broken_original(n): pass",
+        suggested_fix="def fix(n): pass",
+        inputs=["100", "200", "400"],
+        repeats=3,
+    )
+
+    assert res.verified is False
+    assert res.error_code == "EXECUTION_FAILED"
+    assert "Original code failed to compile or crashed" in (res.reason or "")
+
+
+@pytest.mark.anyio
+async def test_regression_4_original_execution_timeout_fails_closed():
+    """Test 4: Original execution timeout (5000 ms) -> verified: false, TIMEOUT."""
+    runner = StubMeasurementRunner(
+        code_overrides={
+            "def timeout_original": {
+                "timeout_sizes": {"400"},
+            }
+        }
+    )
+
+    res = await verify_suggested_fix(
+        runner=runner,
+        request_id="req-orig-timeout",
+        room_id="room-1",
+        language="python",
+        original_code="def timeout_original(n): pass",
+        suggested_fix="def fix(n): pass",
+        inputs=["100", "200", "400"],
+        repeats=3,
+    )
+
+    assert res.verified is False
+    assert res.error_code == "TIMEOUT"
+    assert "Original code execution timed out at input size 400" in (res.reason or "")
+
+
+@pytest.mark.anyio
+async def test_regression_5_original_execution_refusal_fails_closed():
+    """Test 5: Original execution budget refusal -> verified: false, RUN_BUDGET_EXCEEDED."""
+    runner = StubMeasurementRunner(
+        code_overrides={
+            "def budget_refused_original": {
+                "refusal_code": "RUN_BUDGET_EXCEEDED",
+                "refusal_reason": "aggregate_time_budget",
+            }
+        }
+    )
+
+    res = await verify_suggested_fix(
+        runner=runner,
+        request_id="req-orig-refused",
+        room_id="room-1",
+        language="python",
+        original_code="def budget_refused_original(n): pass",
+        suggested_fix="def fix(n): pass",
+        inputs=["100", "200", "400"],
+        repeats=3,
+    )
+
+    assert res.verified is False
+    assert res.error_code == "RUN_BUDGET_EXCEEDED"
+    assert "repeated-run execution budget exceeded" in (res.reason or "")
+
+
+@pytest.mark.anyio
+async def test_regression_6_original_incomplete_measurements_fails_closed():
+    """Test 6: Incomplete original measurements -> verified: false, INCOMPLETE_MEASUREMENTS."""
+    runner = StubMeasurementRunner(
+        code_overrides={
+            "def incomplete_original": {
+                "incomplete_reason": "Missing measurement results for input size 400",
+            }
+        }
+    )
+
+    res = await verify_suggested_fix(
+        runner=runner,
+        request_id="req-orig-incomplete",
+        room_id="room-1",
+        language="python",
+        original_code="def incomplete_original(n): pass",
+        suggested_fix="def fix(n): pass",
+        inputs=["100", "200", "400"],
+        repeats=3,
+    )
+
+    assert res.verified is False
+    assert res.error_code == "INCOMPLETE_MEASUREMENTS"
+    assert "Original code verification incomplete" in (res.reason or "")
+
+
+@pytest.mark.anyio
+async def test_regression_7_invalid_original_measurements_fail_closed():
+    """Test 7: Invalid original measurements (NaN, inf, negative, zero) -> verified: false, INVALID_MEASUREMENTS."""
+    runner = StubMeasurementRunner()
+
+    # Case A: NaN in original runtimes
+    orig_runs_nan = [
+        MeasurementRunItem(input="100", runtimes_ms=[1.0, 1.0, 1.0], output="ans"),
+        MeasurementRunItem(input="200", runtimes_ms=[2.0, 2.0, 2.0], output="ans"),
+        MeasurementRunItem(input="400", runtimes_ms=[float("nan"), 4.0, 4.0], output="ans"),
+    ]
+    res_nan = await verify_suggested_fix(
+        runner=runner,
+        request_id="req-invalid-nan",
+        room_id="room-1",
+        language="python",
+        original_code="def solve(n): pass",
+        suggested_fix="def fix(n): pass",
+        inputs=["100", "200", "400"],
+        repeats=3,
+        original_runs=orig_runs_nan,
+    )
+    assert res_nan.verified is False
+    assert res_nan.error_code == "INVALID_MEASUREMENTS"
+
+    # Case B: Negative runtime in original runtimes
+    orig_runs_neg = [
+        MeasurementRunItem(input="100", runtimes_ms=[1.0, 1.0, 1.0], output="ans"),
+        MeasurementRunItem(input="200", runtimes_ms=[2.0, 2.0, 2.0], output="ans"),
+        MeasurementRunItem(input="400", runtimes_ms=[-5.0, 4.0, 4.0], output="ans"),
+    ]
+    res_neg = await verify_suggested_fix(
+        runner=runner,
+        request_id="req-invalid-neg",
+        room_id="room-1",
+        language="python",
+        original_code="def solve(n): pass",
+        suggested_fix="def fix(n): pass",
+        inputs=["100", "200", "400"],
+        repeats=3,
+        original_runs=orig_runs_neg,
+    )
+    assert res_neg.verified is False
+    assert res_neg.error_code == "INVALID_MEASUREMENTS"
+
+    # Case C: Original runtime 0 ms
+    orig_runs_zero = [
+        MeasurementRunItem(input="100", runtimes_ms=[0.0, 0.0, 0.0], output="ans"),
+        MeasurementRunItem(input="200", runtimes_ms=[0.0, 0.0, 0.0], output="ans"),
+        MeasurementRunItem(input="400", runtimes_ms=[0.0, 0.0, 0.0], output="ans"),
+    ]
+    res_zero = await verify_suggested_fix(
+        runner=runner,
+        request_id="req-invalid-zero",
+        room_id="room-1",
+        language="python",
+        original_code="def solve(n): pass",
+        suggested_fix="def fix(n): pass",
+        inputs=["100", "200", "400"],
+        repeats=3,
+        original_runs=orig_runs_zero,
+    )
+    assert res_zero.verified is False
+    assert res_zero.error_code == "INVALID_MEASUREMENTS"
+
+
+@pytest.mark.anyio
+async def test_regression_8_suggested_fix_failures_fail_closed():
+    """Test 8: Fix failures (failed, timed_out, refused, incomplete, invalid) -> verified: false."""
+    orig_runs = [
+        MeasurementRunItem(input="100", runtimes_ms=[10.0, 10.0, 10.0], output="ans"),
+        MeasurementRunItem(input="200", runtimes_ms=[20.0, 20.0, 20.0], output="ans"),
+        MeasurementRunItem(input="400", runtimes_ms=[40.0, 40.0, 40.0], output="ans"),
+    ]
+
+    # Sub-case: Fix NaN runtime
+    runner_nan = StubMeasurementRunner(
+        code_overrides={
+            "def nan_fix": {
+                "predefined_runs": [
+                    {"input": "100", "runtimes_ms": [1.0, 1.0, 1.0], "output": "ans"},
+                    {"input": "200", "runtimes_ms": [2.0, 2.0, 2.0], "output": "ans"},
+                    {"input": "400", "runtimes_ms": [float("nan"), 2.0, 2.0], "output": "ans"},
+                ]
+            }
+        }
+    )
+    res_nan = await verify_suggested_fix(
+        runner=runner_nan,
+        request_id="req-fix-nan",
+        room_id="room-1",
+        language="python",
+        original_code="def solve(n): pass",
+        suggested_fix="def nan_fix(n): pass",
+        inputs=["100", "200", "400"],
+        repeats=3,
+        original_runs=orig_runs,
+    )
+    assert res_nan.verified is False
+    assert res_nan.error_code == "INVALID_MEASUREMENTS"
+
+
+@pytest.mark.anyio
+async def test_regression_9_mismatched_execution_conditions_fail_closed():
+    """Test 9: Mismatched execution conditions (mismatched inputs or incomplete repeats) fail closed."""
+    runner = StubMeasurementRunner(
+        code_overrides={
+            "def fix(n)": {
+                "growth_type": "linear",
+                "base_time_ms": 0.5,
+                "output": "ans",
+            }
+        }
+    )
+
+    # Original runs missing input '400'
+    orig_runs_missing = [
+        MeasurementRunItem(input="100", runtimes_ms=[1.0, 1.0, 1.0], output="ans"),
+        MeasurementRunItem(input="200", runtimes_ms=[2.0, 2.0, 2.0], output="ans"),
+    ]
+    res_missing = await verify_suggested_fix(
+        runner=runner,
+        request_id="req-cond-missing",
+        room_id="room-1",
+        language="python",
+        original_code="def solve(n): pass",
+        suggested_fix="def fix(n): pass",
+        inputs=["100", "200", "400"],
+        repeats=3,
+        original_runs=orig_runs_missing,
+    )
+    assert res_missing.verified is False
+    assert res_missing.error_code == "INCOMPLETE_MEASUREMENTS"
+
+    # Original runs have only 2 repeats instead of 3
+    orig_runs_fewer_repeats = [
+        MeasurementRunItem(input="100", runtimes_ms=[1.0, 1.0], output="ans"),
+        MeasurementRunItem(input="200", runtimes_ms=[2.0, 2.0], output="ans"),
+        MeasurementRunItem(input="400", runtimes_ms=[4.0, 4.0], output="ans"),
+    ]
+    res_repeats = await verify_suggested_fix(
+        runner=runner,
+        request_id="req-cond-repeats",
+        room_id="room-1",
+        language="python",
+        original_code="def solve(n): pass",
+        suggested_fix="def fix(n): pass",
+        inputs=["100", "200", "400"],
+        repeats=3,
+        original_runs=orig_runs_fewer_repeats,
+    )
+    assert res_repeats.verified is False
+    assert res_repeats.error_code == "INCOMPLETE_MEASUREMENTS"
+
+
+@pytest.mark.anyio
+async def test_regression_10_output_equivalence_cases():
+    """Test 10: Output equivalence enforcement (missing output -> OUTPUT_NOT_CAPTURED, mismatch -> OUTPUT_MISMATCH)."""
+    runner = StubMeasurementRunner(
+        code_overrides={
+            "def diff_fix": {
+                "growth_type": "linear",
+                "base_time_ms": 0.5,
+                "output": "different_output",
+            }
+        }
+    )
+
+    orig_runs = [
+        MeasurementRunItem(input="100", runtimes_ms=[2.0, 2.0, 2.0], output="canonical_output"),
+        MeasurementRunItem(input="200", runtimes_ms=[4.0, 4.0, 4.0], output="canonical_output"),
+        MeasurementRunItem(input="400", runtimes_ms=[8.0, 8.0, 8.0], output="canonical_output"),
+    ]
+
+    res = await verify_suggested_fix(
+        runner=runner,
+        request_id="req-out-diff",
+        room_id="room-1",
+        language="python",
+        original_code="def solve(n): pass",
+        suggested_fix="def diff_fix(n): pass",
+        inputs=["100", "200", "400"],
+        repeats=3,
+        original_runs=orig_runs,
+    )
+    assert res.verified is False
+    assert res.error_code == "OUTPUT_MISMATCH"
 
