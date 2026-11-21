@@ -23,6 +23,12 @@ public class RoomService {
 
     private final RoomStore store;
     private final RunRecordStore runRecordStore;
+    private HostDepartureManager hostDepartures;
+
+    @Autowired(required = false)
+    public void setHostDepartureManager(HostDepartureManager hostDepartures) {
+        this.hostDepartures = hostDepartures;
+    }
 
     public RoomService(RoomStore store) {
         this(store, null);
@@ -43,8 +49,8 @@ public class RoomService {
     public synchronized JoinOutcome join(String roomId, String sessionId,
                                          String displayName, String ownerToken) {
         Room room = store.get(roomId);
-        if (room == null) {
-            throw new IllegalArgumentException("unknown room: " + roomId);
+        if (room == null || room.isClosed()) {
+            return JoinOutcome.refused("ROOM_CLOSED");
         }
 
         // US-28 (V2.18, CR04): a removed session is blocked — a reconnect, refresh,
@@ -282,6 +288,7 @@ public class RoomService {
         target.setRole(Role.HOST);
         target.setCanEdit(computeCanEdit(room, Role.HOST));
         target.setCanRun(true);
+        if (hostDepartures != null) hostDepartures.hostTransferred(roomId);
         return target;
     }
 
