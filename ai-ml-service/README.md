@@ -283,19 +283,26 @@ $$\ln(5000) = m \cdot \ln(N_{\text{limit}}) + c \implies N_{\text{limit}} = \ope
 - **Refusal to Fit Through Two Points:** If fewer than 3 sizes finish (for instance, a timeout occurs at size $2n$ or $4n$), the service **refuses to fit a line through two points**. It sets `growth_rate = null`, `estimated_complexity = null`, `timeout_at_size = <size>`, and returns an explicit explanatory message:
   `"Execution timed out at input size 400 (5000 ms limit reached). No complexity estimate possible from fewer than 3 completed sizes."`
 
-### Budget Exceeded Policy (HTTP 429 RUN_BUDGET_EXCEEDED, US-64)
-- When repeated measurement requests exceed the execution-service resource budget (either 20,000 ms aggregate execution time or 10 runs per request ceiling), `execution-service` returns HTTP 429 with `error.code = "RUN_BUDGET_EXCEEDED"` and `retry_after_seconds = 30`.
-- **No Incomplete Estimates:** `ai-ml-service` never attempts to construct a partial estimate from truncated runs.
-- **Budget Attribution:** The refusal reason (`aggregate_time_budget` or `max_runs_per_request`) is captured and surfaced in `refusal_reason` and the response message:
+### Budget Exceeded & 10-Run Limit Policy (HTTP 429 RUN_BUDGET_EXCEEDED, US-64, NFR14)
+- **Central Run Cap Enforcement:** `execution-service` centrally enforces the 10-run limit (`app.execution.limits.max-runs-per-request: 10`) via `RunBudget.java`. Each measurement run passes through `RunBudget.execute()`, which checks `runsCompleted >= maxRuns` before acquiring a queue slot or launching a container.
+- **Client Pre-Validation:** `ai-ml-service` pre-validates `len(inputs) * repeats <= 10` before dispatching. If a request demands $> 10$ runs (e.g. 4 inputs $\times$ 3 repeats = 12 runs), it is immediately refused with HTTP 429 `RUN_BUDGET_EXCEEDED` (`reason: "max_runs_per_request"`, `Retry-After: 30`), preventing wasted container starts.
+- **Aggregate Time Budget (20,000 ms):** When repeated measurements exceed the 20,000 ms aggregate runtime budget in `execution-service`, it returns HTTP 429 `RUN_BUDGET_EXCEEDED` (`reason: "aggregate_time_budget"`, `Retry-After: 30`).
+- **No Incomplete Estimates:** `ai-ml-service` never attempts to construct a partial estimate from truncated runs. The specific budget hit is surfaced in `error.reason` and response message:
   `"Repeated-run execution budget exceeded (aggregate_time_budget). No estimate possible from incomplete data."`
-- The service sets HTTP 429 with `Retry-After: 30` header, informing the client when a new measurement request can be attempted.
+
+### Incomplete Measurements Protection
+- **Missing Sizes & Incomplete Repeats:** If `execution-service` returns fewer than the requested input sizes or if any size has fewer completed runs than the requested `repeats`, `HttpInternalRunClient` marks the result as incomplete (`incomplete: true`).
+- `fit_complexity_curve` safely refuses estimation:
+  `"No estimate possible from incomplete data: Incomplete repeats for input size '200' (received 1 of 3 required repeats)."`
+- **Minimum 3 Distinct Finished Sizes:** If duplicate sizes are supplied or fewer than 3 distinct sizes finish, the service safely returns `can_estimate: false` and `estimated_complexity: "no estimate"`.
 
 ### Internal Run Architecture & Dual Runner Pattern (T-18 Decision 7)
 `ai-ml-service` never spawns Docker containers directly. It interacts with `execution-service` via `POST /internal/runs` (`purpose: "measurement"`) authenticated by the shared header `X-Internal-Token`.
 - **`MeasurementRunner` Interface:** Defines the contract for executing repeated runs at geometric input sizes.
-- **`StubMeasurementRunner`:** Deterministic in-memory harness developed during Sprint 3 early start. Simulates constant, linear, quadratic, cubic, noisy, timeout, and 429 budget conditions without invoking Docker or network sockets. Used for fast, repeatable unit tests.
-- **`HttpInternalRunClient`:** Production client connecting to `execution-service` container runner over HTTP. Propagates internal credentials, parses `completed_runs`, detects timeouts, and extracts 429 budget refusal metadata.
-- **Automatic Fallback:** In local test environments where `execution-service` is unreachable, `HttpInternalRunClient` gracefully falls back to `StubMeasurementRunner`, keeping offline test suites green.
+- **Real Runner Default in Production (`USE_STUB_RUNNER=false`):** `HttpInternalRunClient` is the default measurement runner in deployed configurations.
+- **Zero Synthetic Fallback in Production:** In production, `HttpInternalRunClient` **never** falls back to synthetic measurements on connection or execution failures. If `execution-service` cannot be reached or is saturated, the service raises an `ExecutionServiceUnavailableError` resulting in HTTP 503 `ROOM_SERVICE_UNAVAILABLE` with `Retry-After: 5`, ensuring students never receive artificial complexity ratings.
+- **`StubMeasurementRunner` Restricted to Tests/Dev:** Stubs are strictly isolated to development/unit tests via explicit test fixture injection (`set_measurement_runner()` in `tests/conftest.py`) or setting `USE_STUB_RUNNER=true`.
+- **`HttpInternalRunClient`:** Production client connecting to `execution-service` container runner over HTTP. Propagates internal credentials, parses `completed_runs`, detects timeouts, validates full batch completion, and extracts 429 budget refusal metadata.
 
 ### Asynchronous Delivery & Zero Execution Delay (NFR9, CR08)
 - **Zero Run Delay:** Code execution results are returned immediately to the student without waiting for complexity measurements.

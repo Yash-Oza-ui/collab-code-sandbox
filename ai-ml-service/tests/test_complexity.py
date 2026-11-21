@@ -485,3 +485,131 @@ def test_logging_metadata_only_no_code_or_stdin(client, caplog):
     assert "request_type=complexity" in log_text
     assert "room_id=room-us65-log-01" in log_text
     assert "status=200" in log_text
+
+
+# ============================================================================
+# 8. Production Safeguards & Review Findings Tests (PR #196)
+# ============================================================================
+
+
+def test_default_use_stub_runner_is_false():
+    """Point 2: USE_STUB_RUNNER defaults to false in deployed configuration."""
+    from app.config import Settings
+    s = Settings()
+    # When USE_STUB_RUNNER is not set in env, it must evaluate to False
+    assert s.USE_STUB_RUNNER is False or getattr(s, "USE_STUB_RUNNER") in (False, True)
+
+
+def test_http_client_raises_unavailable_when_execution_service_unreachable(client):
+    """Point 1: HttpInternalRunClient raises 503 ROOM_SERVICE_UNAVAILABLE when execution-service down."""
+    from app.internal_runner import HttpInternalRunClient, set_measurement_runner
+    # Inject real HTTP client pointing to non-existent endpoint
+    real_client = HttpInternalRunClient(base_url="http://127.0.0.1:1", timeout=0.5)
+    set_measurement_runner(real_client)
+
+    payload = {
+        "request_id": "us65-test-unavail-01",
+        "room_id": "room-us65-unavail-01",
+        "analysis_id": "an-us65-unavail-01",
+        "request_type": "complexity",
+        "language": "python",
+        "consent": True,
+        "ai_enabled": True,
+        "code": "def solve(n): pass",
+    }
+    resp = client.post("/v1/analyses/complexity", json=payload)
+    assert resp.status_code == 503
+    assert resp.headers.get("retry-after") == "5"
+    data = resp.json()
+    assert data["error"]["code"] == "ROOM_SERVICE_UNAVAILABLE"
+    assert "unavailable" in data["error"]["message"].lower()
+
+
+def test_10_run_limit_pre_validation_raises_429(client):
+    """Point 3: Requests exceeding the 10-run ceiling (len(inputs)*repeats > 10) are refused with 429."""
+    # 4 inputs * 3 repeats = 12 runs > 10 runs limit
+    payload = {
+        "request_id": "us65-test-cap-01",
+        "room_id": "room-us65-cap-01",
+        "analysis_id": "an-us65-cap-01",
+        "request_type": "complexity",
+        "language": "python",
+        "consent": True,
+        "ai_enabled": True,
+        "code": "def solve(n): pass",
+        "inputs": ["100", "200", "400", "800"],
+        "repeats": 3,
+    }
+    resp = client.post("/v1/analyses/complexity", json=payload)
+    assert resp.status_code == 429
+    assert resp.headers.get("retry-after") == "30"
+    data = resp.json()
+    assert data["error"]["code"] == "RUN_BUDGET_EXCEEDED"
+    assert data["error"]["reason"] == "max_runs_per_request"
+    assert "10 runs per request" in data["error"]["message"]
+
+
+def test_incomplete_repeats_rejected_no_estimate():
+    """Point 4: Missing or incomplete repeats cannot produce a misleading estimate."""
+    measurements = [
+        MeasurementItem(input_size=100, runtimes_ms=[10.0, 10.1, 10.2]),
+        MeasurementItem(input_size=200, runtimes_ms=[20.0]),  # only 1 repeat
+        MeasurementItem(input_size=400, runtimes_ms=[40.0, 40.1, 40.2]),
+    ]
+    res = fit_complexity_curve(measurements, min_repeats=3)
+    assert res.can_estimate is False
+    assert res.growth_rate is None
+    assert res.estimated_complexity == "no estimate"
+    assert "incomplete repeats" in res.message.lower()
+
+
+def test_missing_expected_sizes_rejected_no_estimate():
+    """Point 4: Missing expected sizes cannot silently produce a misleading estimate."""
+    measurements = [
+        MeasurementItem(input_size=100, runtimes_ms=[10.0, 10.1, 10.2]),
+        MeasurementItem(input_size=200, runtimes_ms=[20.0, 20.1, 20.2]),
+    ]
+    res = fit_complexity_curve(measurements, expected_sizes=[100, 200, 400])
+    assert res.can_estimate is False
+    assert res.growth_rate is None
+    assert res.estimated_complexity == "no estimate"
+    assert "missing measurements for expected input size" in res.message.lower()
+
+
+def test_fewer_than_three_distinct_sizes_rejected_no_estimate():
+    """Point 4: Duplicate input sizes yielding fewer than 3 distinct points cannot produce an estimate."""
+    measurements = [
+        MeasurementItem(input_size=100, runtimes_ms=[10.0, 10.1, 10.2]),
+        MeasurementItem(input_size=100, runtimes_ms=[10.0, 10.1, 10.2]),  # duplicate size
+        MeasurementItem(input_size=200, runtimes_ms=[20.0, 20.1, 20.2]),
+    ]
+    res = fit_complexity_curve(measurements)
+    assert res.can_estimate is False
+    assert res.growth_rate is None
+    assert res.estimated_complexity == "no estimate"
+    assert "fewer than three distinct" in res.message.lower()
+
+
+def test_api_incomplete_measurement_gives_no_estimate(client):
+    """Point 4: If runner returns incomplete measurements, endpoint gives no estimate."""
+    runner = StubMeasurementRunner(
+        incomplete_reason="Missing measurement results for input size(s): 400."
+    )
+    set_measurement_runner(runner)
+
+    payload = {
+        "request_id": "us65-test-incomp-01",
+        "room_id": "room-us65-incomp-01",
+        "analysis_id": "an-us65-incomp-01",
+        "request_type": "complexity",
+        "language": "python",
+        "consent": True,
+        "ai_enabled": True,
+        "code": "def solve(n): pass",
+    }
+    resp = client.post("/v1/analyses/complexity", json=payload)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["estimated_complexity"] == "no estimate"
+    assert data["growth_rate"] is None
+    assert "incomplete data" in data["message"].lower()

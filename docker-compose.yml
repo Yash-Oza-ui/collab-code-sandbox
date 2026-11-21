@@ -84,6 +84,10 @@ services:
       ROOM_HOURLY_LIMIT: ${ROOM_HOURLY_LIMIT:-20}
       MONTHLY_BUDGET_USD: ${MONTHLY_BUDGET_USD:-10.0}
       TOKEN_COST_PER_TOKEN: ${TOKEN_COST_PER_TOKEN:-0.0000035}
+      # Repeated-run internal runner configuration (US-64, US-65, T-18 Decision 7)
+      EXECUTION_SERVICE_URL: ${EXECUTION_SERVICE_URL:-http://execution-service:8082}
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-}
+      USE_STUB_RUNNER: ${USE_STUB_RUNNER:-false}
       # LLM API keys are never written here. Put them in your local .env
       # (git-ignored) and reference them as ${VARIABLE_NAME}.
     ports:

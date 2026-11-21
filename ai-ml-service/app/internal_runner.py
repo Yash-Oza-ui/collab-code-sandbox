@@ -40,6 +40,21 @@ class RunBudgetExceededError(Exception):
         super().__init__(self.message)
 
 
+class ExecutionServiceUnavailableError(Exception):
+    """Raised when execution-service cannot be reached or returns an unavailable error."""
+
+    def __init__(
+        self,
+        message: str,
+        retry_after_seconds: Optional[int] = 5,
+        code: str = "ROOM_SERVICE_UNAVAILABLE",
+    ) -> None:
+        self.code = code
+        self.message = message
+        self.retry_after_seconds = retry_after_seconds
+        super().__init__(self.message)
+
+
 class MeasurementRunItem(BaseModel):
     """A single input size run item from execution-service."""
 
@@ -60,6 +75,8 @@ class InternalMeasurementResult(BaseModel):
     refusal_code: Optional[str] = None
     refusal_reason: Optional[str] = None
     retry_after_seconds: Optional[int] = None
+    incomplete: bool = False
+    incomplete_reason: Optional[str] = None
     total_runs_completed: int = 0
     total_runs_requested: int = 0
 
@@ -98,6 +115,7 @@ class StubMeasurementRunner(MeasurementRunner):
         refusal_reason: Optional[str] = None,
         retry_after_seconds: Optional[int] = 30,
         predefined_runs: Optional[list[dict[str, Any]]] = None,
+        incomplete_reason: Optional[str] = None,
     ) -> None:
         self.growth_type = growth_type
         self.base_time_ms = base_time_ms
@@ -106,6 +124,7 @@ class StubMeasurementRunner(MeasurementRunner):
         self.refusal_reason = refusal_reason
         self.retry_after_seconds = retry_after_seconds
         self.predefined_runs = predefined_runs
+        self.incomplete_reason = incomplete_reason
         self.call_count = 0
         self.total_runs_requested = 0
         self.last_request: Optional[dict[str, Any]] = None
@@ -129,6 +148,17 @@ class StubMeasurementRunner(MeasurementRunner):
             "inputs": inputs,
             "repeats": repeats,
         }
+
+        # 0. Incomplete Simulation
+        if self.incomplete_reason:
+            return InternalMeasurementResult(
+                request_id=request_id,
+                purpose="measurement",
+                incomplete=True,
+                incomplete_reason=self.incomplete_reason,
+                total_runs_requested=runs_requested,
+                total_runs_completed=0,
+            )
 
         # 1. Budget Refusal Simulation (AC 5, US-64)
         if self.refusal_code == "RUN_BUDGET_EXCEEDED":
@@ -263,23 +293,19 @@ class HttpInternalRunClient(MeasurementRunner):
             try:
                 resp = await client.post(url, json=payload, headers=headers)
             except (httpx.ConnectError, httpx.ConnectTimeout, httpx.NetworkError) as exc:
-                logger.info(
-                    "execution-service not reachable at %s, falling back to stub measurement runner (%s)",
+                logger.error(
+                    "execution-service not reachable at %s (%s). Never returning synthetic measurements.",
                     self.base_url,
                     type(exc).__name__,
                 )
-                stub = StubMeasurementRunner(growth_type="linear", base_time_ms=1.0)
-                return await stub.run_measurement(
-                    request_id=request_id,
-                    room_id=room_id,
-                    language=language,
-                    code=code,
-                    inputs=inputs,
-                    repeats=repeats,
-                )
+                raise ExecutionServiceUnavailableError(
+                    f"Execution service unavailable at {self.base_url} ({type(exc).__name__}). Measurements could not be performed."
+                ) from exc
             except Exception as exc:
                 logger.error("Failed to connect to execution-service internal endpoint: %s", type(exc).__name__)
-                raise
+                raise ExecutionServiceUnavailableError(
+                    f"Failed to communicate with execution-service: {type(exc).__name__}"
+                ) from exc
 
         # Check HTTP 429 RUN_BUDGET_EXCEEDED
         if resp.status_code == 429:
@@ -300,9 +326,23 @@ class HttpInternalRunClient(MeasurementRunner):
                 total_runs_completed=0,
             )
 
+        if resp.status_code == 503:
+            body = {}
+            try:
+                body = resp.json()
+            except Exception:
+                pass
+            err = body.get("error", {})
+            err_msg = err.get("message", "Execution service queue is full or service unavailable.")
+            retry = err.get("retry_after_seconds", 5)
+            logger.warning("execution-service /internal/runs 503: %s", err_msg)
+            raise ExecutionServiceUnavailableError(err_msg, retry_after_seconds=retry)
+
         if resp.status_code != 200:
             logger.warning("execution-service /internal/runs failed with status %d: %s", resp.status_code, resp.text[:200])
-            resp.raise_for_status()
+            raise ExecutionServiceUnavailableError(
+                f"Execution service returned error status {resp.status_code}."
+            )
 
         data = resp.json()
         completed_runs_raw = data.get("completed_runs", [])
@@ -310,11 +350,21 @@ class HttpInternalRunClient(MeasurementRunner):
         measurements: list[MeasurementItem] = []
         timed_out = False
         first_timed_out_size: Optional[int] = None
+        incomplete = False
+        incomplete_reason: Optional[str] = None
 
+        returned_inputs: set[str] = set()
         for item in completed_runs_raw:
             inp_str = str(item.get("input", ""))
+            returned_inputs.add(inp_str)
             runtimes = [float(r) for r in item.get("runtimes_ms", [])]
             completed_run_items.append(MeasurementRunItem(input=inp_str, runtimes_ms=runtimes))
+
+            # Check if any input has fewer repeats than requested
+            if len(runtimes) < repeats:
+                incomplete = True
+                incomplete_reason = f"Incomplete repeats for input size '{inp_str}': expected {repeats}, received {len(runtimes)}."
+
             try:
                 size = int(inp_str)
                 measurements.append(MeasurementItem(input_size=size, runtimes_ms=runtimes))
@@ -324,6 +374,12 @@ class HttpInternalRunClient(MeasurementRunner):
             except ValueError:
                 pass
 
+        # Check if any requested inputs were completely missing
+        missing_inputs = [inp for inp in inputs if inp not in returned_inputs]
+        if missing_inputs and not timed_out:
+            incomplete = True
+            incomplete_reason = f"Missing measurement results for input size(s): {', '.join(missing_inputs)}."
+
         return InternalMeasurementResult(
             request_id=request_id,
             purpose="measurement",
@@ -331,6 +387,8 @@ class HttpInternalRunClient(MeasurementRunner):
             measurements=measurements,
             timed_out=timed_out,
             timed_out_size=first_timed_out_size,
+            incomplete=incomplete,
+            incomplete_reason=incomplete_reason,
             total_runs_completed=len(completed_run_items) * repeats,
             total_runs_requested=len(inputs) * repeats,
         )

@@ -31,6 +31,7 @@ from app.counters import (
     record_fallback,
 )
 from app.internal_runner import (
+    ExecutionServiceUnavailableError,
     RunBudgetExceededError,
     get_measurement_runner,
 )
@@ -199,12 +200,31 @@ async def analyze_complexity(payload: ComplexityRequest, request: Request) -> Co
 
     # 1. Obtain measurements: either provided in payload or run via measurement runner (US-64, US-65)
     budget_refusal_reason: Optional[str] = None
+    incomplete_reason: Optional[str] = None
     measurements = payload.measurements
 
     if not measurements:
         base_n = payload.base_input_size or getattr(settings, "COMPLEXITY_BASE_INPUT_SIZE", 100)
         repeats = payload.repeats or getattr(settings, "COMPLEXITY_DEFAULT_REPEATS", 3)
         inputs = payload.inputs or [str(base_n), str(base_n * 2), str(base_n * 4)]
+
+        # Pre-validate 10-run per-request limit before dispatching (US-64, NFR14)
+        total_runs_requested = len(inputs) * repeats
+        if total_runs_requested > 10:
+            request.state.error_code = "RUN_BUDGET_EXCEEDED"
+            raise HTTPException(
+                status_code=429,
+                detail={
+                    "code": "RUN_BUDGET_EXCEEDED",
+                    "message": (
+                        f"Requested measurement run count ({total_runs_requested}) exceeds the "
+                        f"maximum limit of 10 runs per request (US-64, NFR14)."
+                    ),
+                    "reason": "max_runs_per_request",
+                    "retry_after_seconds": 30,
+                },
+                headers={"Retry-After": "30"},
+            )
 
         runner = get_measurement_runner()
         try:
@@ -229,7 +249,21 @@ async def analyze_complexity(payload: ComplexityRequest, request: Request) -> Co
                     },
                     headers={"Retry-After": str(meas_res.retry_after_seconds or 30)},
                 )
+            if meas_res.incomplete:
+                incomplete_reason = meas_res.incomplete_reason
+
             measurements = meas_res.measurements
+        except ExecutionServiceUnavailableError as esu:
+            request.state.error_code = esu.code
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": esu.code,
+                    "message": esu.message,
+                    "retry_after_seconds": esu.retry_after_seconds,
+                },
+                headers={"Retry-After": str(esu.retry_after_seconds or 5)},
+            ) from esu
         except HTTPException:
             raise
         except RunBudgetExceededError as rbe:
@@ -251,6 +285,7 @@ async def analyze_complexity(payload: ComplexityRequest, request: Request) -> Co
         time_limit_ms=getattr(settings, "COMPLEXITY_TIMEOUT_MS", 5000.0),
         r2_threshold=getattr(settings, "COMPLEXITY_R2_POOR_FIT_THRESHOLD", 0.85),
         budget_refusal_reason=budget_refusal_reason,
+        incomplete_reason=incomplete_reason,
     )
 
     # 2. Rules-First Static Analysis via Central Method Chain (US-77, US-67, FR40.3)

@@ -108,7 +108,7 @@ class Settings:
         self.SLOWDOWN_MAX_HISTORY: int = int(os.getenv("SLOWDOWN_MAX_HISTORY", "100"))
 
         # Time complexity measurement and internal run configuration (US-64, US-65, T-18 Decision 7)
-        self.USE_STUB_RUNNER: bool = os.getenv("USE_STUB_RUNNER", "true").lower() in ("true", "1")
+        self.USE_STUB_RUNNER: bool = os.getenv("USE_STUB_RUNNER", "false").lower() in ("true", "1")
         self.EXECUTION_SERVICE_URL: str = os.getenv(
             "EXECUTION_SERVICE_URL", "http://execution-service:8082"
         ).rstrip("/")

@@ -70,6 +70,9 @@ def fit_complexity_curve(
     time_limit_ms: float = 5000.0,
     r2_threshold: float = 0.85,
     budget_refusal_reason: Optional[str] = None,
+    incomplete_reason: Optional[str] = None,
+    min_repeats: Optional[int] = None,
+    expected_sizes: Optional[list[int]] = None,
 ) -> ComplexityFitResult:
     """Fit a linear regression to log(input size) against log(median runtime) (FR36.1, FR36.2).
 
@@ -84,6 +87,7 @@ def fit_complexity_curve(
        and names which budget was hit.
     6. Poor Fit: R² < r2_threshold (default 0.85) is reported with low confidence warning.
     7. Flat / Falling Line: Growth rate near zero (m <= 0.05) gives 'limit not reached' instead of nonsense input size.
+    8. Incomplete Data Protection: Missing sizes or incomplete repeats safely refuse estimation with informative message.
     """
     # 1. Budget Refusal Check (AC 5, US-64, NFR14)
     if budget_refusal_reason:
@@ -102,6 +106,20 @@ def fit_complexity_curve(
             medians={},
         )
 
+    # 2. Incomplete Measurements Check
+    if incomplete_reason:
+        return ComplexityFitResult(
+            growth_rate=None,
+            estimated_complexity="no estimate",
+            r2_score=None,
+            projected_timeout_input_size=None,
+            timeout_at_size=None,
+            is_poor_fit=False,
+            can_estimate=False,
+            message=f"No estimate possible from incomplete data: {incomplete_reason}",
+            medians={},
+        )
+
     if not measurements:
         return ComplexityFitResult(
             growth_rate=None,
@@ -115,10 +133,50 @@ def fit_complexity_curve(
             medians={},
         )
 
+    # Check minimum repeats per size if configured
+    if min_repeats is not None:
+        for m in measurements:
+            valid_runtimes = [t for t in m.runtimes_ms if t is not None and not math.isnan(t) and not math.isinf(t)]
+            if len(valid_runtimes) < min_repeats:
+                return ComplexityFitResult(
+                    growth_rate=None,
+                    estimated_complexity="no estimate",
+                    r2_score=None,
+                    projected_timeout_input_size=None,
+                    timeout_at_size=None,
+                    is_poor_fit=False,
+                    can_estimate=False,
+                    message=(
+                        f"No estimate possible: incomplete repeats for input size {m.input_size} "
+                        f"(received {len(valid_runtimes)} of {min_repeats} required repeats)."
+                    ),
+                    medians={},
+                )
+
+    # Check expected sizes if configured
+    if expected_sizes:
+        present_sizes = {m.input_size for m in measurements}
+        missing_sizes = [s for s in expected_sizes if s not in present_sizes]
+        if missing_sizes:
+            return ComplexityFitResult(
+                growth_rate=None,
+                estimated_complexity="no estimate",
+                r2_score=None,
+                projected_timeout_input_size=None,
+                timeout_at_size=None,
+                is_poor_fit=False,
+                can_estimate=False,
+                message=(
+                    f"No estimate possible: missing measurements for expected input size(s): "
+                    f"{', '.join(str(s) for s in missing_sizes)}."
+                ),
+                medians={},
+            )
+
     # Sort measurements by input size
     sorted_meas = sorted(measurements, key=lambda m: m.input_size)
 
-    # 2. Timeout and Completion Check (AC 4, NFR4.1)
+    # 3. Timeout and Completion Check (AC 4, NFR4.1)
     # A size times out if any runtime reaches or exceeds time_limit_ms (5000 ms)
     timed_out_sizes: list[int] = []
     finished_meas: list[MeasurementItem] = []
@@ -153,7 +211,8 @@ def fit_complexity_curve(
             medians={},
         )
 
-    if len(finished_meas) < 3:
+    distinct_finished_sizes = {m.input_size for m in finished_meas}
+    if len(distinct_finished_sizes) < 3:
         return ComplexityFitResult(
             growth_rate=None,
             estimated_complexity="no estimate",
@@ -163,8 +222,8 @@ def fit_complexity_curve(
             is_poor_fit=False,
             can_estimate=False,
             message=(
-                f"No estimate possible: fewer than three measurement sizes finished "
-                f"({len(finished_meas)} of 3 required; never fitting a line through two points)."
+                f"No estimate possible: fewer than three distinct measurement sizes finished "
+                f"({len(distinct_finished_sizes)} of 3 required; never fitting a line through two points)."
             ),
             medians={},
         )
