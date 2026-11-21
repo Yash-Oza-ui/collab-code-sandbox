@@ -22,6 +22,8 @@ payload_verified='{
   "analysis_id": "9b5f4c32-7d6e-4f0b-1a23-456789abcdef",
   "request_type": "complexity",
   "language": "python",
+  "consent": true,
+  "ai_enabled": true,
   "code": "def solve(n): pass",
   "measurements": [
     {"input_size": 100, "runtimes_ms": [2.0, 2.1, 2.0]},
@@ -68,6 +70,8 @@ payload_slower='{
   "analysis_id": "0b6f5c43-8d7e-4a1c-2b34-456789abcdef",
   "request_type": "complexity",
   "language": "python",
+  "consent": true,
+  "ai_enabled": true,
   "code": "def solve(n): pass",
   "measurements": [
     {"input_size": 100, "runtimes_ms": [2.0, 2.1, 2.0]},
@@ -109,6 +113,8 @@ payload_noise='{
   "analysis_id": "ba7f6c54-9d8e-4b2d-3c45-456789abcdef",
   "request_type": "complexity",
   "language": "python",
+  "consent": true,
+  "ai_enabled": true,
   "code": "def solve(n): pass",
   "measurements": [
     {"input_size": 100, "runtimes_ms": [10.0, 10.0, 10.0]},
@@ -143,7 +149,7 @@ fi
 
 pass ai-ml-service "fix within 5.0% noise margin not labeled verified (US-66, FR36.3)"
 
-# 4. Test: Consent missing verifies provided fix without external AI call
+# 4. Test: Consent missing skips AI step while returning AI-free parts intact (FR12.3, NFR7.5)
 payload_no_consent='{
   "request_id": "ba7f6b54-9c8d-4a2c-3b45-456789abcdef",
   "room_id": "room-us66-test",
@@ -184,10 +190,10 @@ if ! echo "$body_no_consent" | grep -q '"error_code":"CONSENT_MISSING"'; then
   exit 1
 fi
 
-if ! echo "$body_no_consent" | grep -q '"verified":true'; then
-  fail ai-ml-service "expected verifying provided fix to succeed without consent, got: $body_no_consent"
+if ! echo "$body_no_consent" | grep -q '"estimated_complexity"'; then
+  fail ai-ml-service "expected estimated_complexity returned when consent:false, got: $body_no_consent"
   exit 1
 fi
 
-pass ai-ml-service "verifying already provided fix requires no consent (FR12.3, NFR7.5, US-66)"
+pass ai-ml-service "declining consent skips AI step while returning AI-free parts intact (FR12.3, NFR7.5, US-66)"
 
