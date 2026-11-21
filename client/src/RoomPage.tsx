@@ -1463,6 +1463,23 @@ export default function RoomPage(props: RoomPageProps = {}) {
             {roomMode.mode === 'pair' ? 'Pair' : 'Open'}{roomMode.detail ? ` · ${roomMode.detail}` : ''}
           </span>
         )}
+        {roomMode?.mode === 'pair' && roomMode.detail && (
+          <span className="room-preset-badge" data-testid="room-preset-badge">
+            {roomMode.detail === 'teach_interview'
+              ? 'Teach / Interview'
+              : roomMode.detail === 'debug_together'
+                ? 'Debug together'
+                : roomMode.detail}
+          </span>
+        )}
+        {roomMode?.mode === 'pair' && (
+          <span
+            className={`room-edit-status-badge ${!isObserver && (isHost || myCanEdit === true) ? 'can-edit' : 'read-only'}`}
+            data-testid="room-edit-status-badge"
+          >
+            {!isObserver && (isHost || myCanEdit === true) ? 'You can edit' : 'Read only'}
+          </span>
+        )}
         {displayName && (
           <>
             <span className="room-header-separator" aria-hidden="true"> · </span>
