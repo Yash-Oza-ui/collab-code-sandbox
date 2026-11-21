@@ -345,6 +345,11 @@ public class ModuleService {
         }
     }
 
+    /** US-56: drop all module metadata, saved versions and pending requests for a room. */
+    public synchronized void deleteByRoom(String roomId) {
+        byRoom.remove(roomId);
+    }
+
     public ModuleRecord find(String roomId, String moduleId) {
         Map<String, ModuleRecord> modules = byRoom.get(roomId);
         return modules == null ? null : modules.get(moduleId);
@@ -418,7 +423,7 @@ public class ModuleService {
 
     private Room requireOpenRoom(String roomId) {
         Room room = rooms.get(roomId);
-        if (room == null) {
+        if (room == null || room.isClosed()) {
             throw new IllegalArgumentException("ROOM_NOT_FOUND");
         }
         if (room.getMode() != RoomMode.OPEN) {

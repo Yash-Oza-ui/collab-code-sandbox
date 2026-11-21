@@ -20,6 +20,12 @@ public class HostDepartureManager {
     private final RoomRegistry registry;
     private final RoomLimitsProperties limits;
     private final Clock clock;
+    private RoomCleanupCoordinator roomCleanup;
+
+    @Autowired(required = false)
+    public void setRoomCleanupCoordinator(RoomCleanupCoordinator coordinator) {
+        this.roomCleanup = coordinator;
+    }
     private final Map<String, PendingDeparture> pending = new HashMap<>();
 
     @Autowired
@@ -82,6 +88,10 @@ public class HostDepartureManager {
         pending.remove(roomId);
         Room room = store.get(roomId);
         if (room == null || room.isClosed()) return;
+        if (roomCleanup != null) {
+            roomCleanup.endRoom(roomId, "closed");
+            return;
+        }
         // Retain the closed tombstone so subsequent WebSocket connections get 4410.
         // US-56 will decide how tombstones survive actual room-data deletion.
         room.close();

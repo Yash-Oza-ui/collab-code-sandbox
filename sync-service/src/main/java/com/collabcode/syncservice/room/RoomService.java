@@ -24,6 +24,12 @@ public class RoomService {
     private final RoomStore store;
     private final RunRecordStore runRecordStore;
     private HostDepartureManager hostDepartures;
+    private RoomCleanupCoordinator roomCleanup;
+
+    @Autowired(required = false)
+    public void setRoomCleanupCoordinator(RoomCleanupCoordinator roomCleanup) {
+        this.roomCleanup = roomCleanup;
+    }
 
     @Autowired(required = false)
     public void setHostDepartureManager(HostDepartureManager hostDepartures) {
@@ -349,6 +355,7 @@ public class RoomService {
      * Returns false if the room is unknown.
      */
     public boolean closeRoom(String roomId) {
+        if (roomCleanup != null) return roomCleanup.endRoom(roomId, "closed");
         Room room = store.get(roomId);
         if (room == null) return false;
         room.close();
@@ -362,6 +369,7 @@ public class RoomService {
      * Purges room metadata and its run records (FR32, US-56 room destruction).
      */
     public boolean deleteRoom(String roomId) {
+        if (roomCleanup != null) return roomCleanup.endRoom(roomId, "deleted");
         Room room = store.remove(roomId);
         if (runRecordStore != null) {
             runRecordStore.deleteByRoom(roomId);
