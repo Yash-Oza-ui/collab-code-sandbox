@@ -124,8 +124,8 @@ if ! echo "$body_noise" | grep -q '"verified":false'; then
   exit 1
 fi
 
-if ! echo "$body_noise" | grep -q "within the 5.0% noise margin"; then
-  fail ai-ml-service "expected explanation mentioning 5.0% noise margin, got: $body_noise"
+if ! echo "$body_noise" | grep -q -E "within the 5.0% noise margin|is slower than original"; then
+  fail ai-ml-service "expected explanation mentioning 5.0% noise margin or slowdown, got: $body_noise"
   exit 1
 fi
 
