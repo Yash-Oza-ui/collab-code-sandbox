@@ -42,6 +42,16 @@ public class RunRequest {
     private String stdin = "";
 
     /**
+     * Optional analysis task to trigger asynchronously after code execution (NFR9, T-18).
+     */
+    private String task;
+
+    /**
+     * Optional caller AI consent flag.
+     */
+    private Boolean consent;
+
+    /**
      * Exactly one source object: inline or saved (T-17 V2.8).
      */
     private RunSource source;
@@ -68,6 +78,12 @@ public class RunRequest {
 
     public String getStdin() { return stdin; }
     public void setStdin(String stdin) { this.stdin = (stdin != null) ? stdin : ""; }
+
+    public String getTask() { return task; }
+    public void setTask(String task) { this.task = task; }
+
+    public Boolean getConsent() { return consent; }
+    public void setConsent(Boolean consent) { this.consent = consent; }
 
     public RunSource getSource() { return source; }
     public void setSource(RunSource source) { this.source = source; }
