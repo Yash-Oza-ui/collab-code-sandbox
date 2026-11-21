@@ -17,9 +17,15 @@ from app.llm.explainer import (
     clean_markdown,
     enforce_sentence_limit,
     generate_explanation,
+    parse_crash_explanation_output,
     split_sentences,
 )
-from app.llm.prompts import EXPLAIN_SYSTEM_INSTRUCTION, build_explanation_prompt
+from app.llm.prompts import (
+    CRASH_EXPLANATION_SYSTEM_INSTRUCTION,
+    EXPLAIN_SYSTEM_INSTRUCTION,
+    build_crash_explanation_prompt,
+    build_explanation_prompt,
+)
 from app.section import extract_error_line_from_stderr, extract_relevant_section
 
 __all__ = [
@@ -37,8 +43,11 @@ __all__ = [
     "clean_markdown",
     "enforce_sentence_limit",
     "generate_explanation",
+    "parse_crash_explanation_output",
     "split_sentences",
+    "CRASH_EXPLANATION_SYSTEM_INSTRUCTION",
     "EXPLAIN_SYSTEM_INSTRUCTION",
+    "build_crash_explanation_prompt",
     "build_explanation_prompt",
     "extract_relevant_section",
     "extract_error_line_from_stderr",

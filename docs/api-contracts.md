@@ -782,7 +782,7 @@ The shape returned by the module endpoints and carried by `module-updated`:
 
 All paths are under `/v1/rooms/{room_id}/modules`. "Who" is who may call it. Each successful call also pushes a `module-updated` to the room (see below). Error codes (`NOT_MODULE_OWNER`, `NOT_OWNER`, `MODULE_NOT_FOUND`, `NAME_TAKEN`, …) are defined in V2.12 (decision 12).
 
-**Caller identity.** Every module operation below identifies the caller by the header `X-Session-Id: <session_id>`: the caller's private session id (v0 §3.3), sent in a header, never in the URL or a body. The server maps it to the caller's `member_id` and role, and checks ownership/role from there. Host-only actions (set entry file, approve, and grant/revoke write when done by the Host) additionally require `X-Owner-Token: <owner_token>`, validated by the T-10 owner check. A call with a missing or unknown `X-Session-Id`, or a Host-only action without a valid owner token, is refused (V2.12: `INVALID_REQUEST` for a missing or malformed `X-Session-Id`, `SESSION_NOT_FOUND` for a session that has not joined this room, `NOT_OWNER` for a Host-only action without a valid owner token). The owner token is never put in the URL or logged. Room creation (V2.1) needs no caller identity, and the owner check keeps its v1 header, `X-Owner-Token` (section 8).
+**Caller identity.** Every module operation below identifies the caller by the header `X-Session-Id: <session_id>`: the caller's private session id (v0 §3.3), sent in a header, never in the URL or a body. The server maps it to the caller's `member_id` and role, and checks ownership/role from there. Host-only actions (set entry file, approve, and grant/revoke write when done by the Host) additionally require `X-Owner-Token: <owner_token>`, validated by the T-10 owner check. A call with a missing or unknown `X-Session-Id`, or a Host-only action without a valid owner token, is refused (V2.12: `INVALID_REQUEST` for a missing or malformed `X-Session-Id`, `SESSION_NOT_FOUND` for a session that has not joined this room, `NOT_OWNER` for a Host-only action without a valid owner token). Pair mode rooms refuse module write access calls with `422 INVALID_REQUEST` (`PAIR_MODE_NO_MODULES`). Calling grant or revoke write access by a member who is neither the module owner nor the Host is refused with `403 NOT_MODULE_OWNER`. The module owner always keeps write access; attempts to revoke write access from the owner are refused with `422 INVALID_REQUEST` (`OWNER_CANNOT_LOSE_WRITE_ACCESS`). Observers cannot request modules (`422 INVALID_REQUEST`) and cannot own modules (`422 INVALID_REQUEST`). When approving, the specified owner must be in the room (`404 MEMBER_NOT_FOUND`). When declining, the pending module is removed and `module-updated` with `deleted: true` is pushed. The Host may query pending requests via `GET /v1/rooms/{room_id}/modules?pending=true`. When a member leaves or is removed (`removeMember`, US-28), their pending module requests are cleaned up and `module-updated` with `deleted: true` is pushed. The owner token is never put in the URL or logged. Room creation (V2.1) needs no caller identity, and the owner check keeps its v1 header, `X-Owner-Token` (section 8).
 
 **CORS.** These endpoints send CORS headers allowing `CLIENT_ORIGIN` (section 1), the methods `GET`, `POST`, `PATCH`, `DELETE` and `OPTIONS` (a browser sends a preflight for `PATCH` and `DELETE`), and the request headers `Content-Type`, `X-Session-Id` and `X-Owner-Token`, matching how execution-service already allows the browser origin (section 2).
 
@@ -791,6 +791,7 @@ All paths are under `/v1/rooms/{room_id}/modules`. "Who" is who may call it. Eac
 | List | `GET /v1/rooms/{room_id}/modules` | any member | — | `200` array of module objects |
 | Request (create) | `POST /v1/rooms/{room_id}/modules` | any participant | `{ "name": "solver.py" }` | `202` module object, `pending: true` — awaits Host approval (FR21.1) |
 | Approve | `POST /v1/rooms/{room_id}/modules/{module_id}/approve` | **Host** | `{}`, or `{ "owner_member_id": "m_4b19d2" }` to choose another owner; the default is the requester (FR21.2) | `200` module object, `pending: false`, owner set |
+| Decline | `POST /v1/rooms/{room_id}/modules/{module_id}/decline` | **Host** | — | `200` `{ "module_id": "…", "status": "declined" }` |
 | Rename | `PATCH /v1/rooms/{room_id}/modules/{module_id}` | **owner** (FR21.4) | `{ "name": "solver2.py" }` | `200` module object |
 | Set runnable | `PATCH /v1/rooms/{room_id}/modules/{module_id}` | **owner** | `{ "runnable": true }` | `200` module object |
 | Set entry file | `PATCH /v1/rooms/{room_id}/modules/{module_id}` | **Host** (FR20.3) | `{ "is_entry": true }` | `200` module object |
@@ -1439,7 +1440,7 @@ A malformed `audience` (V2.10) is also `INVALID_MESSAGE`. The new internal calls
 
 **Not decided in version 2.** These are listed so that nobody assumes they are covered:
 
-- Host controls other than modules, the Observer role (V2.17) and remove / re-admit / regenerate link (V2.18) have no message or endpoint yet: edit access and requests in Pair mode (FR19.1, FR19.3), join approval (FR9.3), the AI switch (FR35.1), transferring the Host role (FR31.1), the audit log (FR34), export (FR33) and deleting a room (FR32). They need a contract entry before the stories that build them.
+- Host controls other than modules, the Observer role (V2.17), remove / re-admit / regenerate link (V2.18), Run control (V2.20) and Pair edit access (V2.21) have no message or endpoint yet: join approval (FR9.3), the AI switch (FR35.1), transferring the Host role (FR31.1), the audit log (FR34), export (FR33) and deleting a room (FR32). They need a contract entry before the stories that build them.
 - Reassigning the modules a removed member owned, and pruning a retired `member_id` from `writers` (V2.6, V2.18). Deferred to US-42.
 - What a run does with a module that has never been saved (FR24.1, FR25.1).
 - A joiner syncs from a connected writer: a read-only peer's sync step 2 is dropped (V2.12). If no writer is connected, a late joiner receives nothing. To be checked when the relay is built.
@@ -1779,10 +1780,186 @@ The audit log (FR34, US-58, Sprint 5) is not built here. The two state changes a
 
 ---
 
+## V2.21 Give and take back edit access in Pair mode (US-36) — Proposed
+
+Added so that US-36 (and US-37, US-38) has a contract to build on (FR19.1). In a Pair mode room, the Host can give edit access to one or several participants and take it back at any time. Several participants can hold edit access concurrently, and their changes merge (US-02). Enforcement on binary frames is already active from US-35 (`can_edit` flag on the server, `edit-rejected` with reason `no_edit_access`); this section defines the Host's control endpoint and roster update.
+
+```
+PATCH http://localhost:8081/v1/rooms/{room_id}/members/{member_id}/edit-access
+Content-Type: application/json
+X-Session-Id: <caller-session-id>
+X-Owner-Token: <owner-token>
+```
+
+A Host-only action following the caller-identity rule of V2.6: the Host's `X-Session-Id` plus a valid `X-Owner-Token`. Without a valid owner token the answer is `403 NOT_OWNER`.
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `can_edit` | boolean | Yes | `true` grants edit access; `false` withdraws edit access. Must be a JSON boolean: `"false"` or `null` is `INVALID_REQUEST`. |
+
+```json
+{
+  "can_edit": true
+}
+```
+
+Response `200`: the member as it appears in `roster` (V2.4, V2.17; `docs/examples/v2-edit-access-response.json`):
+
+```json
+{
+  "member_id": "m_4b19d2",
+  "display_name": "Lin",
+  "role": "participant",
+  "permissions": {
+    "can_edit": true,
+    "can_run": true,
+    "run_denied_reason": null
+  }
+}
+```
+
+Rules:
+
+1. Only the Host can call it (`403 NOT_OWNER` otherwise, with the same order of checks as V2.17 / V2.20: `INVALID_REQUEST` for a bad `X-Session-Id`, `ROOM_NOT_FOUND`, `SESSION_NOT_FOUND`, then `NOT_OWNER`).
+2. **Pair mode only.** Edit access controls apply only in Pair mode. An Open mode room refuses the call with `422 INVALID_REQUEST` (`"Edit access controls apply only in Pair mode; Open mode uses per-module write access."`; write access there is per module, US-43).
+3. The target must be a current **participant**.
+   - An unknown `member_id` is `404 MEMBER_NOT_FOUND`.
+   - The Host cannot withdraw or change the Host's own access (`422 INVALID_REQUEST`: `"The Host's edit access cannot be changed."`; the Host always keeps edit access).
+   - An Observer cannot have edit access (`422 INVALID_REQUEST`: `"Observers cannot have edit access; make them a participant first."`; the Observer's role wins, FR9.4, until made a participant, US-27).
+4. Setting the value a member already has is `200` and changes nothing (no new `roster`).
+5. The change takes effect at once for the person concerned on every one of their connections:
+   - After a withdrawal, their next edit change frame is dropped with `edit-rejected` (reason `no_edit_access`, V2.12).
+   - After a grant, their next change goes through.
+   - No reload is needed: their editor switches dynamically between read-only and editable.
+6. Several participants can have edit access at once, and their edits merge concurrently (US-02).
+7. On a change, the server broadcasts an updated `roster` to the whole room (V2.4), so all clients reflect the current edit permissions.
+8. Role changes (V2.17) reset permissions to the room's preset default. Host transfer (V2.19) grants the new Host edit access and resets the previous Host to participant default.
+9. Errors (V2.12): `404 ROOM_NOT_FOUND`, `404 SESSION_NOT_FOUND` (the caller has not joined), `404 MEMBER_NOT_FOUND`, `403 NOT_OWNER`, `422 INVALID_REQUEST`.
+
+### Audit (US-58)
+
+Edit access changes are made in one place in sync-service (`RoomService.setEditAccess`), so the audit log of US-58 (FR34, Sprint 5) records change events from there.
+
+---
+
+---
+
+## V2.22 Request edit access in Pair mode (US-38) - Proposed
+
+Added so that US-38 has a contract to build on (FR19.3). In a Pair mode room, a participant without edit access can ask the Host for edit access over the control socket. The Host sees the pending request and approves or declines it using the owner token (T-10). Approval reuses the exact same `RoomService.setEditAccess` path as V2.21.
+
+### 1. Participant requests edit access (Control WebSocket, V2.5)
+
+Client -> Server (`docs/examples/v2-edit-request-ws.json`):
+
+```json
+{
+  "type": "request-edit-access"
+}
+```
+
+Rules:
+
+1. **Pair mode only.** In Open mode, refused with `error` (`code: "INVALID_REQUEST"`, `"Edit-access requests apply only in Pair mode; Open mode uses module requests."`).
+2. **Participant without `can_edit` only.**
+   - Host or a participant who already has `can_edit: true` is refused with `INVALID_REQUEST` (`"You already have edit access."`).
+   - An **Observer** cannot request edit access (`INVALID_REQUEST`: `"Observers cannot request edit access; ask the Host to make you a participant first."`).
+3. **One pending request per member.** If the member already has a pending request, asking again is a no-op (no duplicate request is created or pushed to the Host).
+4. **Server -> Host notification** (`docs/examples/v2-edit-request-host-ws.json`), pushed to all joined control sockets of the Host (identifies the requester by public `member_id` and `display_name`, never `session_id`):
+
+```json
+{
+  "type": "edit-access-requested",
+  "member_id": "m_4b19d2",
+  "display_name": "Lin",
+  "requested_at": "2026-11-20T18:00:00Z"
+}
+```
+
+### 2. Host approves or declines (REST, Host-only)
+
+```text
+POST http://localhost:8081/v1/rooms/{room_id}/edit-requests/{member_id}/approve
+POST http://localhost:8081/v1/rooms/{room_id}/edit-requests/{member_id}/decline
+X-Session-Id: <caller-session-id>
+X-Owner-Token: <owner-token>
+```
+
+Response `200` (updated member on `approve`, or `{ "member_id": "m_4b19d2", "status": "declined" }` on `decline`).
+
+Rules:
+
+1. Only the Host can call either endpoint (`403 NOT_OWNER` otherwise; same check order as V2.17 / V2.21).
+2. **Pair mode only** (`422 INVALID_REQUEST` in Open mode).
+3. If no pending request exists for `member_id` (or `member_id` is unknown), returns `404 MEMBER_NOT_FOUND`.
+4. On **approve**: revalidates that the target is still a current **participant** without edit access. If they are no longer an eligible participant (for example, they were changed to `observer` via V2.17 or became `host` via V2.19), clears the stale pending request and refuses with `422 INVALID_REQUEST` (`"Observers cannot have edit access; make them a participant first."` / `"The Host's edit access cannot be changed."`). Otherwise, calls `RoomService.setEditAccess(roomId, memberId, true)` (V2.21), clears the pending request, broadcasts the updated `roster` to the room (V2.4), and sends `edit-access-responded` (`approved: true`) to the requester's control sockets.
+5. On **decline**: clears the pending request without changing `can_edit`, and sends `edit-access-responded` (`approved: false`) to the requester's control sockets (`docs/examples/v2-edit-request-responded-ws.json`):
+
+```json
+{
+  "type": "edit-access-responded",
+  "member_id": "m_4b19d2",
+  "approved": false,
+  "message": "The Host declined your edit access request."
+}
+```
+
+6. **Automatic clearing:** A pending request is cleared (and Host sockets receive `{ "type": "edit-access-request-cleared", "member_id": "...", "reason": "granted" | "role_changed" | "removed" | "left" }`) if the requester gets `can_edit` via V2.21, has their role changed (V2.17) or becomes Host (V2.19), is removed (V2.18), or disconnects from all control sockets.
+7. Errors (V2.12): `404 ROOM_NOT_FOUND`, `404 SESSION_NOT_FOUND`, `404 MEMBER_NOT_FOUND`, `403 NOT_OWNER`, `422 INVALID_REQUEST`.
+
+## US-56: Internal room-ended notification (Proposed — awaiting execution-service and AI-ML owners)
+
+**Traceability:** FR32, US-56, T-18 Decision 9; internal service-to-service only. This proposal does **not** add a public Host delete/close endpoint. The existing US-55 automatic Host-departure closure is the trigger once that branch is merged. Bhavya Vekariya (execution-service) and Prince Gadara (ai-ml-service) must confirm this new contract before implementation is merged.
+
+### 1. sync-service → execution-service
+
+```http
+POST /internal/rooms/{room_id}/ended HTTP/1.1
+Host: execution-service:8082
+X-Internal-Token: <INTERNAL_API_TOKEN>
+Content-Type: application/json
+
+{"room_id":"Zq8-Lw2Ef6Th0Yx4Rn7JbA","reason":"closed"}
+```
+
+`reason` is one of `closed` or `deleted` and is **metadata only**. Neither code, document text, owner tokens nor session identifiers are transmitted. The room id in the path must match the room id in the body; a mismatch or malformed id returns `422 INVALID_REQUEST`. A missing/invalid token returns `401 UNAUTHORIZED` before processing. Response on success, including repeated notifications and rooms never seen by execution-service:
+
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+
+{"room_id":"Zq8-Lw2Ef6Th0Yx4Rn7JbA","status":"cleared"}
+```
+
+An acknowledged response means that execution-service received an HTTP 200 from ai-ml-service's existing `DELETE /v1/rooms/{room_id}/state` (T-18 §16.5.2). If forwarding fails, return `503 ROOM_STATE_CLEANUP_UNAVAILABLE`; sync-service will retry using bounded backoff. Repeated deliveries are idempotent. No user text or request body is logged; permitted log metadata is room id, attempt number and HTTP status.
+
+### 2. execution-service → ai-ml-service (existing contract, not a new endpoint)
+
+```http
+DELETE /v1/rooms/Zq8-Lw2Ef6Th0Yx4Rn7JbA/state HTTP/1.1
+Host: ai-ml-service:8000
+X-Internal-Token: <INTERNAL_API_TOKEN>
+```
+
+Success returns `200 OK` and `{"room_id":"Zq8-Lw2Ef6Th0Yx4Rn7JbA","status":"cleared"}` even if the room has no state. This forwards the existing T-18 cleanup semantics; coordinate the internal-token enforcement with the ai-ml-service owner before merging.
+
+### 3. Ordering, failure and connection semantics
+
+1. sync-service **first** ends local access and purges all room-scoped state (run records, modules and saved versions, block list, members, pending requests, tokens, awareness/session registries). Local purge never waits for a remote response and happens even on permanent remote failure.
+2. The single room-ending entry point is shared by Host timeout and any existing internal deletion call. For already-ended rooms, it is idempotent and must not create duplicate live state.
+3. WebSocket clients of an ended room receive close code **4410**; future connects to a closed tombstone also receive **4410** (US-55). Unknown room IDs continue to receive **4404**. Closed tombstones contain no owner/member/block/code state and expire only under a separately reviewed policy.
+4. Remote notification is performed with timeouts and a **bounded retry** (proposed 3 attempts total with backoff). Retrying must never recreate local room state or delay its deletion. Exhausted retries are reported with metadata only; durability across process restarts is a separate deployment decision.
+5. Per-room US-75 usage counters contain no code/user text; retention is left unchanged pending FR32 clarification. No new public delete API is introduced by this proposal.
+
+**Validation before acceptance:** integration creates an Open-mode room with a module/saved version, a run record, a blocked user and ai-ml measurements; triggering Host timeout must leave no live state in the three services. Repeating the cleanup must be harmless and the `4410` response must remain stable. Failure-injection proves local deletion succeeds even if either remote service is unavailable.
+
+---
+
 ## Changes
 
 | Version | Date | Change |
 |---|---|---|
+| US-56 contract proposal | 21 Nov 2026 | Proposed internal room-ended notification, idempotent acknowledgement, bounded retry and 4410 tombstone semantics. Pending confirmation by execution-service and ai-ml-service owners; no implementation included. |
 | v0 (revised) | Oct 2026 | After review by the T-01 owner: client port note and client variable names (section 1), page route `/room/{room_id}` (3.2), secure-context note for the session id (3.3), awareness-frame echo and query-awareness frame (3.5, found by testing y-websocket 3.1.0), and clearer wording of the field-name rule. |
 | v0 | Oct 2026 | First draft: ports and health (adopted from T-08), conventions, sync connection and session id, run request and result, FR4.5 delivery, ordering rule. Error shapes and owner token reserved. |
 | v0 (PR2) | Oct 2026 | Section 7 added (Femina): error envelope from T-07, codes `QUEUE_FULL` (503), `UNSUPPORTED_LANGUAGE` (422), `INVALID_REQUEST` (422), `REQUEST_TOO_LARGE` (413) for `POST /v1/runs`, and `INVALID_MESSAGE` (400), `UNAUTHORIZED` (401) for the internal endpoint, each with a JSON example. No existing field renamed. |
@@ -1796,6 +1973,8 @@ The audit log (FR34, US-58, Sprint 5) is not built here. The two state changes a
 | v2 (remove / re-admit, review) | 18 Nov 2026 | Review fixes (#144): `member_id` retired on removal, a re-admit returns a new id while an ordinary reconnect keeps it (V2.3, V2.18); modules a removed member owned deferred to US-42; new `GET /v1/rooms/{room_id}/members/blocked` lists removed members; the block is recorded atomically before the sockets close (CR04); client no-reconnect rule for `USER_BLOCKED`/`4403`/`4404`/`4411` with a `USER_BLOCKED` example; regenerate preserves `member_id`s, module ownership/writers and documents, and the old id answers `404` on every interface and is never reissued; stale "removing a user" item dropped from V2.15 and `MEMBER_NOT_FOUND` widened for the block list (V2.12); 22-char regenerate example id. |
 | v2 (host transfer) | 17 Nov 2026 | V2.19 added (US-54): `POST /v1/rooms/{room_id}/members/{member_id}/make-host` transfers the Host role (FR31.1). The server issues a new owner token to the new Host (old token invalidated), delivered over their control socket as a new `host-granted` message; exactly one Host at all times. (Numbered V2.19 to follow US-28's V2.18; merge that contract first.) |
 | v2 (run permission) | 19 Nov 2026 | V2.20 added (US-60): `PATCH /v1/rooms/{room_id}/members/{member_id}/run-permission` takes Run away from a participant and gives it back (FR41.2), and `PATCH /v1/rooms/{room_id}/run-policy` switches Host-only running (FR41.3), both Host-only (`NOT_OWNER` otherwise). The reasons `observer`, `run_revoked`, `host_only` are those of V2.12 and the lookup (V2.11) is unchanged in shape. `roster` and `joined` gain `permissions.run_denied_reason`, and `roster` gains `host_only_run` (V2.4). Restricting Run removed from the undecided list in V2.15. |
+| v2 (edit access) | Nov 2026 | V2.21 added (US-36): `PATCH /v1/rooms/{room_id}/members/{member_id}/edit-access` gives or takes back edit access in Pair mode (FR19.1). Edit access controls apply only in Pair mode (Open mode refuses with `422 INVALID_REQUEST`). Host access cannot be changed (`422`) and Observers cannot have edit access (`422`). Broadcasts updated roster on change. |
+| v2 (edit request) | 20 Nov 2026 | V2.22 added (US-38): control-socket `request-edit-access` / `edit-access-requested` / `edit-access-responded` / `edit-access-request-cleared` and Host-only `POST /v1/rooms/{room_id}/edit-requests/{member_id}/approve` and `/decline` in Pair mode (FR19.3). Reuses `RoomService.setEditAccess` (V2.21). Edit requests removed from V2.15 undecided list. |
 
 ### Runner infrastructure error (v1 proposal addition)
 

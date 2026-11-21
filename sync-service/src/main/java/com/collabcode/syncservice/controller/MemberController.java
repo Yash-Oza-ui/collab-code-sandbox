@@ -5,9 +5,12 @@ import com.collabcode.syncservice.room.OwnerTokens;
 import com.collabcode.syncservice.room.Role;
 import com.collabcode.syncservice.room.Room;
 import com.collabcode.syncservice.room.RoomMessages;
+import com.collabcode.syncservice.room.RoomMode;
 import com.collabcode.syncservice.room.RoomService;
 import com.collabcode.syncservice.room.RoomStore;
 import com.collabcode.syncservice.handler.ControlHandler;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.PatchMapping;
@@ -17,18 +20,24 @@ import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.io.IOException;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.regex.Pattern;
 
 /**
- * Member role change (US-27, V2.17; FR9.4).
+ * Member role change (US-27, V2.17; FR9.4) and edit access in Pair mode
+ * (US-36, V2.21; FR19.1).
  *
  * <p>{@code PATCH /v1/rooms/{room_id}/members/{member_id}} lets the Host make a
- * member an {@code observer} (read-only) or a {@code participant} again. It is
- * a Host-only action: the caller sends its private {@code X-Session-Id} and a
+ * member an {@code observer} (read-only) or a {@code participant} again.
+ *
+ * <p>{@code PATCH /v1/rooms/{room_id}/members/{member_id}/edit-access} lets the
+ * Host grant or revoke edit access for a participant in Pair mode.
+ *
+ * <p>Both are Host-only actions: the caller sends its private {@code X-Session-Id} and a
  * valid {@code X-Owner-Token} (V2.6); without the token the answer is
- * {@code 403 NOT_OWNER}. The role takes effect on the server, so a hidden
+ * {@code 403 NOT_OWNER}. Permissions take effect on the server, so a hidden
  * button is never the enforcement (NFR13).
  */
 @RestController
@@ -42,14 +51,18 @@ public class MemberController {
     private final RoomStore store;
     private final RoomService roomService;
     private final ControlHandler controlHandler;
+    private final HostGuard hostGuard;
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
     public MemberController(
             RoomStore store,
             RoomService roomService,
-            ControlHandler controlHandler) {
+            ControlHandler controlHandler,
+            HostGuard hostGuard) {
         this.store = store;
         this.roomService = roomService;
         this.controlHandler = controlHandler;
+        this.hostGuard = hostGuard;
     }
 
     @PatchMapping("/rooms/{roomId}/members/{memberId}")
@@ -112,6 +125,90 @@ public class MemberController {
         // The updated role is now part of the server-authoritative roster.
         // Broadcast it to all connected control sockets (V2.17 rule 4).
         return ResponseEntity.ok(RoomMessages.memberEntry(room, updated));
+    }
+
+    /**
+     * Give or take back edit access for a participant in Pair mode (US-36, V2.21; FR19.1).
+     *
+     * <p>{@code PATCH /v1/rooms/{roomId}/members/{memberId}/edit-access} with
+     * {@code {"can_edit": true|false}} grants or withdraws edit access for a participant.
+     */
+    @PatchMapping("/rooms/{roomId}/members/{memberId}/edit-access")
+    public ResponseEntity<?> setEditAccess(
+            @PathVariable String roomId,
+            @PathVariable String memberId,
+            @RequestHeader(value = "X-Session-Id", required = false) String sessionId,
+            @RequestHeader(value = "X-Owner-Token", required = false) String ownerToken,
+            @RequestBody(required = false) String rawBody) {
+
+        HostGuard.Result g = hostGuard.requireHost(roomId, sessionId, ownerToken);
+        if (!g.ok()) {
+            return g.error();
+        }
+        Room room = g.room();
+
+        // 2. Open mode room refuses the call (write access there is per module, US-43).
+        if (room.getMode() != RoomMode.PAIR) {
+            return error(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_REQUEST",
+                    "Edit access controls apply only in Pair mode; Open mode uses per-module write access.");
+        }
+
+        // 3. Body validation: can_edit must be a JSON boolean.
+        Boolean canEdit = readBoolean(rawBody, "can_edit");
+        if (canEdit == null) {
+            return error(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_REQUEST",
+                    "Field 'can_edit' must be true or false.");
+        }
+
+        // 4. Target member validation.
+        Member target = room.getMembers().get(memberId);
+        if (target == null) {
+            return error(HttpStatus.NOT_FOUND, "MEMBER_NOT_FOUND", "Member not found in this room.");
+        }
+
+        // Host cannot withdraw or change the Host's own access (FR19.1).
+        if (target.getRole() == Role.HOST) {
+            return error(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_REQUEST",
+                    "The Host's edit access cannot be changed.");
+        }
+
+        // Observer's role wins (FR9.4) until made a participant (US-27).
+        if (target.getRole() == Role.OBSERVER) {
+            return error(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_REQUEST",
+                    "Observers cannot have edit access; make them a participant first.");
+        }
+
+        boolean changed = target.isCanEdit() != canEdit;
+        Member updated = roomService.setEditAccess(roomId, memberId, canEdit);
+        if (updated == null) {
+            return error(HttpStatus.NOT_FOUND, "MEMBER_NOT_FOUND", "Member not found in this room.");
+        }
+
+        if (changed) {
+            controlHandler.broadcastRoster(roomId);
+        }
+
+        return ResponseEntity.ok(RoomMessages.memberEntry(room, updated));
+    }
+
+    private Boolean readBoolean(String rawBody, String field) {
+        if (rawBody == null || rawBody.isBlank()) {
+            return null;
+        }
+        JsonNode root;
+        try {
+            root = objectMapper.readTree(rawBody);
+        } catch (IOException e) {
+            return null;
+        }
+        if (root == null || !root.isObject()) {
+            return null;
+        }
+        JsonNode value = root.get(field);
+        if (value == null || !value.isBoolean()) {
+            return null;
+        }
+        return value.asBoolean();
     }
 
     private Role parseRole(String role) {

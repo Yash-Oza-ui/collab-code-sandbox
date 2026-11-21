@@ -17,6 +17,45 @@ EXPLAIN_SYSTEM_INSTRUCTION = (
     "4. Do NOT include greetings, conversational filler, or sign-offs."
 )
 
+CRASH_EXPLANATION_SYSTEM_INSTRUCTION = (
+    "You are an expert programming assistant in a collaborative code execution sandbox. "
+    "A C/C++ program crashed with a compiler sanitizer finding (AddressSanitizer or UndefinedBehaviorSanitizer). "
+    "Provide a short, plain-language explanation of what caused the crash and suggest a possible fix.\n\n"
+    "STRICT CONSTRAINTS:\n"
+    "1. Your explanation MUST be at most three sentences in plain prose.\n"
+    "2. Do NOT use markdown formatting (no bold asterisks, backticks, bullet lists, or headers).\n"
+    "3. Be direct, clear, and actionable: state what caused the crash and suggest a fix.\n"
+    "4. Do NOT include greetings, conversational filler, or sign-offs.\n"
+    "5. Format your response EXACTLY as:\n"
+    "Explanation: <at most 3 sentences in plain prose>\n"
+    "Suggested Fix: <single actionable fix statement>"
+)
+
+
+def build_crash_explanation_prompt(
+    summary: str,
+    code: str,
+) -> str:
+    """Build the prompt for explaining a C/C++ sanitizer crash (FR39.3, FR40.2, US-74).
+
+    Strict Data Minimization: sends only the deterministic error summary and the
+    relevant localized code section. Never sends raw sanitizer stack traces, container
+    metadata, or unrelated workspace files.
+    """
+    clean_summary = summary.strip() if summary else "Sanitizer crash detected."
+    clean_code = code.strip() if code else "(no code available)"
+
+    return (
+        f"{CRASH_EXPLANATION_SYSTEM_INSTRUCTION}\n\n"
+        f"--- Crash Diagnostic ---\n"
+        f"{clean_summary}\n\n"
+        f"--- Relevant Code Section ---\n"
+        f"{clean_code}\n\n"
+        f"Format your response EXACTLY as:\n"
+        f"Explanation: <at most 3 sentences in plain prose>\n"
+        f"Suggested Fix: <single actionable fix statement>"
+    )
+
 
 def build_explanation_prompt(
     language: str,

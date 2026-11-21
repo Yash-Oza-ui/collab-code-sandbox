@@ -61,14 +61,17 @@ public class MembershipController {
     private final RoomRegistry registry;
     private final ModuleService moduleService;
     private final HostGuard hostGuard;
+    private final ControlHandler controlHandler;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     public MembershipController(RoomService roomService, RoomRegistry registry,
-                                ModuleService moduleService, HostGuard hostGuard) {
+                                ModuleService moduleService, HostGuard hostGuard,
+                                ControlHandler controlHandler) {
         this.roomService = roomService;
         this.registry = registry;
         this.moduleService = moduleService;
         this.hostGuard = hostGuard;
+        this.controlHandler = controlHandler;
     }
 
     // -----------------------------------------------------------------------
@@ -104,6 +107,12 @@ public class MembershipController {
         if (removed == null) {
             // Removed by another request between the lookup and here.
             return HostGuard.error(HttpStatus.NOT_FOUND, "MEMBER_NOT_FOUND", "Member not found in this room.");
+        }
+
+        // Drop any pending module requests created by the removed member (US-40)
+        List<com.collabcode.syncservice.module.ModuleRecord> removedPending = moduleService.removePendingRequestsForMember(roomId, memberId);
+        for (com.collabcode.syncservice.module.ModuleRecord pendingMod : removedPending) {
+            controlHandler.broadcastModuleUpdated(roomId, RoomMessages.moduleUpdated(pendingMod, true));
         }
 
         // Close the removed member's control AND document sockets (4403, V2.3/V2.5),

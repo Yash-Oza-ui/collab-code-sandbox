@@ -1,7 +1,6 @@
 package com.collabcode.syncservice.config;
 
 import org.springframework.boot.context.properties.ConfigurationProperties;
-import org.springframework.stereotype.Component;
 
 /**
  * Configurable room-level limits for sync-service (DR3, US-16).
@@ -12,12 +11,11 @@ import org.springframework.stereotype.Component;
  * (Spring Boot automatically maps {@code APP_ROOM_LIMITS_<KEY>} to the
  * property {@code app.room.limits.<key>}).
  *
- * <p>Values whose upstream story is not yet implemented (US-63, US-55,
+ * <p>Values whose upstream story is not yet implemented (US-63,
  * US-73, US-24) carry a placeholder default and are commented with the
  * story reference. This entry-point is created by US-16; the later stories
  * read from it.
  */
-@Component
 @ConfigurationProperties(prefix = "app.room.limits")
 public class RoomLimitsProperties {
 

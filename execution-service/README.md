@@ -448,7 +448,42 @@ Retry-After: 30
 ```
 
 `error.reason` is `"aggregate_time_budget"` when the aggregate time budget is hit, or
-`"max_runs_per_request"` when the runs-per-request cap is hit.
+`"max_runs_per_request"` when the runs-per-request cap is hit. If partial results were collected
+before the limit was exceeded, `batch_results` is included in the error response.
+
+---
+
+## Single-container test batch (US-71, FR5.1, FR38.4, NFR4.1, NFR4.2)
+
+Automated failing-input search (`ai-ml-service`, US-70) submits a batch of generated tests via
+`POST /internal/runs` with `purpose: "test_batch"`.
+
+### Design & Architecture
+- **Single container (FR5.1):** Exactly one ephemeral container is started for the entire batch.
+- **`docker exec` sequential execution:** Tests run sequentially inside the running container as separate processes. This design choice avoids rebuilding runtime images (owned by Quincy), supports all languages transparently, and ensures that if one test fails, times out, or triggers an out-of-memory kill, the container remains intact so subsequent tests run to completion.
+- **Centralized isolation (US-12, NFR3):** Started using `DockerRunner#buildIsolatedContainerProcess` (`--network none`, non-root user `1001:1001`, read-only code mount, `--cap-drop=ALL`, `--security-opt=no-new-privileges`, and tmpfs `/tmp`). Network probes inside a test fail.
+- **Resource limits & fault isolation (NFR4.1, NFR4.2):** Each test process runs under the 5 s wall-clock limit and memory limit. Timeouts and OOM events are recorded strictly for that test entry and do not crash the batch.
+- **Budget & queue accounting (NFR14, US-64, US-11):**
+  - **Queue gate:** The entire batch counts as 1 slot in `RunQueueGate` (holding 1 concurrency permit for its duration). Saturated queues return 503 `QUEUE_FULL`.
+  - **Run cap:** Each test in the batch counts as 1 run toward `max-runs-per-request` (default 10) because each test runs as an independent process.
+  - **Budget exceeded:** If the aggregate wall-clock budget or run cap is exceeded, execution stops immediately and returns 429 `RUN_BUDGET_EXCEEDED` containing the `batch_results` of all completed tests so partial work is preserved.
+- **Lifecycle & cleanup (FR5.2):** The container and workspace directory are unconditionally destroyed in a `finally` block even on failure, timeout, or cancellation.
+- **Response contract:** Returns `batch_results` formatted per `docs/schemas/internal-run-response.json` (listing exit code, stdout/stderr, wall-clock time, `timed_out`, and `oom_killed`). Test batches are never broadcast over WebSockets and carry no secrets.
+
+### How to verify US-71
+
+```bash
+cd execution-service
+
+# 1. Unit & controller slice tests (with FakeCodeRunner, no Docker needed)
+./mvnw -Dtest=InternalRunControllerBatchTest test   # Windows: .\mvnw.cmd "-Dtest=InternalRunControllerBatchTest" test
+
+# 2. Real Docker runner batch tests (requires Docker daemon)
+./mvnw -Dtest=DockerRunnerBatchTest test            # Windows: .\mvnw.cmd "-Dtest=DockerRunnerBatchTest" test
+
+# 3. Integration test script
+bash tests/integration/test-us71-test-batch.sh
+```
 
 ---
 

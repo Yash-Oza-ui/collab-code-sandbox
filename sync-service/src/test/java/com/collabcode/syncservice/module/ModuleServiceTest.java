@@ -37,6 +37,8 @@ class ModuleServiceTest {
 
         // Open mode room in Python
         Room openRoom = new Room(OPEN_ROOM_ID, RoomMode.OPEN, null, "python", OwnerTokens.hash(OWNER_TOKEN));
+        openRoom.getMembers().put(host.getMemberId(), host);
+        openRoom.getMembers().put(participant.getMemberId(), participant);
         roomStore.put(openRoom);
 
         // Pair mode room
@@ -220,5 +222,183 @@ class ModuleServiceTest {
         assertThat(id1).startsWith("mod_");
         assertThat(id1.length()).isGreaterThanOrEqualTo(20);
         assertThat(id1).matches("^mod_[A-Za-z0-9_-]{16}$");
+    }
+
+    @Test
+    @DisplayName("Observer cannot request a module (FR21.1)")
+    void observerCannotRequestModule() {
+        Member observer = new Member("m_obs", "s_obs", "Observer", Role.OBSERVER, false, false);
+        Room room = roomStore.get(OPEN_ROOM_ID);
+        room.getMembers().put("m_obs", observer);
+
+        assertThatThrownBy(() -> moduleService.requestCreate(OPEN_ROOM_ID, observer, "obs.py"))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    @DisplayName("Host approval rejects non-existent member as owner with MEMBER_NOT_FOUND (FR21.2)")
+    void approve_unknownMember_throwsMemberNotFound() {
+        ModuleRecord pending = moduleService.requestCreate(OPEN_ROOM_ID, participant, "unknown-owner.py");
+        assertThatThrownBy(() -> moduleService.approve(OPEN_ROOM_ID, pending.moduleId(), host, OWNER_TOKEN, "m_ghost"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("MEMBER_NOT_FOUND");
+    }
+
+    @Test
+    @DisplayName("Host approval rejects observer as owner with OBSERVER_CANNOT_OWN (FR21.2)")
+    void approve_observer_throwsObserverCannotOwn() {
+        Member observer = new Member("m_obs2", "s_obs2", "Observer2", Role.OBSERVER, false, false);
+        Room room = roomStore.get(OPEN_ROOM_ID);
+        room.getMembers().put("m_obs2", observer);
+
+        ModuleRecord pending = moduleService.requestCreate(OPEN_ROOM_ID, participant, "obs-owner.py");
+        assertThatThrownBy(() -> moduleService.approve(OPEN_ROOM_ID, pending.moduleId(), host, OWNER_TOKEN, "m_obs2"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("OBSERVER_CANNOT_OWN");
+    }
+
+    @Test
+    @DisplayName("Host declines pending module, removing it from workspace (US-40)")
+    void decline_removesPendingModule() {
+        ModuleRecord pending = moduleService.requestCreate(OPEN_ROOM_ID, participant, "declined.py");
+        ModuleRecord declined = moduleService.decline(OPEN_ROOM_ID, pending.moduleId(), host, OWNER_TOKEN);
+
+        assertThat(declined.moduleId()).isEqualTo(pending.moduleId());
+        assertThat(moduleService.find(OPEN_ROOM_ID, pending.moduleId())).isNull();
+    }
+
+    @Test
+    @DisplayName("Declining an already approved module throws MODULE_NOT_PENDING")
+    void decline_alreadyApproved_throws() {
+        ModuleRecord approved = moduleService.createApprovedModule(OPEN_ROOM_ID, host, "approved.py");
+        assertThatThrownBy(() -> moduleService.decline(OPEN_ROOM_ID, approved.moduleId(), host, OWNER_TOKEN))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("MODULE_NOT_PENDING");
+    }
+
+    @Test
+    @DisplayName("removePendingRequestsForMember removes pending modules for requester and preserves approved")
+    void removePendingRequestsForMember_dropsPendingOnly() {
+        ModuleRecord p1 = moduleService.requestCreate(OPEN_ROOM_ID, participant, "pending1.py");
+        ModuleRecord p2 = moduleService.createApprovedModule(OPEN_ROOM_ID, participant, "approved1.py");
+
+        List<ModuleRecord> removed = moduleService.removePendingRequestsForMember(OPEN_ROOM_ID, participant.getMemberId());
+        assertThat(removed).extracting(ModuleRecord::moduleId).containsExactly(p1.moduleId());
+        assertThat(moduleService.find(OPEN_ROOM_ID, p1.moduleId())).isNull();
+        assertThat(moduleService.find(OPEN_ROOM_ID, p2.moduleId())).isNotNull();
+    }
+
+    @Test
+    @DisplayName("listPending returns pending module requests for Host")
+    void listPending_returnsPendingModules() {
+        moduleService.createApprovedModule(OPEN_ROOM_ID, host, "main.py");
+        ModuleRecord p = moduleService.requestCreate(OPEN_ROOM_ID, participant, "pending2.py");
+
+        List<ModuleRecord> pendingList = moduleService.listPending(OPEN_ROOM_ID, host);
+        assertThat(pendingList).extracting(ModuleRecord::moduleId).containsExactly(p.moduleId());
+    }
+
+    @Test
+    @DisplayName("Concurrent approvals preserve exactly one owner (FR21.3)")
+    void concurrentApprovals_preserveSingleOwner() throws Exception {
+        ModuleRecord pending = moduleService.requestCreate(OPEN_ROOM_ID, participant, "race.py");
+        int threads = 8;
+        java.util.concurrent.ExecutorService executor = java.util.concurrent.Executors.newFixedThreadPool(threads);
+        java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(threads);
+
+        for (int i = 0; i < threads; i++) {
+            final String targetOwner = (i % 2 == 0) ? "m_host" : "m_part";
+            executor.submit(() -> {
+                try {
+                    moduleService.approve(OPEN_ROOM_ID, pending.moduleId(), host, OWNER_TOKEN, targetOwner);
+                } finally {
+                    latch.countDown();
+                }
+            });
+        }
+
+        latch.await(5, java.util.concurrent.TimeUnit.SECONDS);
+        executor.shutdown();
+
+        ModuleRecord result = moduleService.find(OPEN_ROOM_ID, pending.moduleId());
+        assertThat(result).isNotNull();
+        assertThat(result.pending()).isFalse();
+        assertThat(result.ownerMemberId()).isIn("m_host", "m_part");
+    }
+
+    @Test
+    @DisplayName("Owner can grant and revoke write access (FR22.1)")
+    void owner_canGrantAndRevokeWriteAccess() {
+        ModuleRecord module = moduleService.createApprovedModule(OPEN_ROOM_ID, host, "owner-control.py");
+        assertThat(moduleService.canEdit(OPEN_ROOM_ID, module.moduleId(), participant)).isFalse();
+
+        // Grant write access to participant
+        moduleService.grantWriteAccess(OPEN_ROOM_ID, module.moduleId(), host, null, participant.getMemberId());
+        assertThat(module.writers()).contains(participant.getMemberId());
+        assertThat(moduleService.canEdit(OPEN_ROOM_ID, module.moduleId(), participant)).isTrue();
+
+        // Revoke write access
+        moduleService.revokeWriteAccess(OPEN_ROOM_ID, module.moduleId(), host, null, participant.getMemberId());
+        assertThat(module.writers()).doesNotContain(participant.getMemberId());
+        assertThat(moduleService.canEdit(OPEN_ROOM_ID, module.moduleId(), participant)).isFalse();
+    }
+
+    @Test
+    @DisplayName("Host with valid token can grant write access to participant and to Host (FR22.1)")
+    void host_withOwnerToken_canGrantWriteAccess() {
+        // Module owned by participant
+        ModuleRecord module = moduleService.createModule(OPEN_ROOM_ID, participant.getMemberId(), "part-owned.py", false);
+        assertThat(moduleService.canEdit(OPEN_ROOM_ID, module.moduleId(), host)).isFalse();
+
+        // Host grants write access to Host
+        moduleService.grantWriteAccess(OPEN_ROOM_ID, module.moduleId(), host, OWNER_TOKEN, host.getMemberId());
+        assertThat(module.writers()).contains(host.getMemberId());
+        assertThat(moduleService.canEdit(OPEN_ROOM_ID, module.moduleId(), host)).isTrue();
+    }
+
+    @Test
+    @DisplayName("Non-owner non-host cannot grant or revoke write access (NOT_MODULE_OWNER)")
+    void nonOwnerNonHost_cannotChangeWriteAccess() {
+        ModuleRecord module = moduleService.createApprovedModule(OPEN_ROOM_ID, host, "host-mod.py");
+
+        assertThatThrownBy(() -> moduleService.grantWriteAccess(
+                OPEN_ROOM_ID, module.moduleId(), participant, null, participant.getMemberId()))
+                .isInstanceOf(SecurityException.class)
+                .hasMessage("NOT_MODULE_OWNER");
+
+        module.addWriter(participant.getMemberId());
+
+        assertThatThrownBy(() -> moduleService.revokeWriteAccess(
+                OPEN_ROOM_ID, module.moduleId(), participant, null, participant.getMemberId()))
+                .isInstanceOf(SecurityException.class)
+                .hasMessage("NOT_MODULE_OWNER");
+    }
+
+    @Test
+    @DisplayName("Module owner cannot lose write access")
+    void owner_cannotLoseWriteAccess() {
+        ModuleRecord module = moduleService.createApprovedModule(OPEN_ROOM_ID, host, "permanent-owner.py");
+
+        assertThatThrownBy(() -> moduleService.revokeWriteAccess(
+                OPEN_ROOM_ID, module.moduleId(), host, null, host.getMemberId()))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("OWNER_CANNOT_LOSE_WRITE_ACCESS");
+
+        assertThat(moduleService.canEdit(OPEN_ROOM_ID, module.moduleId(), host)).isTrue();
+    }
+
+    @Test
+    @DisplayName("Observer cannot edit even if write access recorded (reason observer)")
+    void observer_cannotEditEvenIfInWriters() {
+        Member observer = new Member("m_obs", "s_obs", "Observer", Role.OBSERVER, false, false);
+        Room room = roomStore.get(OPEN_ROOM_ID);
+        room.getMembers().put(observer.getMemberId(), observer);
+
+        ModuleRecord module = moduleService.createApprovedModule(OPEN_ROOM_ID, host, "obs-test.py");
+        moduleService.grantWriteAccess(OPEN_ROOM_ID, module.moduleId(), host, null, observer.getMemberId());
+
+        assertThat(module.writers()).contains(observer.getMemberId());
+        // must be false because member is OBSERVER
+        assertThat(moduleService.canEdit(OPEN_ROOM_ID, module.moduleId(), observer)).isFalse();
     }
 }

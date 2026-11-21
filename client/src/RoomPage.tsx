@@ -8,6 +8,19 @@ import { MonacoBinding } from 'y-monaco'
 import DisplayNamePrompt from './DisplayNamePrompt'
 import RunPanel from './RunPanel'
 import RunOutputPanel from './RunOutputPanel'
+import WorkspacePanel from './WorkspacePanel'
+import {
+  approveModule,
+  createModule,
+  declineModule,
+  grantWriteAccess,
+  listModules,
+  listPendingModules,
+  requestModule,
+  revokeWriteAccess,
+  validateModuleName,
+  type WorkspaceModule,
+} from './workspaceApi'
 import {
   applyRosterNamesToAwareness,
   createAwareness,
@@ -18,6 +31,7 @@ import {
 import {
   connectAwarenessWs,
   getCollabSessionId,
+  type AnalysisResultMessage,
   type AwarenessWsConnection,
   type JoinedMessage,
   type RosterMember,
@@ -34,6 +48,7 @@ import {
   readmitMember,
   regenerateLink,
   removeMember,
+  setEditAccess,
   type BlockedMember,
   type HostApiResult,
   type HostCallContext,
@@ -146,8 +161,16 @@ export default function RoomPage(props: RoomPageProps = {}) {
   const [pendingName, setPendingName] = useState<string | null>(null)
   const [currentLanguage, setCurrentLanguage] = useState<SupportedLanguage>('python')
   const [runOutput, setRunOutput] = useState<RunResponseData | null>(null)
+  const [analysisResults, setAnalysisResults] = useState<Record<string, AnalysisResultMessage>>({})
   // Role from the server's `joined` or `roster` message (T-10 Host badge / US-27 Observer mode)
   const [roomMode, setRoomMode] = useState<{ mode: string; detail?: string } | null>(null)
+  // Open mode workspace modules (US-39, V2.6)
+  const [workspaceModules, setWorkspaceModules] = useState<WorkspaceModule[]>([])
+  const [activeModuleId, setActiveModuleId] = useState<string | null>(propDocId ?? null)
+  const activeModuleIdRef = useRef<string | null>(propDocId ?? null)
+  const [workspaceError, setWorkspaceError] = useState<string | null>(null)
+  const [isCreatingModule, setIsCreatingModule] = useState(false)
+  const [workspaceLanguage, setWorkspaceLanguage] = useState<string | undefined>(undefined)
   const [role, setRole] = useState<string | null>(null)
   const [myMemberId, setMyMemberId] = useState<string | null>(null)
   const [roster, setRoster] = useState<RosterMember[]>([])
@@ -158,6 +181,16 @@ export default function RoomPage(props: RoomPageProps = {}) {
   const [roleChangeError, setRoleChangeError] = useState<string | null>(null)
   const [changingRoleFor, setChangingRoleFor] = useState<string | null>(null)
   const isObserver = role?.toLowerCase() === 'observer'
+  // In Open mode, editing requires being the owner or in the writers set (US-43, FR22.2)
+  const activeModule = workspaceModules.find((m) => m.module_id === activeModuleId)
+  const isModuleWriter = roomMode?.mode === 'open'
+    ? Boolean(
+        activeModule &&
+        !activeModule.pending &&
+        (activeModule.owner_member_id === myMemberId ||
+         (activeModule.writers || []).includes(myMemberId || ''))
+      )
+    : true
   // Run permission (US-60, V2.20): the server's answer for this member, from joined / roster.
   // Unknown (older server) is treated as allowed; the server still checks every run (FR41.4).
   const [myCanRun, setMyCanRun] = useState<boolean | null>(null)
@@ -166,7 +199,15 @@ export default function RoomPage(props: RoomPageProps = {}) {
   const [runControlError, setRunControlError] = useState<string | null>(null)
   const [changingRunFor, setChangingRunFor] = useState<string | null>(null)
   const [changingHostOnly, setChangingHostOnly] = useState(false)
+  // Edit permission in Pair mode (US-36, V2.21): from joined / roster.
+  const [myCanEdit, setMyCanEdit] = useState<boolean | null>(null)
+  const [changingEditFor, setChangingEditFor] = useState<string | null>(null)
+  const [editAccessError, setEditAccessError] = useState<string | null>(null)
   const isHost = role?.toLowerCase() === 'host'
+  const isEditorReadOnly =
+    isObserver ||
+    (roomMode?.mode === 'pair' && !isHost && myCanEdit === false) ||
+    (roomMode?.mode === 'open' && !isModuleWriter)
   const runDisabled = isObserver || myCanRun === false
   const runDisabledReason = runDisabled
     ? isObserver
@@ -188,6 +229,30 @@ export default function RoomPage(props: RoomPageProps = {}) {
 
   const awarenessInstanceRef = useRef<Awareness | null>(null)
   const connRef = useRef<AwarenessWsConnection | null>(null)
+  const moduleDocsRef = useRef<Map<string, Y.Doc>>(new Map())
+
+  const getModuleDoc = useCallback(
+    (id: string): Y.Doc => {
+      if (moduleDocs?.has(id)) {
+        return moduleDocs.get(id)!
+      }
+      let existing = moduleDocsRef.current.get(id)
+      if (!existing) {
+        existing = new Y.Doc()
+        moduleDocsRef.current.set(id, existing)
+      }
+      return existing
+    },
+    [moduleDocs],
+  )
+
+  const getActiveDoc = useCallback((): Y.Doc | null => {
+    if (roomMode?.mode === 'open' && activeModuleIdRef.current) {
+      return getModuleDoc(activeModuleIdRef.current)
+    }
+    return docRef.current
+  }, [getModuleDoc, roomMode?.mode, docRef])
+
   const pendingNameRef = useRef<string | null>(null)
   // A room-specific name is safe to retain; the session ID remains stable separately.
   const resumeNameKey = roomId ? `collab_room_name:${roomId}:${wsOptions?.sessionId ?? getCollabSessionId()}` : null
@@ -203,7 +268,7 @@ export default function RoomPage(props: RoomPageProps = {}) {
 
   const renderRemoteCursorLabels = useCallback(() => {
     const editor = editorRef.current
-    const doc = docRef.current
+    const doc = getActiveDoc()
     const awareness = awarenessInstanceRef.current
     const model = editor?.getModel()
 
@@ -297,6 +362,26 @@ export default function RoomPage(props: RoomPageProps = {}) {
     setActivePresence(Array.from(seenByMemberId.values()))
   }, [])
 
+  const bindEditorToDoc = useCallback(
+    (targetDoc: Y.Doc | null) => {
+      if (!editorRef.current || !targetDoc || !awarenessInstanceRef.current) return
+      const model = editorRef.current.getModel()
+      if (!model) return
+
+      bindingRef.current?.destroy()
+      bindingRef.current = null
+
+      bindingRef.current = new MonacoBinding(
+        targetDoc.getText('monaco'),
+        model,
+        new Set([editorRef.current]),
+        awarenessInstanceRef.current,
+      )
+      renderRemoteCursorLabels()
+    },
+    [renderRemoteCursorLabels],
+  )
+
   // One place for role changes (joined, roster). A role that is not Host means any stored owner
   // token is retired, so the previous Host drops it after a transfer (V2.19) and the Host
   // controls follow the role.
@@ -321,12 +406,12 @@ export default function RoomPage(props: RoomPageProps = {}) {
     onDisplayNameAcceptedRef.current = onDisplayNameAccepted
   }, [onDisplayNameAccepted])
 
-  // Dynamically update Monaco Editor readOnly state if role changes while editor is mounted (US-27)
+  // Dynamically update Monaco Editor readOnly state if role, edit permissions (Pair, US-36), or write access (Open, US-43) change while editor is mounted
   useEffect(() => {
     if (editorRef.current) {
-      editorRef.current.updateOptions({ readOnly: isObserver })
+      editorRef.current.updateOptions({ readOnly: isEditorReadOnly })
     }
-  }, [isObserver])
+  }, [isEditorReadOnly])
 
   // Manage Awareness instance lifecycle tied to active Y.Doc and WebSocket relay
   useEffect(() => {
@@ -419,12 +504,56 @@ export default function RoomPage(props: RoomPageProps = {}) {
           applyRole(joined.role)
           setMyCanRun(typeof joined.permissions?.can_run === 'boolean' ? joined.permissions.can_run : null)
           setMyRunDeniedReason(joined.permissions?.run_denied_reason ?? null)
-          // V2.3 joined carries mode and preset, but no Open workspace language.
-          // Do not infer it from creation state or the shared URL.
+          setMyCanEdit(typeof joined.permissions?.can_edit === 'boolean' ? joined.permissions.can_edit : null)
+          const openLang = typeof joined.language === 'string' ? joined.language : undefined
+          setWorkspaceLanguage(openLang)
+          if (openLang) {
+            setCurrentLanguage(openLang as SupportedLanguage)
+          }
           setRoomMode({
             mode: joined.mode,
-            detail: joined.mode === 'pair' ? joined.preset : undefined,
+            detail: joined.mode === 'pair' ? joined.preset : openLang,
           })
+          if (joined.mode === 'open') {
+            const syncBase = wsOptions?.syncWsUrl
+              ? wsOptions.syncWsUrl.replace(/^ws/, 'http').replace(/\/ws\/rooms.*$/, '')
+              : undefined
+            void listModules({
+              roomId,
+              sessionId,
+              baseUrl: syncBase,
+              fetchFn: wsOptions?.fetchFn,
+            }).then(async (res) => {
+              if (res.ok) {
+                let allMods = res.data
+                const token = readOwnerToken(roomId)
+                if (token || isHost) {
+                  const pendingRes = await listPendingModules({
+                    roomId,
+                    sessionId,
+                    ownerToken: token,
+                    baseUrl: syncBase,
+                    fetchFn: wsOptions?.fetchFn,
+                  })
+                  if (pendingRes.ok) {
+                    const existingIds = new Set(allMods.map((m) => m.module_id))
+                    const additions = pendingRes.data.filter((m) => !existingIds.has(m.module_id))
+                    allMods = [...allMods, ...additions]
+                  }
+                }
+                setWorkspaceModules(allMods)
+                const approved = allMods.filter((m) => !m.pending)
+                if (approved.length > 0 && !activeModuleIdRef.current) {
+                  const entry = approved.find((m) => m.is_entry) ?? approved[0]
+                  setActiveModuleId(entry.module_id)
+                  activeModuleIdRef.current = entry.module_id
+                  const targetDoc = getModuleDoc(entry.module_id)
+                  bindEditorToDoc(targetDoc)
+                  conn.switchDoc?.(entry.module_id, targetDoc)
+                }
+              }
+            })
+          }
           const name = pendingNameRef.current
           if (!name) return
 
@@ -442,6 +571,43 @@ export default function RoomPage(props: RoomPageProps = {}) {
             try { sessionStorage.setItem(resumeNameKey, name) } catch { /* storage disabled */ }
           }
           onDisplayNameAcceptedRef.current?.(name, color)
+        },
+        onModuleUpdated: (msg) => {
+          if (msg.deleted) {
+            setWorkspaceModules((prev) => prev.filter((m) => m.module_id !== msg.module_id))
+            if (activeModuleIdRef.current === msg.module_id) {
+              setWorkspaceModules((current) => {
+                const remaining = current.filter((m) => m.module_id !== msg.module_id && !m.pending)
+                const next = remaining[0]?.module_id ?? null
+                setActiveModuleId(next)
+                activeModuleIdRef.current = next
+                if (next) {
+                  const targetDoc = getModuleDoc(next)
+                  bindEditorToDoc(targetDoc)
+                  conn.switchDoc?.(next, targetDoc)
+                }
+                return current.filter((m) => m.module_id !== msg.module_id)
+              })
+            }
+          } else {
+            setWorkspaceModules((prev) => {
+              const idx = prev.findIndex((m) => m.module_id === msg.module_id)
+              if (idx >= 0) {
+                const copy = [...prev]
+                copy[idx] = { ...copy[idx], ...msg }
+                return copy
+              } else {
+                return [...prev, msg]
+              }
+            })
+            if (!activeModuleIdRef.current && !msg.pending) {
+              setActiveModuleId(msg.module_id)
+              activeModuleIdRef.current = msg.module_id
+              const targetDoc = getModuleDoc(msg.module_id)
+              bindEditorToDoc(targetDoc)
+              conn.switchDoc?.(msg.module_id, targetDoc)
+            }
+          }
         },
         onRoster: (roster) => {
           rosterRef.current = roster.members ?? []
@@ -474,6 +640,9 @@ export default function RoomPage(props: RoomPageProps = {}) {
             if (me?.permissions && typeof me.permissions.can_run === 'boolean') {
               setMyCanRun(me.permissions.can_run)
               setMyRunDeniedReason(me.permissions.run_denied_reason ?? null)
+            }
+            if (me?.permissions && typeof me.permissions.can_edit === 'boolean') {
+              setMyCanEdit(me.permissions.can_edit)
             }
           }
           setHostOnlyRun(roster.host_only_run === true)
@@ -585,6 +754,12 @@ export default function RoomPage(props: RoomPageProps = {}) {
         onRunResult: (msg) => {
           const parsed = parseRunResultFrame(msg, roomId)
           if (parsed.valid) showRunResult(parsed.data)
+        },
+        onAnalysisResult: (msg) => {
+          setAnalysisResults((prev) => ({
+            ...prev,
+            [msg.request_id]: msg,
+          }))
         },
         onEditRejected: (msg) => {
           let reasonText = 'You do not have permission to edit this document.'
@@ -896,6 +1071,256 @@ export default function RoomPage(props: RoomPageProps = {}) {
     }
   }
 
+  async function handleToggleEditAccess(member: RosterMember, allow: boolean) {
+    if (!roomId || !isHost) return
+    setEditAccessError(null)
+    setChangingEditFor(member.member_id)
+    try {
+      const ctx = getHostContext()
+      if (!ctx) {
+        setEditAccessError('Missing Host credentials. Please rejoin the room.')
+        return
+      }
+      const result = await setEditAccess(ctx, member.member_id, allow)
+      if (!result.ok) {
+        setEditAccessError(result.error)
+      }
+    } finally {
+      setChangingEditFor(null)
+    }
+  }
+
+  const handleSelectModule = useCallback(
+    (moduleId: string) => {
+      setActiveModuleId(moduleId)
+      activeModuleIdRef.current = moduleId
+      const targetDoc = getModuleDoc(moduleId)
+      bindEditorToDoc(targetDoc)
+      connRef.current?.switchDoc?.(moduleId, targetDoc)
+    },
+    [getModuleDoc, bindEditorToDoc],
+  )
+
+  const handleCreateModule = useCallback(
+    async (name: string) => {
+      if (!roomId) return
+      const validation = validateModuleName(name, workspaceLanguage)
+      if (!validation.valid) {
+        setWorkspaceError(validation.error ?? 'Invalid module name.')
+        return
+      }
+      setWorkspaceError(null)
+      setIsCreatingModule(true)
+      const token = readOwnerToken(roomId)
+      const currentSessionId = sessionIdRef.current ?? wsOptions?.sessionId ?? getCollabSessionId()
+      const syncBase = wsOptions?.syncWsUrl
+        ? wsOptions.syncWsUrl.replace(/^ws/, 'http').replace(/\/ws\/rooms.*$/, '')
+        : undefined
+      const res = await createModule(
+        {
+          roomId,
+          sessionId: currentSessionId,
+          ownerToken: token,
+          baseUrl: syncBase,
+          fetchFn: wsOptions?.fetchFn,
+        },
+        name,
+      )
+      setIsCreatingModule(false)
+      if (!res.ok) {
+        setWorkspaceError(res.error)
+      } else {
+        setWorkspaceModules((prev) => {
+          if (prev.some((m) => m.module_id === res.data.module_id)) return prev
+          return [...prev, res.data]
+        })
+        if (!activeModuleIdRef.current && !res.data.pending) {
+          setActiveModuleId(res.data.module_id)
+          activeModuleIdRef.current = res.data.module_id
+          const targetDoc = getModuleDoc(res.data.module_id)
+          bindEditorToDoc(targetDoc)
+          connRef.current?.switchDoc?.(res.data.module_id, targetDoc)
+        }
+      }
+    },
+    [roomId, workspaceLanguage, wsOptions?.fetchFn, wsOptions?.syncWsUrl, getModuleDoc, bindEditorToDoc],
+  )
+
+  const handleRequestModule = useCallback(
+    async (name: string) => {
+      if (!roomId) return
+      const validation = validateModuleName(name, workspaceLanguage)
+      if (!validation.valid) {
+        setWorkspaceError(validation.error ?? 'Invalid module name.')
+        return
+      }
+      setWorkspaceError(null)
+      setIsCreatingModule(true)
+      const currentSessionId = sessionIdRef.current ?? wsOptions?.sessionId ?? getCollabSessionId()
+      const syncBase = wsOptions?.syncWsUrl
+        ? wsOptions.syncWsUrl.replace(/^ws/, 'http').replace(/\/ws\/rooms.*$/, '')
+        : undefined
+      const res = await requestModule(
+        {
+          roomId,
+          sessionId: currentSessionId,
+          baseUrl: syncBase,
+          fetchFn: wsOptions?.fetchFn,
+        },
+        name,
+      )
+      setIsCreatingModule(false)
+      if (!res.ok) {
+        setWorkspaceError(res.error)
+      } else {
+        setWorkspaceModules((prev) => {
+          if (prev.some((m) => m.module_id === res.data.module_id)) return prev
+          return [...prev, res.data]
+        })
+      }
+    },
+    [roomId, workspaceLanguage, wsOptions?.fetchFn, wsOptions?.syncWsUrl],
+  )
+
+  const handleApproveModule = useCallback(
+    async (moduleId: string, ownerMemberId?: string) => {
+      if (!roomId) return
+      setWorkspaceError(null)
+      const token = readOwnerToken(roomId)
+      const currentSessionId = sessionIdRef.current ?? wsOptions?.sessionId ?? getCollabSessionId()
+      const syncBase = wsOptions?.syncWsUrl
+        ? wsOptions.syncWsUrl.replace(/^ws/, 'http').replace(/\/ws\/rooms.*$/, '')
+        : undefined
+      const res = await approveModule(
+        {
+          roomId,
+          sessionId: currentSessionId,
+          ownerToken: token,
+          baseUrl: syncBase,
+          fetchFn: wsOptions?.fetchFn,
+        },
+        moduleId,
+        ownerMemberId,
+      )
+      if (!res.ok) {
+        setWorkspaceError(res.error)
+      } else {
+        setWorkspaceModules((prev) => {
+          const idx = prev.findIndex((m) => m.module_id === moduleId)
+          if (idx >= 0) {
+            const copy = [...prev]
+            copy[idx] = res.data
+            return copy
+          }
+          return [...prev, res.data]
+        })
+      }
+    },
+    [roomId, wsOptions?.fetchFn, wsOptions?.syncWsUrl],
+  )
+
+  const handleDeclineModule = useCallback(
+    async (moduleId: string) => {
+      if (!roomId) return
+      setWorkspaceError(null)
+      const token = readOwnerToken(roomId)
+      const currentSessionId = sessionIdRef.current ?? wsOptions?.sessionId ?? getCollabSessionId()
+      const syncBase = wsOptions?.syncWsUrl
+        ? wsOptions.syncWsUrl.replace(/^ws/, 'http').replace(/\/ws\/rooms.*$/, '')
+        : undefined
+      const res = await declineModule(
+        {
+          roomId,
+          sessionId: currentSessionId,
+          ownerToken: token,
+          baseUrl: syncBase,
+          fetchFn: wsOptions?.fetchFn,
+        },
+        moduleId,
+      )
+      if (!res.ok) {
+        setWorkspaceError(res.error)
+      } else {
+        setWorkspaceModules((prev) => prev.filter((m) => m.module_id !== moduleId))
+      }
+    },
+    [roomId, wsOptions?.fetchFn, wsOptions?.syncWsUrl],
+  )
+
+  const handleGrantWriteAccess = useCallback(
+    async (moduleId: string, memberId: string) => {
+      if (!roomId) return
+      setWorkspaceError(null)
+      const token = readOwnerToken(roomId)
+      const currentSessionId = sessionIdRef.current ?? wsOptions?.sessionId ?? getCollabSessionId()
+      const syncBase = wsOptions?.syncWsUrl
+        ? wsOptions.syncWsUrl.replace(/^ws/, 'http').replace(/\/ws\/rooms.*$/, '')
+        : undefined
+      const res = await grantWriteAccess(
+        {
+          roomId,
+          sessionId: currentSessionId,
+          ownerToken: token,
+          baseUrl: syncBase,
+          fetchFn: wsOptions?.fetchFn,
+        },
+        moduleId,
+        memberId,
+      )
+      if (!res.ok) {
+        setWorkspaceError(res.error)
+      } else {
+        setWorkspaceModules((prev) => {
+          const idx = prev.findIndex((m) => m.module_id === moduleId)
+          if (idx >= 0) {
+            const copy = [...prev]
+            copy[idx] = res.data
+            return copy
+          }
+          return [...prev, res.data]
+        })
+      }
+    },
+    [roomId, wsOptions?.fetchFn, wsOptions?.syncWsUrl],
+  )
+
+  const handleRevokeWriteAccess = useCallback(
+    async (moduleId: string, memberId: string) => {
+      if (!roomId) return
+      setWorkspaceError(null)
+      const token = readOwnerToken(roomId)
+      const currentSessionId = sessionIdRef.current ?? wsOptions?.sessionId ?? getCollabSessionId()
+      const syncBase = wsOptions?.syncWsUrl
+        ? wsOptions.syncWsUrl.replace(/^ws/, 'http').replace(/\/ws\/rooms.*$/, '')
+        : undefined
+      const res = await revokeWriteAccess(
+        {
+          roomId,
+          sessionId: currentSessionId,
+          ownerToken: token,
+          baseUrl: syncBase,
+          fetchFn: wsOptions?.fetchFn,
+        },
+        moduleId,
+        memberId,
+      )
+      if (!res.ok) {
+        setWorkspaceError(res.error)
+      } else {
+        setWorkspaceModules((prev) => {
+          const idx = prev.findIndex((m) => m.module_id === moduleId)
+          if (idx >= 0) {
+            const copy = [...prev]
+            copy[idx] = res.data
+            return copy
+          }
+          return [...prev, res.data]
+        })
+      }
+    },
+    [roomId, wsOptions?.fetchFn, wsOptions?.syncWsUrl],
+  )
+
   // A run-result frame can carry a stale or untrusted display_name. Only the
   // server roster's member_id -> display_name mapping may label the runner.
   const runnerMember = runOutput?.runner?.member_id
@@ -999,6 +1424,27 @@ export default function RoomPage(props: RoomPageProps = {}) {
           </span>
         )}
       </header>
+      {roomMode?.mode === 'open' && (
+        <WorkspacePanel
+          roomId={roomId || ''}
+          isHost={isHost}
+          isObserver={isObserver}
+          language={workspaceLanguage}
+          modules={workspaceModules}
+          activeModuleId={activeModuleId}
+          onSelectModule={handleSelectModule}
+          onCreateModule={handleCreateModule}
+          onRequestModule={handleRequestModule}
+          onApproveModule={handleApproveModule}
+          onDeclineModule={handleDeclineModule}
+          onGrantWriteAccess={handleGrantWriteAccess}
+          onRevokeWriteAccess={handleRevokeWriteAccess}
+          creationError={workspaceError}
+          isCreating={isCreatingModule}
+          roster={roster}
+          myMemberId={myMemberId}
+        />
+      )}
       <section className="room-participants" aria-label="Room participants">
         <h3>Participants ({roster.length})</h3>
 
@@ -1032,6 +1478,28 @@ export default function RoomPage(props: RoomPageProps = {}) {
                   )}
 
                   {isMemberObserver && <span>Read-only</span>}
+
+                  {roomMode?.mode === 'pair' && isHost && !isSelf && !isMemberObserver && member.role.toLowerCase() === 'participant' && (
+                    member.permissions?.can_edit ? (
+                      <button
+                        type="button"
+                        data-testid={`toggle-edit-access-${member.member_id}`}
+                        onClick={() => void handleToggleEditAccess(member, false)}
+                        disabled={changingEditFor === member.member_id}
+                      >
+                        {changingEditFor === member.member_id ? 'Changing...' : 'Revoke Edit'}
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        data-testid={`toggle-edit-access-${member.member_id}`}
+                        onClick={() => void handleToggleEditAccess(member, true)}
+                        disabled={changingEditFor === member.member_id}
+                      >
+                        {changingEditFor === member.member_id ? 'Changing...' : 'Grant Edit'}
+                      </button>
+                    )
+                  )}
 
                   {isHost && !isSelf && !isMemberObserver && member.role.toLowerCase() !== 'host' && (
                     member.permissions?.run_denied_reason === 'run_revoked' ? (
@@ -1135,6 +1603,12 @@ export default function RoomPage(props: RoomPageProps = {}) {
           </p>
         )}
 
+        {editAccessError && (
+          <p role="alert" data-testid="edit-access-error">
+            {editAccessError}
+          </p>
+        )}
+
         {isHost && blocked.length > 0 && (
           <div data-testid="blocked-members" aria-label="Removed members">
             <h4>Removed ({blocked.length})</h4>
@@ -1184,7 +1658,7 @@ export default function RoomPage(props: RoomPageProps = {}) {
         onRunComplete={(result) => {
           if (result.ok) showRunResult(result.data)
         }}
-        getCode={() => docRef.current?.getText('monaco').toString() ?? ''}
+        getCode={() => getActiveDoc()?.getText('monaco').toString() ?? ''}
         initialLanguage={currentLanguage}
         onLanguageChange={(lang) => setCurrentLanguage(lang)}
         executionApiUrl={wsOptions?.executionApiUrl}
@@ -1192,7 +1666,12 @@ export default function RoomPage(props: RoomPageProps = {}) {
         disabled={runDisabled}
         disabledReason={runDisabledReason}
       >
-        {displayRunOutput ? <RunOutputPanel result={displayRunOutput} /> : null}
+        {displayRunOutput ? (
+          <RunOutputPanel
+            result={displayRunOutput}
+            analysisResult={analysisResults[displayRunOutput.request_id] ?? null}
+          />
+        ) : null}
       </RunPanel>
       <div className="room-editor">
         <Editor
@@ -1200,24 +1679,12 @@ export default function RoomPage(props: RoomPageProps = {}) {
           language={currentLanguage}
           defaultLanguage="python"
           defaultValue=""
-          options={{ readOnly: isObserver }}
+          options={{ readOnly: isEditorReadOnly }}
           onMount={(editor: MonacoEditor.IStandaloneCodeEditor) => {
             editorRef.current = editor
-            editor.updateOptions({ readOnly: isObserver })
-            const doc = docRef.current
-            const awareness = awarenessInstanceRef.current
-            if (doc && awareness) {
-              const model = editor.getModel()
-              if (model) {
-                bindingRef.current = new MonacoBinding(
-                  doc.getText('monaco'),
-                  model,
-                  new Set([editor]),
-                  awareness,
-                )
-              }
-            }
-            renderRemoteCursorLabels()
+            editor.updateOptions({ readOnly: isEditorReadOnly })
+            const doc = getActiveDoc()
+            bindEditorToDoc(doc)
           }}
         />
       </div>

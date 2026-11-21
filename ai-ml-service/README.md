@@ -613,6 +613,27 @@ The deterministic sanitizer parser (`app.sanitizer.parse_sanitizer_report`) pars
 - **Non-Sanitizer Crashes:** Standard crashes (e.g. segmentation faults without sanitizer instrumentation) preserve exit information (e.g. `Process exited with exit code 139 (no sanitizer finding).`) without inventing a sanitizer error type.
 - **Compiler Compatibility:** Tested against diagnostic outputs from GCC 12+ and Clang/LLVM 14+.
 
+## Plain-Language Crash Explanation (US-74, FR13.1, FR39.3, FR40.2, DR5)
+
+The crash explanation endpoint (`POST /v1/analyses/crash-explanation`) generates plain-language failure explanations and suggested fixes for compiler sanitizer crashes in C and C++ programs.
+
+### 1. Language Restriction (DR5)
+- **Supported Languages:** C (`c`) and C++ (`cpp`) only.
+- **Unsupported Languages:** Any request specifying other coursework languages (e.g. `python`, `java`, `javascript`) is immediately rejected with HTTP `422 Unprocessable Entity` and error code `UNSUPPORTED_LANGUAGE` without invoking any AI models.
+
+### 2. Privacy & Data Minimization (FR40.2, US-76)
+- **Localized Code Only:** Uses `app.section.extract_relevant_section` to extract a small, bounded window of code lines centered on the crash `line_number`. Full files and unrelated modules are never sent.
+- **Dedicated Prompt:** The outbound LLM prompt contains strictly the deterministic sanitizer summary and the localized code section. Raw ASan/UBSan stack traces, container exit codes, and execution context metadata are excluded.
+- **Canary Isolation:** Code outside the localized window (including canary markers or secrets) is guaranteed never to leak into prompts.
+
+### 3. Output Limitation & Response Schema (FR13.1, T-18 v2 §16.4)
+- **Three-Sentence Cap:** The generated explanation (`ai_step.explanation`) is strictly constrained to at most three sentences in plain prose without markdown headers, bold asterisks, backticks, or filler greetings.
+- **Suggested Fix:** A practical code or algorithmic remediation is extracted and returned in `ai_step.suggested_fix`.
+- **AI Gating:** When consent is missing (`CONSENT_MISSING`), AI is disabled by Host (`AI_DISABLED`), or the monthly budget cap is reached (`COST_CAP_REACHED`), the endpoint returns HTTP 200 with deterministic `error_type`, `line_number`, and `summary` preserved, and `ai_step.status = "skipped"`.
+
+### 4. Method Chain Integration (US-77)
+- Evaluated through the central method chain (`app.chain.answer`) with `rules_first = False` to prevent code containing loops from being prematurely intercepted by complexity pattern rules.
+
 ## Cheapest-Method-First AI Chain (US-77, FR40.3, FR40.4)
 
 To minimize unnecessary external API expenditure and latency, all AI-enabled analysis and explanation endpoints (`POST /v1/analyses/complexity`, `POST /v1/analyses/crash-explanation`, `POST /v1/explain`) route requests through a single central method chain: `app.chain.answer(request)`.
@@ -707,3 +728,42 @@ Counters and application logs record **only** numeric counts, token consumption,
 
 - **Base Dependency:** US-77 is rebased directly on `feature/US-24-monthly-cost-cap` (PR #156), inheriting the persistent `UsageTracker`, atomic reservation lifecycle (`reserve_call()`), non-blocking webhook delivery (`ThreadPoolExecutor`), and `CostCapReachedError`.
 - **Zero Duplication:** Stage telemetry counters (`record_rules_answer()`, `record_local_model_answer()`, `get_stage_counters()`) cleanly extend `UsageTracker` without duplicating cost-cap accounting code.
+
+
+## US-70: Failing-input search
+
+`POST /v1/analyses/failing-input` uses the v2 request and response schemas in
+`docs/schemas/failing-input-*.json`. Requests begin with conservative deterministic
+edge cases: empty stdin and `1`. For evident whitespace-separated numeric input,
+duplicate and negative examples are also tried. Maximum bounds and any unknown
+input grammar are **not guessed**. The response headers
+`X-Failing-Input-Skipped-Cases`, `X-Failing-Input-Reference` and
+`X-Failing-Input-Scope` communicate omissions and the search's limitations.
+
+No reference: only crashes/timeouts can be established; a pass is **not proof of
+correctness**. To compare output, an authoritative reference supplied by the
+internal orchestrator is required with `X-Internal-Token`. The reference is
+executed in execution-service Docker using `purpose=test_batch` to obtain
+expected stdout; the student's batch is then executed against those outputs.
+The current US-71 contract does not execute `reference_solution` itself.
+The reference source must be server-controlled and must never be taken from
+untrusted public clients. If the reference fails, comparison is disabled.
+
+An AI-generated Python input script is optional, only with consent and AI on.
+It is obtained through the US-77 cheapest-method chain and US-22 cache. Its
+output is accepted only after the script has run as a Docker `test_batch`
+inside execution-service. No generated or submitted code is executed by
+ai-ml-service. A per-analysis process cap and time budget apply across both
+reference and candidate batches; 429 budget refusals preserve partial results.
+US-72 owns actual input minimization: US-70 preserves the original value in
+`minimized_input` only as a placeholder, not as evidence of shrinking.
+
+Set `EXECUTION_SERVICE_URL` to the internal execution-service origin and
+`INTERNAL_API_TOKEN` to the shared internal secret. Additional configurable
+limits: `FAILING_INPUT_MAX_RUNS` (default 8; max 10),
+`FAILING_INPUT_BUDGET_SECONDS` (default/max 20),
+`FAILING_INPUT_HTTP_TIMEOUT_SECONDS` (default 35), and
+`FAILING_INPUT_SCRIPT_MAX_CHARS` (default 4000).
+
+Run `pytest -k "failing_input or edge"` in `ai-ml-service/`. The unit tests
+mock Docker execution, so user code never runs on the host.

@@ -23,6 +23,12 @@ public class RoomService {
 
     private final RoomStore store;
     private final RunRecordStore runRecordStore;
+    private HostDepartureManager hostDepartures;
+
+    @Autowired(required = false)
+    public void setHostDepartureManager(HostDepartureManager hostDepartures) {
+        this.hostDepartures = hostDepartures;
+    }
 
     public RoomService(RoomStore store) {
         this(store, null);
@@ -43,8 +49,8 @@ public class RoomService {
     public synchronized JoinOutcome join(String roomId, String sessionId,
                                          String displayName, String ownerToken) {
         Room room = store.get(roomId);
-        if (room == null) {
-            throw new IllegalArgumentException("unknown room: " + roomId);
+        if (room == null || room.isClosed()) {
+            return JoinOutcome.refused("ROOM_CLOSED");
         }
 
         // US-28 (V2.18, CR04): a removed session is blocked — a reconnect, refresh,
@@ -144,6 +150,27 @@ public class RoomService {
             return null;
         }
         member.setCanRun(allowed);
+        return member;
+    }
+
+    /**
+     * Give or take back edit access for a participant in Pair mode (US-36, V2.21; FR19.1).
+     * Returns the updated member, or null if the room or member is unknown.
+     * The caller has already checked that the room is in Pair mode and the target is a participant.
+     *
+     * <p>This is the only place edit access changes for an existing member, so the
+     * audit log of US-58 (FR34) records the change event from here.
+     */
+    public synchronized Member setEditAccess(String roomId, String memberId, boolean canEdit) {
+        Room room = store.get(roomId);
+        if (room == null) {
+            return null;
+        }
+        Member member = room.getMembers().get(memberId);
+        if (member == null) {
+            return null;
+        }
+        member.setCanEdit(canEdit);
         return member;
     }
 
@@ -261,6 +288,7 @@ public class RoomService {
         target.setRole(Role.HOST);
         target.setCanEdit(computeCanEdit(room, Role.HOST));
         target.setCanRun(true);
+        if (hostDepartures != null) hostDepartures.hostTransferred(roomId);
         return target;
     }
 

@@ -334,6 +334,16 @@ Transmits control messages and run execution results from backend services to ac
   - `GET /internal/rooms/{room_id}/runs[?input_hash=<sha256>]` — returns `{"room_id": "...", "runs": [...]}` ordered **newest first** (filtered by `input_hash` when supplied, for US-68 slowdown baselines). Returns `401 UNAUTHORIZED` on invalid token and `404 ROOM_NOT_FOUND` on unknown/closed rooms.
   - `DELETE /internal/rooms/{room_id}/runs` — deletes all run records for `room_id` (`RunRecordStore.deleteByRoom`) and returns `{"room_id": "...", "deleted": <count>}`. Closing or deleting a room via `RoomService.closeRoom` / `RoomService.deleteRoom` also purges its run records automatically (FR32 / US-56).
 
+### 6.4 Execution History Retention (FR15 / US-30 / CR11)
+
+- `sync-service` retains its **canonical run records** for **86,400 seconds (24 hours)** by default. This is a **provisional** FR15 value pending Sprint 6 review. Set `APP_RUN_HISTORY_RETENTION_SECONDS` to a positive number of seconds to override it per host; Docker Compose forwards this value from the host `.env` to the service.
+
+- The scheduled sweep runs every **60,000 ms** by default. Set `APP_RUN_HISTORY_SWEEP_INTERVAL_MS` to change the interval. The sweep logs record counts only, not code, input or other user content.
+
+- The sweep removes expired canonical `RunRecordStore` entries, including entries returned by `GET /internal/rooms/{room_id}/runs` and its optional `input_hash` filter. Room closure/deletion independently removes **all** canonical records for that room, regardless of their age. The sweep does not touch live room code or CRDT documents.
+
+- **CR11 / US-68:** The slowdown baseline needs **at least three earlier measurements with matching `input_hash`** (`docs/ai-ml-contract.md` §16.2). Those measurements are kept separately in `ai-ml-service`'s `room_histories[room_id][input_hash]` for the life of the room/session; **the sync-service retention sweep does not prune or reset that baseline**. The baseline is cleared during room teardown through the US-56 `DELETE /v1/rooms/{room_id}/state` flow. The canonical history retention window therefore does not impose a 24-hour window on the slowdown baseline.
+
 ---
 
 ## 7. Known Limitations
@@ -343,3 +353,21 @@ Transmits control messages and run execution results from backend services to ac
 - **Edit mode rules** (US-35, US-43): the `canEdit` flag at join is set by the Pair preset. Per-module write access in Open mode is applied in US-43 on top of the check already implemented here.
 - **ROOM_FULL / USER_BLOCKED** defined in US-63 / US-28 respectively.
 - **In-memory platform state** (T-05, `docs/decisions/platform-home.md`): room metadata and members live behind `RoomStore` in memory. A `sync-service` restart clears all rooms, so owner tokens issued before it stop working. Durable storage is a later decision.
+
+### US-55: Close room after Host departure
+
+When the final joined Host control socket disconnects, `HostDepartureManager`
+records a deadline. A returning Host cancels it; a successful US-54 transfer
+cancels the previous Host's deadline. The scheduler checks the deadline using
+an injectable `Clock` (tests use a fixed/advanceable clock).
+
+- `APP_ROOM_LIMITS_HOST_LEAVES_TIMEOUT_MS` overrides the **provisional** 30,000 ms grace period.
+- `APP_ROOM_LIMITS_HOST_LEAVES_CHECK_INTERVAL_MS` overrides the 1,000 ms deadline-check interval.
+- When the deadline expires, `closeRoom` marks the room closed and closes all
+  control and document sockets with WebSocket code `4410`.
+- A closed room is retained as an in-memory tombstone and rejects new sockets with
+  `4410`. This is the US-55/US-56 interim decision: US-56 must coordinate
+  cross-service data deletion while preserving the closed/not-found contract.
+- The client already stops retries and shows “This room has been closed” on `4410`.
+
+Test: `mvn -Dtest=HostDepartureManagerTest test` from `sync-service`.

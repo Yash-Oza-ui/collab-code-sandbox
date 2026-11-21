@@ -46,6 +46,8 @@ Or set them in `ai-ml-service/.env` (git-ignored, copied from `.env.example`).
 | FR31.2   | Host-leaves timeout (ms)                 | sync-service       | `APP_ROOM_LIMITS_HOST_LEAVES_TIMEOUT_MS`          | `30000`     | US-16 🟡 (US-xx) |
 | NFR14    | Aggregate run time budget per session    | sync-service       | `APP_ROOM_LIMITS_AGGREGATE_RUN_BUDGET_MS`         | `0` (none)  | US-63 🔲         |
 | NFR14    | Max runs per session                     | sync-service       | `APP_ROOM_LIMITS_MAX_RUNS_PER_SESSION`            | `0` (none)  | US-63 🔲         |
+| FR15     | Run record retention (seconds, provisional) | sync-service | `APP_RUN_HISTORY_RETENTION_SECONDS` | `86400` (24h, not final) | US-30 🟡 |
+| FR15     | Run record sweep interval (ms) | sync-service | `APP_RUN_HISTORY_SWEEP_INTERVAL_MS` | `60000` | US-30 ✅ |
 | FR37.2   | AI slowdown factor                       | ai-ml-service      | `AI_SLOWDOWN_FACTOR`                              | `1.0`       | US-77 🔲         |
 | FR40.4   | LLM request timeout (seconds)            | ai-ml-service      | `LLM_TIMEOUT_SECONDS`                             | `10.0`      | US-16 ✅         |
 | FR40.4   | Max tokens per AI request                | ai-ml-service      | `AI_MAX_TOKENS_PER_REQUEST`                       | `4096`      | US-24 ✅         |
@@ -85,3 +87,13 @@ No code change is needed. The services read the values on startup.
 1. **Do not commit host-specific values** to this repository. Use a git-ignored `.env` file on each host.
 2. **Document final values** in a separate internal runbook after the deployment host is benchmarked.
 3. **Re-run the full CI suite** after changing any value to ensure no test assumes a previous default.
+
+### US-55 Host departure timeout
+
+`APP_ROOM_LIMITS_HOST_LEAVES_TIMEOUT_MS` (default **30,000 ms**, provisional)
+sets how long the Host may be disconnected before automatic closure. The
+`APP_ROOM_LIMITS_HOST_LEAVES_CHECK_INTERVAL_MS` scheduler interval defaults to
+**1,000 ms**. The latter controls scheduling precision, not the grace period.
+The central `HostDepartureManager.closeRoom` retains the closed-room tombstone
+for `4410` responses; US-56 will extend it to remove related data and document
+the final tombstone retention policy in both PRs.
