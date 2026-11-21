@@ -1763,8 +1763,23 @@ export default function RoomPage(props: RoomPageProps = {}) {
       >
         {displayRunOutput ? (
           <RunOutputPanel
+            key={displayRunOutput.request_id}
             result={displayRunOutput}
             analysisResult={analysisResults[displayRunOutput.request_id] ?? null}
+            currentViewerMemberId={myMemberId ?? undefined}
+            onSaveTestCase={async (testCase) => {
+              const sessionId = sessionIdRef.current
+              if (!roomId || !sessionId) throw new Error('Not joined to a room')
+              const response = await (wsOptions?.fetchFn ?? fetch)(
+                `${config.platformApiUrl}/v1/rooms/${encodeURIComponent(roomId)}/saved-tests`,
+                {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json', 'X-Session-Id': sessionId },
+                  body: JSON.stringify(testCase),
+                },
+              )
+              if (!response.ok) throw new Error('Could not save test case')
+            }}
           />
         ) : null}
       </RunPanel>

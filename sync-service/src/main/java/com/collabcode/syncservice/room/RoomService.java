@@ -1,6 +1,7 @@
 package com.collabcode.syncservice.room;
 
 import com.collabcode.syncservice.run.RunRecordStore;
+import com.collabcode.syncservice.run.SavedTestCaseStore;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
@@ -25,6 +26,9 @@ public class RoomService {
     private final RunRecordStore runRecordStore;
     private HostDepartureManager hostDepartures;
     private RoomCleanupCoordinator roomCleanup;
+    private SavedTestCaseStore savedTests;
+    @Autowired(required = false)
+    public void setSavedTestCaseStore(SavedTestCaseStore store) { this.savedTests = store; }
 
     @Autowired(required = false)
     public void setRoomCleanupCoordinator(RoomCleanupCoordinator roomCleanup) {
@@ -362,6 +366,7 @@ public class RoomService {
         if (runRecordStore != null) {
             runRecordStore.deleteByRoom(roomId);
         }
+        if (savedTests != null) savedTests.deleteByRoom(roomId);
         return true;
     }
 
@@ -374,6 +379,7 @@ public class RoomService {
         if (runRecordStore != null) {
             runRecordStore.deleteByRoom(roomId);
         }
+        if (savedTests != null) savedTests.deleteByRoom(roomId);
         return room != null;
     }
 }

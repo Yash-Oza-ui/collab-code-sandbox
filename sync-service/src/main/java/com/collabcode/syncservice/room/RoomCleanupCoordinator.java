@@ -2,6 +2,8 @@ package com.collabcode.syncservice.room;
 
 import com.collabcode.syncservice.module.ModuleService;
 import com.collabcode.syncservice.run.RunRecordStore;
+import com.collabcode.syncservice.run.SavedTestCaseStore;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import org.springframework.web.socket.CloseStatus;
 import org.springframework.web.socket.WebSocketSession;
@@ -16,6 +18,10 @@ public class RoomCleanupCoordinator {
     private final ModuleService modules;
     private final RunRecordStore runs;
     private final RoomEndedNotifier notifier;
+    private SavedTestCaseStore savedTests;
+
+    @Autowired(required = false)
+    public void setSavedTestCaseStore(SavedTestCaseStore store) { this.savedTests = store; }
 
     public RoomCleanupCoordinator(RoomStore rooms, RoomRegistry registry, ModuleService modules,
                                   RunRecordStore runs, RoomEndedNotifier notifier) {
@@ -45,6 +51,7 @@ public class RoomCleanupCoordinator {
         registry.clearRoom(roomId);
         modules.deleteByRoom(roomId);
         runs.deleteByRoom(roomId);
+        if (savedTests != null) savedTests.deleteByRoom(roomId);
         room.clearSensitiveState();
         // Network traffic and retry never block local teardown.
         notifier.queueRoomEnded(roomId, reason);
