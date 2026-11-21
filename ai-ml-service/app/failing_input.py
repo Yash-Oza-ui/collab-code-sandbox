@@ -56,10 +56,15 @@ class FailingInputResponse(BaseModel):
     failure_type: Literal["wrong_output", "crash", "timeout"] | None = None
     original_input: str | None = None
     minimized_input: str | None = None
+    original_size: int | None = None
+    minimized_size: int | None = None
+    reference_used: bool = False
+    minimization_rounds: int = 0
+    minimization_batches: int = 0
     expected_output: str | None = None
     actual_output: str | None = None
     tests_executed: int = 0
-    minimization_status: Literal["completed", "budget_exhausted", "not_applicable"] = "not_applicable"
+    minimization_status: Literal["completed", "budget_exhausted", "limit_reached", "not_applicable"] = "not_applicable"
     test_case: TestCase | None = None
     can_save_as_test_case: bool = False
     ai_step: AIStep
@@ -329,6 +334,37 @@ async def failing_input(
     if not reference_valid:
         response.headers["X-Failing-Input-Scope"] = "crash-and-timeout-only"
     final = as_response(payload, step, records, reference_valid, budget.exhausted)
+    if final.failure_found and final.original_input is not None:
+        final.original_size = len(final.original_input)
+        final.minimized_size = len(final.original_input)
+        final.reference_used = reference_valid
+        if not budget.exhausted:
+            # AI-free, deterministic US-72 minimiser. Every evaluation uses US-71.
+            from app.minimizer import minimize_failure
+            reduced = await minimize_failure(
+                payload, budget,
+                original_input=final.original_input,
+                failure_type=final.failure_type,
+                expected_output=final.expected_output,
+                actual_output=final.actual_output,
+                reference_used=reference_valid,
+                max_rounds=settings.FAILING_INPUT_MINIMIZER_MAX_ROUNDS,
+                max_batches=settings.FAILING_INPUT_MINIMIZER_MAX_BATCHES,
+            )
+            final.minimized_input = reduced.input
+            final.minimized_size = len(reduced.input)
+            final.expected_output = reduced.expected_output
+            final.actual_output = reduced.actual_output
+            final.minimization_status = reduced.status
+            final.minimization_rounds = reduced.rounds
+            final.minimization_batches = reduced.batches
+            final.tests_executed += reduced.tests_executed
+            final.test_case = TestCase(
+                input=reduced.input, failure_type=final.failure_type,
+                expected_output=reduced.expected_output, language=payload.language,
+            )
+        elif final.minimization_status != "budget_exhausted":
+            final.minimization_status = "budget_exhausted"
     # US-77 already records fallback when its provider gates reject a request.
     # Count the AI-free skipped path here without double-counting chain failures.
     if step.error_code and not chain_used:

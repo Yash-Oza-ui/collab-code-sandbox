@@ -26,6 +26,8 @@ class Settings:
         self.FAILING_INPUT_BUDGET_SECONDS: float = min(20.0, max(1.0, float(os.getenv("FAILING_INPUT_BUDGET_SECONDS", "20"))))
         self.FAILING_INPUT_HTTP_TIMEOUT_SECONDS: float = max(1.0, float(os.getenv("FAILING_INPUT_HTTP_TIMEOUT_SECONDS", "35")))
         self.FAILING_INPUT_SCRIPT_MAX_CHARS: int = max(100, int(os.getenv("FAILING_INPUT_SCRIPT_MAX_CHARS", "4000")))
+        self.FAILING_INPUT_MINIMIZER_MAX_ROUNDS: int = max(1, int(os.getenv("FAILING_INPUT_MINIMIZER_MAX_ROUNDS", "8")))
+        self.FAILING_INPUT_MINIMIZER_MAX_BATCHES: int = max(1, int(os.getenv("FAILING_INPUT_MINIMIZER_MAX_BATCHES", "12")))
         self.LLM_API_KEY: Optional[str] = os.getenv("LLM_API_KEY") or os.getenv("GEMINI_API_KEY")
         self.LLM_MODEL: str = os.getenv("LLM_MODEL", "gemini-1.5-flash")
         self.LLM_BASE_URL: Optional[str] = os.getenv("LLM_BASE_URL")

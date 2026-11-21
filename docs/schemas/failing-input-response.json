@@ -158,6 +158,7 @@
       "enum": [
         "completed",
         "budget_exhausted",
+        "limit_reached",
         "not_applicable"
       ]
     },
@@ -176,6 +177,31 @@
     },
     "ai_step": {
       "$ref": "#/definitions/ai_step"
+    },
+    "original_size": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "minimized_size": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "reference_used": {
+      "type": "boolean"
+    },
+    "minimization_rounds": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "minimization_batches": {
+      "type": "integer",
+      "minimum": 0
     }
   },
   "required": [
@@ -192,7 +218,12 @@
     "minimization_status",
     "test_case",
     "can_save_as_test_case",
-    "ai_step"
+    "ai_step",
+    "original_size",
+    "minimized_size",
+    "reference_used",
+    "minimization_rounds",
+    "minimization_batches"
   ],
   "additionalProperties": false,
   "allOf": [
@@ -225,7 +256,8 @@
           "minimization_status": {
             "enum": [
               "completed",
-              "budget_exhausted"
+              "budget_exhausted",
+              "limit_reached"
             ]
           },
           "test_case": {

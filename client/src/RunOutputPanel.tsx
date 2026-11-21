@@ -1,9 +1,18 @@
+import { useState } from 'react'
 import type { RunResponseData } from './runCode'
 import type { AnalysisResultMessage } from './awarenessWs'
+
+export interface SavedTestCandidate {
+  input: string
+  failure_type: 'wrong_output' | 'crash' | 'timeout'
+  expected_output: string | null
+  language: 'python' | 'cpp' | 'c' | 'java' | 'javascript'
+}
 
 export interface RunOutputPanelProps {
   result: RunResponseData
   analysisResult?: AnalysisResultMessage | null
+  onSaveTestCase?: (value: SavedTestCandidate) => Promise<void>
 }
 
 function formatRanAt(ranAt: string): string {
@@ -19,7 +28,32 @@ function formatRanAt(ranAt: string): string {
  * and local time (with raw timestamp in tooltip). In Open mode, labels the saved
  * versions that were run. Member IDs are never rendered.
  */
-export default function RunOutputPanel({ result, analysisResult }: RunOutputPanelProps) {
+export default function RunOutputPanel({ result, analysisResult, onSaveTestCase }: RunOutputPanelProps) {
+  const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
+  const analysis = analysisResult?.task === 'failing_input' ? analysisResult.result : undefined
+  const originalInput = typeof analysis?.original_input === 'string' ? analysis.original_input : null
+  const minimizedInput = typeof analysis?.minimized_input === 'string' ? analysis.minimized_input : null
+  const savedCandidate = analysis?.test_case
+  const isCandidate = (value: unknown): value is SavedTestCandidate => {
+    if (!value || typeof value !== 'object') return false
+    const v = value as Record<string, unknown>
+    return typeof v.input === 'string' &&
+      (v.failure_type === 'wrong_output' || v.failure_type === 'crash' || v.failure_type === 'timeout') &&
+      (v.expected_output === null || typeof v.expected_output === 'string') &&
+      (v.language === 'python' || v.language === 'cpp' || v.language === 'c' ||
+        v.language === 'java' || v.language === 'javascript')
+  }
+  const canSave = analysis?.can_save_as_test_case === true && isCandidate(savedCandidate)
+  const saveTest = async () => {
+    if (!onSaveTestCase || !isCandidate(savedCandidate)) return
+    setSaveState('saving')
+    try {
+      await onSaveTestCase(savedCandidate)
+      setSaveState('saved')
+    } catch {
+      setSaveState('error')
+    }
+  }
   const runnerName = result.runner?.display_name
   const noOutput = !result.stdout && !result.stderr
 
@@ -112,6 +146,23 @@ export default function RunOutputPanel({ result, analysisResult }: RunOutputPane
           </span>
           {analysisResult.message}
         </div>
+      )}
+
+      {originalInput !== null && minimizedInput !== null && (
+        <section className="run-output-notice" data-testid="minimized-failing-input">
+          <strong>Minimised failing input</strong>
+          <div>Original: {originalInput.length} characters; minimised: {minimizedInput.length} characters</div>
+          <pre className="output-text" data-testid="minimized-input-text">{minimizedInput}</pre>
+          <div>Failure: {String(analysis?.failure_type ?? 'unknown')}</div>
+          <div>Status: {String(analysis?.minimization_status ?? 'not_applicable')}</div>
+          {canSave && onSaveTestCase && (
+            <button type="button" onClick={saveTest} disabled={saveState === 'saving' || saveState === 'saved'}
+                    data-testid="save-minimized-test-case">
+              {saveState === 'saving' ? 'Saving…' : saveState === 'saved' ? 'Saved as test case' : 'Save as Test Case'}
+            </button>
+          )}
+          {saveState === 'error' && <p role="alert">Could not save the test case. Try again.</p>}
+        </section>
       )}
 
       {result.stdout && (
