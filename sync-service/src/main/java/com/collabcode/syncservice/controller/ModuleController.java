@@ -18,6 +18,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -446,6 +447,107 @@ public class ModuleController {
             return moduleError(status, msg, msg);
         } catch (IllegalStateException e) {
             return moduleError(HttpStatus.NOT_FOUND, "MODULE_NOT_FOUND", "Module not found.");
+        }
+    }
+
+    /**
+     * Update module attributes: runnable or is_entry (V2.6, decision 7, FR20.2, FR20.3, US-46).
+     *
+     * A PATCH carries exactly one of runnable or is_entry. Sending zero or more than one is INVALID_REQUEST.
+     * Setting runnable is owner-only (refused with NOT_MODULE_OWNER).
+     * Setting is_entry is Host-only (refused with NOT_OWNER).
+     */
+    @PatchMapping("/rooms/{roomId}/modules/{moduleId}")
+    public ResponseEntity<?> updateModule(
+            @PathVariable String roomId,
+            @PathVariable String moduleId,
+            @RequestHeader(value = "X-Session-Id", required = false) String sessionId,
+            @RequestHeader(value = "X-Owner-Token", required = false) String ownerToken,
+            HttpEntity<String> httpEntity) {
+
+        Room room = store.get(roomId);
+        if (room == null) {
+            return moduleError(HttpStatus.NOT_FOUND, "ROOM_NOT_FOUND", "Room not found.");
+        }
+        if (room.getMode() != RoomMode.OPEN) {
+            return moduleError(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_REQUEST", "Pair mode rooms do not have modules.");
+        }
+        if (sessionId == null || sessionId.isBlank()) {
+            return moduleError(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_REQUEST", "Header 'X-Session-Id' is required.");
+        }
+        Member member = roomService.findMemberBySession(roomId, sessionId);
+        if (member == null) {
+            return moduleError(HttpStatus.NOT_FOUND, "SESSION_NOT_FOUND", "Session has not joined the room.");
+        }
+
+        JsonNode json;
+        try {
+            if (httpEntity == null || httpEntity.getBody() == null || httpEntity.getBody().isBlank()) {
+                return moduleError(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_REQUEST", "Request body is required.");
+            }
+            json = objectMapper.readTree(httpEntity.getBody());
+        } catch (Exception e) {
+            return moduleError(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_REQUEST", "Malformed JSON body.");
+        }
+
+        boolean hasRunnable = json.has("runnable");
+        boolean hasEntry = json.has("is_entry");
+        boolean hasName = json.has("name");
+
+        int fieldCount = (hasRunnable ? 1 : 0) + (hasEntry ? 1 : 0) + (hasName ? 1 : 0);
+        if (fieldCount != 1) {
+            return moduleError(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_REQUEST",
+                    "A PATCH must carry exactly one field (runnable or is_entry).");
+        }
+
+        try {
+            if (hasRunnable) {
+                if (!json.get("runnable").isBoolean()) {
+                    return moduleError(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_REQUEST", "Field 'runnable' must be a boolean.");
+                }
+                boolean runnable = json.get("runnable").asBoolean();
+                ModuleRecord updated = moduleService.setRunnable(roomId, moduleId, member, runnable);
+                controlHandler.broadcastModuleUpdated(roomId, RoomMessages.moduleUpdated(updated, false));
+                return ResponseEntity.ok(moduleBody(updated));
+            } else if (hasEntry) {
+                if (!json.get("is_entry").isBoolean()) {
+                    return moduleError(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_REQUEST", "Field 'is_entry' must be a boolean.");
+                }
+                boolean isEntry = json.get("is_entry").asBoolean();
+                ModuleService.EntryChangeResult result = moduleService.setEntry(roomId, moduleId, member, ownerToken, isEntry);
+                if (result.replaced() != null) {
+                    controlHandler.broadcastModuleUpdated(roomId, RoomMessages.moduleUpdated(result.replaced(), false));
+                }
+                controlHandler.broadcastModuleUpdated(roomId, RoomMessages.moduleUpdated(result.updated(), false));
+                return ResponseEntity.ok(moduleBody(result.updated()));
+            } else {
+                return moduleError(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_REQUEST", "Field 'name' rename is not supported in this version.");
+            }
+        } catch (SecurityException e) {
+            String code = e.getMessage();
+            if ("NOT_MODULE_OWNER".equals(code)) {
+                return moduleError(HttpStatus.FORBIDDEN, "NOT_MODULE_OWNER", "Only the module owner can change its runnable status.");
+            }
+            if ("NOT_OWNER".equals(code)) {
+                return moduleError(HttpStatus.FORBIDDEN, "NOT_OWNER", "Only the Host can set the workspace entry file.");
+            }
+            return moduleError(HttpStatus.FORBIDDEN, code, e.getMessage());
+        } catch (IllegalStateException e) {
+            if ("MODULE_NOT_FOUND".equals(e.getMessage())) {
+                return moduleError(HttpStatus.NOT_FOUND, "MODULE_NOT_FOUND", "Module not found.");
+            }
+            if ("MODULE_PENDING".equals(e.getMessage())) {
+                return moduleError(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_REQUEST", "Pending modules cannot be modified.");
+            }
+            return moduleError(HttpStatus.CONFLICT, e.getMessage(), e.getMessage());
+        } catch (IllegalArgumentException e) {
+            String msg = e.getMessage();
+            if ("MODULE_PENDING".equals(msg)) {
+                return moduleError(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_REQUEST", "Pending modules cannot be modified.");
+            }
+            HttpStatus status = ("SESSION_NOT_FOUND".equals(msg) || "ROOM_NOT_FOUND".equals(msg))
+                    ? HttpStatus.NOT_FOUND : HttpStatus.UNPROCESSABLE_ENTITY;
+            return moduleError(status, msg, msg);
         }
     }
 
