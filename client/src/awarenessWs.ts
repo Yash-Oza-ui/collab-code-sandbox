@@ -299,6 +299,7 @@ export interface JoinedMessage {
   role: string
   mode: string
   preset?: string
+  ai_enabled?: boolean
   permissions?: MemberPermissions
   [key: string]: unknown
 }
@@ -317,11 +318,18 @@ export interface RosterMember {
   permissions?: MemberPermissions
 }
 
+export interface RoomStateMessage {
+  type: 'room-state'
+  ai_enabled: boolean
+  [key: string]: unknown
+}
+
 export interface RosterMessage {
   type: 'roster'
   members: RosterMember[]
   /** Host-only running is on (V2.20): only the Host can run. Absent from older servers. */
   host_only_run?: boolean
+  ai_enabled?: boolean
   [key: string]: unknown
 }
 
@@ -401,6 +409,7 @@ export interface ConnectAwarenessWsOptions {
   onJoined?: (msg: JoinedMessage) => void
   onJoinRefused?: (msg: JoinRefusedMessage) => void
   onRoster?: (msg: RosterMessage) => void
+  onRoomState?: (msg: RoomStateMessage) => void
   /** The Host role was handed to this member (V2.19); the message holds the new owner token. */
   onHostGranted?: (msg: HostGrantedMessage) => void
   onEditRejected?: (msg: EditRejectedMessage) => void
@@ -455,6 +464,7 @@ export function connectAwarenessWs(
     onJoined,
     onJoinRefused,
     onRoster,
+    onRoomState,
     onHostGranted,
     onEditRejected,
     onRunResult,
@@ -950,6 +960,8 @@ export function connectAwarenessWs(
             onJoinRefused?.(msg as JoinRefusedMessage)
           } else if (msg.type === 'roster') {
             onRoster?.(msg as RosterMessage)
+          } else if (msg.type === 'room-state') {
+            onRoomState?.(msg as RoomStateMessage)
           } else if (msg.type === 'host-granted') {
             onHostGranted?.(msg as HostGrantedMessage)
           } else if (msg.type === 'edit-rejected') {

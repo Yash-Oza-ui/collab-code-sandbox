@@ -3,6 +3,7 @@ import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import RoomPage from './RoomPage'
+import { ownerTokenKey } from './createRoom'
 
 // US-37 (FR19.2, EPIC 5): Pair mode room presets (Teach/Interview and Debug together).
 // - Preset label is rendered ("Teach / Interview" or "Debug together").
@@ -53,6 +54,7 @@ class FakeSocket {
   static mode = 'pair'
   static preset: string | null = 'teach_interview'
   static initialCanEdit = false
+  static aiEnabled = false
 
   readyState = 0
   binaryType = 'arraybuffer'
@@ -82,6 +84,7 @@ class FakeSocket {
         role: FakeSocket.role,
         mode: FakeSocket.mode,
         preset: FakeSocket.preset,
+        ai_enabled: FakeSocket.aiEnabled,
         permissions: {
           can_edit: FakeSocket.role === 'host' ? true : FakeSocket.initialCanEdit,
           can_run: true,
@@ -114,6 +117,7 @@ describe('RoomPage pair presets and edit indicators (US-37, FR19.2)', () => {
     FakeSocket.mode = 'pair'
     FakeSocket.preset = 'teach_interview'
     FakeSocket.initialCanEdit = false
+    FakeSocket.aiEnabled = false
     monacoUpdateOptionsSpy.mockClear()
 
     originalPathname = window.location.pathname
@@ -289,5 +293,144 @@ describe('RoomPage pair presets and edit indicators (US-37, FR19.2)', () => {
 
     expect(container?.querySelector('[data-testid="room-preset-badge"]')).toBeNull()
     expect(container?.querySelector('[data-testid="room-edit-status-badge"]')).toBeNull()
+  })
+})
+
+
+describe('US-59 room AI switch indicators', () => {
+  let container: HTMLDivElement | null = null
+  let root: ReturnType<typeof createRoot> | null = null
+  let priorPath: string
+  beforeEach(() => {
+    priorPath = window.location.pathname
+    window.history.replaceState({}, '', '/room/room-pair-preset-test')
+    FakeSocket.instances = []
+    FakeSocket.role = 'participant'
+    FakeSocket.aiEnabled = false
+    FakeSocket.preset = 'teach_interview'
+    sessionStorage.clear()
+    localStorage.clear()
+  })
+  afterEach(async () => {
+    if (root) await act(async () => root?.unmount())
+    container?.remove()
+    root = null
+    container = null
+    window.history.replaceState({}, '', priorPath)
+  })
+  it('shows a guest the server value and updates on a room-state message without reload', async () => {
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    root = createRoot(container)
+    await act(async () => root?.render(<RoomPage wsOptions={{ WebSocketClass: FakeSocket as unknown as typeof WebSocket, sessionId: SESSION_ID }} />))
+    const input = container.querySelector<HTMLInputElement>('#display-name')!
+    await act(async () => {
+      input.value = 'Guest'
+      container!.querySelector<HTMLFormElement>('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+    })
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 45)) })
+    expect(container.querySelector('[data-testid="room-ai-status"]')?.textContent).toBe('AI off')
+    expect(container.querySelector('[data-testid="host-ai-switch-toggle"]')).toBeNull()
+    await act(async () => FakeSocket.instances[0].receive({ type: 'room-state', ai_enabled: true }))
+    expect(container.querySelector('[data-testid="room-ai-status"]')?.textContent).toBe('AI on')
+  })
+})
+
+
+describe('US-59 Host toggle behavior', () => {
+  let container: HTMLDivElement | null = null
+  let root: ReturnType<typeof createRoot> | null = null
+  let priorPath: string
+
+  beforeEach(() => {
+    priorPath = window.location.pathname
+    window.history.replaceState({}, '', `/room/${ROOM_ID}`)
+    FakeSocket.instances = []
+    FakeSocket.role = 'host'
+    FakeSocket.mode = 'pair'
+    FakeSocket.preset = 'teach_interview'
+    FakeSocket.aiEnabled = false
+    FakeSocket.memberId = 'm_me'
+    sessionStorage.clear()
+    localStorage.clear()
+    localStorage.setItem(ownerTokenKey(ROOM_ID), 'us59-owner-token')
+  })
+
+  afterEach(async () => {
+    if (root) await act(async () => root?.unmount())
+    container?.remove()
+    root = null
+    container = null
+    window.history.replaceState({}, '', priorPath)
+    localStorage.clear()
+  })
+
+  async function join(fetchFn: typeof fetch) {
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    root = createRoot(container)
+    await act(async () => {
+      root?.render(<RoomPage wsOptions={{
+        WebSocketClass: FakeSocket as unknown as typeof WebSocket,
+        sessionId: SESSION_ID,
+        fetchFn,
+      }} />)
+    })
+    const input = container.querySelector<HTMLInputElement>('#display-name')!
+    await act(async () => {
+      input.value = 'Host'
+      container!.querySelector<HTMLFormElement>('form')!
+        .dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+    })
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 45)) })
+  }
+
+  it('shows the Host switch, sends the authorized PATCH, and updates from server state', async () => {
+    const api = vi.fn(async (...args: [string, RequestInit?]) => {
+      const [url] = args
+      if (url.includes('/members/blocked')) {
+        return { ok: true, status: 200, json: async () => ({ blocked: [] }) } as Response
+      }
+      if (url.endsWith('/ai-switch')) {
+        return { ok: true, status: 200, json: async () => ({ ai_enabled: true }) } as Response
+      }
+      return { ok: true, status: 200, json: async () => ({}) } as Response
+    })
+    await join(api as unknown as typeof fetch)
+    const checkbox = container!.querySelector<HTMLInputElement>('[data-testid="host-ai-switch-toggle"]')
+    expect(checkbox).not.toBeNull()
+    expect(checkbox?.checked).toBe(false)
+    await act(async () => {
+      checkbox!.click()
+      await new Promise(resolve => setTimeout(resolve, 0))
+    })
+    const patch = api.mock.calls.find(([url]) => url.endsWith('/ai-switch'))
+    expect(patch).toBeDefined()
+    expect(patch?.[1]?.method).toBe('PATCH')
+    expect(patch?.[1]?.headers).toMatchObject({
+      'X-Session-Id': SESSION_ID,
+      'X-Owner-Token': 'us59-owner-token',
+    })
+    expect(patch?.[1]?.body).toBe(JSON.stringify({ ai_enabled: true }))
+    expect(container?.querySelector('[data-testid="room-ai-status"]')?.textContent).toBe('AI on')
+  })
+
+  it('shows a Host-visible authorization error and keeps the server AI state', async () => {
+    const api = vi.fn(async (url: string) => {
+      if (url.includes('/members/blocked')) {
+        return { ok: true, status: 200, json: async () => ({ blocked: [] }) } as Response
+      }
+      return { ok: false, status: 403, json: async () =>
+        ({ error: { code: 'NOT_OWNER', message: 'Only the Host can do this.' } }) } as Response
+    })
+    await join(api as unknown as typeof fetch)
+    const checkbox = container!.querySelector<HTMLInputElement>('[data-testid="host-ai-switch-toggle"]')!
+    await act(async () => {
+      checkbox.click()
+      await new Promise(resolve => setTimeout(resolve, 0))
+    })
+    expect(container?.querySelector('[data-testid="ai-switch-error"]')?.textContent)
+      .toContain('Only the Host')
+    expect(container?.querySelector('[data-testid="room-ai-status"]')?.textContent).toBe('AI off')
   })
 })

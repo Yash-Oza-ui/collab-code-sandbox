@@ -28,7 +28,7 @@ public class Room {
      * The room's AI switch default (FR35.2): off in a Teach/Interview room, on
      * in every other room. The Host can toggle it later (FR35.1).
      */
-    private final boolean aiEnabled;
+    private volatile boolean aiEnabled;
 
     /** memberId -> Member. Filled by join (V2.3); empty at creation. */
     private final Map<String, Member> members = new ConcurrentHashMap<>();
@@ -89,6 +89,7 @@ public class Room {
      */
     public void setOwnerTokenHash(String ownerTokenHash) { this.ownerTokenHash = ownerTokenHash; }
     public boolean isAiEnabled() { return aiEnabled; }
+    public void setAiEnabled(boolean enabled) { this.aiEnabled = enabled; }
     public Map<String, Member> getMembers() { return members; }
 
     public boolean isClosed() { return closed; }
@@ -103,6 +104,7 @@ public class Room {
         pendingEditRequests.clear();
         requiresApproval = false;
         hostOnlyRun = false;
+        aiEnabled = false;
     }
 
     public boolean isRequiresApproval() { return requiresApproval; }
@@ -155,6 +157,7 @@ public class Room {
         copy.closed = this.closed;
         copy.requiresApproval = this.requiresApproval;
         copy.hostOnlyRun = this.hostOnlyRun;
+        copy.aiEnabled = this.aiEnabled;
         copy.members.putAll(this.members);
         copy.pendingEditRequests.putAll(this.pendingEditRequests);
         return copy;

@@ -27,6 +27,7 @@ public final class RoomMessages {
         m.put("role", member.getRole().value());
         m.put("mode", room.getMode().value());
         m.put("preset", room.getPreset());
+        m.put("ai_enabled", room.isAiEnabled());
         if (room.getLanguage() != null) {
             m.put("language", room.getLanguage());
         }
@@ -67,6 +68,15 @@ public final class RoomMessages {
         m.put("members", members);
         // Room-wide Run setting (US-60, V2.20): lets the Host client show the switch.
         m.put("host_only_run", room.isHostOnlyRun());
+        m.put("ai_enabled", room.isAiEnabled());
+        return m;
+    }
+
+    /** Server-authoritative room-wide AI switch change (US-59). */
+    public static Map<String, Object> roomState(Room room) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("type", "room-state");
+        m.put("ai_enabled", room.isAiEnabled());
         return m;
     }
 
