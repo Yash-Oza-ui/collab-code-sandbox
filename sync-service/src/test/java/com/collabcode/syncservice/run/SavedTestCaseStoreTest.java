@@ -1,9 +1,26 @@
 package com.collabcode.syncservice.run;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import static org.assertj.core.api.Assertions.assertThat;
 
 class SavedTestCaseStoreTest {
+    @Test
+    void savedTestResponseUsesSnakeCaseAndDoesNotContainCode() throws Exception {
+        var saved = new SavedTestCaseStore().save("room", "member", "1 2", "wrong_output", "python", "3");
+        String json = new ObjectMapper().writeValueAsString(saved);
+        assertThat(json).contains("\"failure_type\"", "\"expected_output\"");
+        assertThat(json).doesNotContain("failureType", "expectedOutput", "\"code\"");
+    }
+
+    @Test
+    void saveGuardRefusesInsertionAfterRoomHasClosed() {
+        SavedTestCaseStore store = new SavedTestCaseStore();
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalStateException.class, () ->
+                store.save("room", "member", "BUG", "crash", "python", null, () -> false));
+        assertThat(store.list("room", "member")).isEmpty();
+    }
+
     @Test
     void savesOnlyDataAndRemovesItWithRoom() {
         SavedTestCaseStore store = new SavedTestCaseStore();

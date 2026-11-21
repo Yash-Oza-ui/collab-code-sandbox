@@ -11,7 +11,7 @@ Store test cases in sync-service's **room-scoped in-memory state**, with member-
 - `POST /v1/rooms/{roomId}/saved-tests`
 - `GET /v1/rooms/{roomId}/saved-tests`
 
-Both calls require `X-Session-Id` for an active room member. A member sees only their own saved tests, and the Save action is rendered only for an `analysis-result` received on the member's session. In Open mode, a private run's minimised input is not broadcast to other members, preserving US-49 visibility until shared.
+Both calls require `X-Session-Id` for an active room member. A member sees only their own saved tests, and the Save action is rendered only when the current viewer's server-roster member ID matches the run's server-provided runner member ID. Room closure is rechecked inside the saved-test insertion lock. In Open mode, a private run's minimised input is not broadcast to other members, preserving US-49 visibility until shared.
 
 Request:
 
@@ -30,9 +30,9 @@ Response (`201 Created`):
 {
   "id": "example-uuid",
   "input": "1 2 3",
-  "failureType": "wrong_output",
+  "failure_type": "wrong_output",
   "language": "python",
-  "expectedOutput": "6\n"
+  "expected_output": "6\n"
 }
 ```
 

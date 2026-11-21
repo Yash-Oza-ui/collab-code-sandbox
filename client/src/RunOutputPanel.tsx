@@ -13,6 +13,7 @@ export interface RunOutputPanelProps {
   result: RunResponseData
   analysisResult?: AnalysisResultMessage | null
   onSaveTestCase?: (value: SavedTestCandidate) => Promise<void>
+  currentViewerMemberId?: string
 }
 
 function formatRanAt(ranAt: string): string {
@@ -28,7 +29,7 @@ function formatRanAt(ranAt: string): string {
  * and local time (with raw timestamp in tooltip). In Open mode, labels the saved
  * versions that were run. Member IDs are never rendered.
  */
-export default function RunOutputPanel({ result, analysisResult, onSaveTestCase }: RunOutputPanelProps) {
+export default function RunOutputPanel({ result, analysisResult, onSaveTestCase, currentViewerMemberId }: RunOutputPanelProps) {
   const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
   const analysis = analysisResult?.task === 'failing_input' ? analysisResult.result : undefined
   const originalInput = typeof analysis?.original_input === 'string' ? analysis.original_input : null
@@ -43,7 +44,8 @@ export default function RunOutputPanel({ result, analysisResult, onSaveTestCase 
       (v.language === 'python' || v.language === 'cpp' || v.language === 'c' ||
         v.language === 'java' || v.language === 'javascript')
   }
-  const canSave = analysis?.can_save_as_test_case === true && isCandidate(savedCandidate)
+  const ownsRun = Boolean(currentViewerMemberId && result.runner?.member_id === currentViewerMemberId)
+  const canSave = ownsRun && analysis?.can_save_as_test_case === true && isCandidate(savedCandidate)
   const saveTest = async () => {
     if (!onSaveTestCase || !isCandidate(savedCandidate)) return
     setSaveState('saving')

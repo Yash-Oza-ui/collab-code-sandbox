@@ -845,7 +845,7 @@ no code runs in ai-ml-service. US-70's shared budget tracks run count and
 aggregate duration. A 429 leaves the best counterexample found and marks
 `budget_exhausted`. Configured `FAILING_INPUT_MINIMIZER_MAX_ROUNDS` and
 `FAILING_INPUT_MINIMIZER_MAX_BATCHES` stop work predictably; limits return
-`limit_reached`. Candidate order is deterministic. `original_size`,
+`budget_exhausted` (partial result). Candidate order is deterministic. `original_size`,
 `minimized_size`, and `minimization_rounds` show progress. This is an
 AI-free operation and remains available when consent or the Host AI switch
 is off. No input text or program code is logged.

@@ -53,9 +53,15 @@ public class SavedTestCaseController {
         if (expected != null && expected.length() > 8192) return invalid();
         if (kind.equals("wrong_output") && expected == null) return invalid();
         try {
-            var stored = tests.save(roomId, member.getMemberId(), input, kind, language, expected);
+            // Validate against room closure while holding the same lock as deletion.
+            var stored = tests.save(roomId, member.getMemberId(), input, kind, language, expected,
+                    () -> {
+                        Member active = authorised(roomId, sessionId);
+                        return active != null && active.getMemberId().equals(member.getMemberId());
+                    });
             return ResponseEntity.status(HttpStatus.CREATED).body(stored);
         } catch (IllegalStateException exceeded) {
+            if ("ROOM_UNAVAILABLE".equals(exceeded.getMessage())) return forbidden();
             return ResponseEntity.status(HttpStatus.CONFLICT)
                     .body(Map.of("code", "SAVED_TEST_LIMIT"));
         }

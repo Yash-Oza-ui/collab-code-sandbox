@@ -115,7 +115,6 @@ async def minimize_failure(
                     break
                 ref_rows, stopped = await sandbox_batch(payload, budget, payload.reference_solution, group)
                 batches += 1
-                tests += len(ref_rows)
                 valid_positions = [i for i, r in enumerate(ref_rows)
                                    if r.get('status') == 'pass'
                                    and not r.get('output_truncated')]
@@ -149,7 +148,8 @@ async def minimize_failure(
                 ):
                     continue
                 current = candidate
-                expected_current = expected[i] if has_reference and expected is not None else None
+                expected_current = (expected[i] if failure_type == 'wrong_output'
+                                    and has_reference and expected is not None else None)
                 actual_current = row.get('stdout') if failure_type == 'wrong_output' else None
                 progressed = True
                 break
@@ -168,12 +168,12 @@ async def minimize_failure(
             limit_reached = True
         break
 
-    # A configured round cap is distinct from budget exhaustion: the result is
-    # partial because a smaller counterexample may still exist.
-    if exhausted:
+    # Sandbox refusals and configured round/batch caps all exhaust the
+    # minimisation budget. Preserve the smallest reproducible input so far.
+    if (exhausted or limit_reached
+            or (batches >= max_batches and reductions(current))
+            or (rounds >= max_rounds and reductions(current))):
         status = 'budget_exhausted'
-    elif limit_reached or (batches >= max_batches and reductions(current)) or (rounds >= max_rounds and reductions(current)):
-        status = 'limit_reached'
     else:
         status = 'completed'
     return MinimizationResult(

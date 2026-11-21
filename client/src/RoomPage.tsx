@@ -1671,6 +1671,7 @@ export default function RoomPage(props: RoomPageProps = {}) {
             key={displayRunOutput.request_id}
             result={displayRunOutput}
             analysisResult={analysisResults[displayRunOutput.request_id] ?? null}
+            currentViewerMemberId={myMemberId ?? undefined}
             onSaveTestCase={async (testCase) => {
               const sessionId = sessionIdRef.current
               if (!roomId || !sessionId) throw new Error('Not joined to a room')

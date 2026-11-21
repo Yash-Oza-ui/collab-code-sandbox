@@ -64,7 +64,7 @@ class FailingInputResponse(BaseModel):
     expected_output: str | None = None
     actual_output: str | None = None
     tests_executed: int = 0
-    minimization_status: Literal["completed", "budget_exhausted", "limit_reached", "not_applicable"] = "not_applicable"
+    minimization_status: Literal["completed", "budget_exhausted", "not_applicable"] = "not_applicable"
     test_case: TestCase | None = None
     can_save_as_test_case: bool = False
     ai_step: AIStep
@@ -334,10 +334,11 @@ async def failing_input(
     if not reference_valid:
         response.headers["X-Failing-Input-Scope"] = "crash-and-timeout-only"
     final = as_response(payload, step, records, reference_valid, budget.exhausted)
+    # Report whether the authoritative reference was actually used even when no failure was found.
+    final.reference_used = reference_valid
     if final.failure_found and final.original_input is not None:
         final.original_size = len(final.original_input)
         final.minimized_size = len(final.original_input)
-        final.reference_used = reference_valid
         if not budget.exhausted:
             # AI-free, deterministic US-72 minimiser. Every evaluation uses US-71.
             from app.minimizer import minimize_failure

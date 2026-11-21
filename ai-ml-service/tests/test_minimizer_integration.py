@@ -89,4 +89,45 @@ def test_us72_batch_limit_after_success_is_not_reported_completed(monkeypatch):
     ))
     assert result.batches == 1
     assert 'BUG' in result.input and result.input != 'a\nBUG\nb\nc\nd\n'
-    assert result.status == 'limit_reached'
+    assert result.status == 'budget_exhausted'
+
+
+def test_us72_no_failure_reports_valid_reference_used(monkeypatch):
+    monkeypatch.setenv('INTERNAL_API_TOKEN', 'test-token')
+    async def fake_batch(p, budget, code, inputs, **kwargs):
+        rows = [dict(input=inp, status='pass', stdout='ok', exit_code=0) for inp in inputs]
+        budget.record(len(rows))
+        return rows, False
+    monkeypatch.setattr(target, 'sandbox_batch', fake_batch)
+    data = payload()
+    data['reference_solution'] = 'print("ok")'
+    response = TestClient(app).post('/v1/analyses/failing-input', json=data,
+        headers={'X-Internal-Token': 'test-token'})
+    assert response.status_code == 200, response.text
+    assert response.json()['failure_found'] is False
+    assert response.json()['reference_used'] is True
+
+
+def test_us72_reference_crash_keeps_expected_output_null(monkeypatch):
+    monkeypatch.setenv('INTERNAL_API_TOKEN', 'test-token')
+    seed = 'alpha\\nBUG\\nbeta\\n'
+    monkeypatch.setattr(target, 'edge_cases', lambda _: ([seed], []))
+    async def fake_batch(p, budget, code, inputs, **kwargs):
+        rows = [dict(input=inp, status='pass' if code == 'print("ok")'
+                     else ('crash' if 'BUG' in inp else 'pass'),
+                     stdout='ok' if code == 'print("ok")' else '',
+                     exit_code=0 if code == 'print("ok")' else (1 if 'BUG' in inp else 0))
+                for inp in inputs]
+        budget.record(len(rows))
+        return rows, False
+    monkeypatch.setattr(target, 'sandbox_batch', fake_batch)
+    data = payload()
+    data['reference_solution'] = 'print("ok")'
+    response = TestClient(app).post('/v1/analyses/failing-input', json=data,
+        headers={'X-Internal-Token': 'test-token'})
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body['failure_type'] == 'crash'
+    assert body['expected_output'] is None
+    assert body['test_case']['expected_output'] is None
+    assert body['reference_used'] is True

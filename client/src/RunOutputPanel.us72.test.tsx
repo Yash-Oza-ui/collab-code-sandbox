@@ -16,6 +16,7 @@ const run: RunResponseData = {
   peak_memory_mb: 9, timed_out: false, oom_killed: false,
   failure_kind: 'crash', output_truncated: false, message: null,
   compile_time_ms: null,
+  runner: { member_id: 'runner-1', display_name: 'Runner' },
 }
 
 const analysis: AnalysisResultMessage = {
@@ -47,7 +48,7 @@ describe('US-72 minimised failing input display', () => {
     root = createRoot(node)
     const save = vi.fn(async () => undefined)
     await act(async () => root?.render(
-      <RunOutputPanel result={run} analysisResult={analysis} onSaveTestCase={save} />,
+      <RunOutputPanel result={run} analysisResult={analysis} onSaveTestCase={save} currentViewerMemberId="runner-1" />,
     ))
     expect(node.querySelector('[data-testid="minimized-input-text"]')?.textContent).toBe('BUG')
     expect(node.textContent).toContain('Original: 15 characters; minimised: 3 characters')
@@ -58,5 +59,19 @@ describe('US-72 minimised failing input display', () => {
       input: 'BUG', failure_type: 'crash', expected_output: null, language: 'python',
     })
     expect(node.textContent).toContain('Saved as test case')
+  })
+
+  it('does not let a different room member save a runner private result', async () => {
+    node = document.createElement('div')
+    document.body.appendChild(node)
+    root = createRoot(node)
+    const save = vi.fn(async () => undefined)
+    await act(async () => root?.render(
+      <RunOutputPanel result={run} analysisResult={analysis} onSaveTestCase={save}
+                      currentViewerMemberId="other-member" />,
+    ))
+    expect(node.querySelector('[data-testid="minimized-input-text"]')).not.toBeNull()
+    expect(node.querySelector('[data-testid="save-minimized-test-case"]')).toBeNull()
+    expect(save).not.toHaveBeenCalled()
   })
 })

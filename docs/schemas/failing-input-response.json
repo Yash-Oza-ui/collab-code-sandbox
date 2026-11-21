@@ -158,7 +158,6 @@
       "enum": [
         "completed",
         "budget_exhausted",
-        "limit_reached",
         "not_applicable"
       ]
     },
@@ -218,12 +217,7 @@
     "minimization_status",
     "test_case",
     "can_save_as_test_case",
-    "ai_step",
-    "original_size",
-    "minimized_size",
-    "reference_used",
-    "minimization_rounds",
-    "minimization_batches"
+    "ai_step"
   ],
   "additionalProperties": false,
   "allOf": [
@@ -256,8 +250,7 @@
           "minimization_status": {
             "enum": [
               "completed",
-              "budget_exhausted",
-              "limit_reached"
+              "budget_exhausted"
             ]
           },
           "test_case": {
