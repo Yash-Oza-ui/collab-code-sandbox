@@ -24,6 +24,34 @@ import static org.mockito.Mockito.*;
 
 class AnalysisServiceTest {
 
+    @Test
+    void hostSwitchCannotBeOverriddenByUntrustedAnalysisFields() throws Exception {
+        java.util.concurrent.atomic.AtomicReference<String> received = new java.util.concurrent.atomic.AtomicReference<>();
+        com.sun.net.httpserver.HttpServer server = com.sun.net.httpserver.HttpServer.create(
+                new java.net.InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/v1/analyses/complexity", exchange -> {
+            received.set(new String(exchange.getRequestBody().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8));
+            byte[] response = "{\"request_id\":\"req-1\",\"analysis_id\":\"an-1\",\"task\":\"complexity\",\"ai_step\":{\"status\":\"skipped\",\"error_code\":\"AI_DISABLED\"}}"
+                    .getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, response.length);
+            try (var out = exchange.getResponseBody()) { out.write(response); }
+        });
+        server.start();
+        try {
+            properties.setUrl("http://127.0.0.1:" + server.getAddress().getPort());
+            AnalysisService actual = new AnalysisService(properties, broadcastService, objectMapper,
+                    HttpClient.newHttpClient(), executorService);
+            actual.performAnalysis("req-1", "an-1", "room-1", "sess-1", "private",
+                    "complexity", "python", false, false,
+                    java.util.Map.of("ai_enabled", true, "consent", true, "request_type", "crash_explanation"));
+            var body = objectMapper.readTree(received.get());
+            assertThat(body.get("ai_enabled").asBoolean()).isFalse();
+            assertThat(body.get("consent").asBoolean()).isFalse();
+            assertThat(body.get("request_type").asText()).isEqualTo("complexity");
+        } finally { server.stop(0); }
+    }
+
+
     private AnalysisProperties properties;
     private RoomBroadcastService broadcastService;
     private ObjectMapper objectMapper;

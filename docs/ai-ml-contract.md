@@ -2099,3 +2099,22 @@ Cross-role confirmations for the Version 2 AI/ML contract:
 | v2 (T-18, Tasks 1 & 2) | 1 Nov 2026 | Added Version 2 specification for Tasks 1 and 2 (Prince, PR #81): `/v1/analyses/complexity` (log-log regression, Big-O mapping, sandbox patch verification, rules first US-67) and `/v1/analyses/slowdown` (input hash grouping, Median/MAD baseline, configurable fold threshold, diff highlighting, room memory lifecycle). Fully aligned with T-17 platform contract (`docs/api-contracts.md`): 22-char base64url room id format, `X-Session-Id` REST caller identity, `analysis-result` message format, and complete valid JSON examples for all endpoints and blocked-step error codes. |
 | v2 (T-18, Task 3 & Consent) | 8 Nov 2026 | Added Version 2 specification for Task 3 failing-input and delta minimization (Chandan, PR #96): `/v1/analyses/failing-input` with deterministic edge cases, sandbox test-batch coordination, trusted reference solution boundary, and consent / Host-switch gating fields. |
 | v2 (T-18, Full Assembly) | 9 Nov 2026 | Completed Version 2 contract assembly (Digvijay, closes #69): formalized retirement decisions (1–3), execution entry point `POST /v1/analyses` (Decision 4), Task 4 C/C++ crash explanation `POST /v1/analyses/crash-explanation` (FR39, DR5), Task 5 usage counters `GET /v1/usage` and room lifecycle `DELETE /v1/rooms/{room_id}/state` (FR32, FR40.1, NFR7), full client-facing `analysis-result` message schemas for all tasks (Decision 6), internal runs for repeated, test-batch, and sanitizer executions (Decision 7), run history separation (Decision 9), complete error envelopes and blocked-step error codes (Decision 10), normalized SHA-256 code caching (Decision 11), and privacy-compliant telemetry logging (Decision 12). |
+
+
+## US-59 — Proposed room AI switch forwarding and in-flight semantics
+
+The authenticated sync-service session lookup is the source of the current room
+`ai_enabled` flag. execution-service reads that value on each **new** analysis
+request and forwards it to ai-ml-service unchanged. Analysis payload fields may
+not override this authoritative value. ai-ml-service checks `consent` and
+`ai_enabled` before paid/external model calls through US-77; with either false,
+AI-free analyses continue and `ai_step` is skipped with `CONSENT_MISSING` or
+`AI_DISABLED`. US-78 supplies the safe fallback message.
+
+**In-flight policy:** once an analysis request has been accepted, it retains the
+switch snapshot checked at acceptance. A later Host switch affects the very next
+analysis request without page reload; an analysis already admitted with AI on
+may complete under its accepted snapshot. Immediate cancellation of a model call
+already in progress is not part of this synchronous request contract and
+requires separate service-side cancellation coordination. This policy must be
+confirmed in the US-59 review before claiming post-acknowledgement cancellation.

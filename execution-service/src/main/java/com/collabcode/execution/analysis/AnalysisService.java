@@ -127,12 +127,18 @@ public class AnalysisService {
             requestBody.put("analysis_id", safeAnalysisId);
             requestBody.put("request_type", safeTask);
             requestBody.put("language", language);
-            requestBody.put("consent", consent != null ? consent : false);
-            requestBody.put("ai_enabled", aiEnabled != null ? aiEnabled : false);
-
             if (payload != null) {
                 requestBody.putAll(payload);
             }
+            // These values come from the authenticated permission lookup and
+            // caller consent, never from arbitrary analysis payload fields.
+            requestBody.put("consent", Boolean.TRUE.equals(consent));
+            requestBody.put("ai_enabled", Boolean.TRUE.equals(aiEnabled));
+            requestBody.put("request_id", requestId);
+            requestBody.put("room_id", roomId);
+            requestBody.put("analysis_id", safeAnalysisId);
+            requestBody.put("request_type", safeTask);
+            requestBody.put("language", language);
 
             byte[] jsonBytes = objectMapper.writeValueAsBytes(requestBody);
 

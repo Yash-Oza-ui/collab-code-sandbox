@@ -53,6 +53,7 @@ class FakeSocket {
   static mode = 'pair'
   static preset: string | null = 'teach_interview'
   static initialCanEdit = false
+  static aiEnabled = false
 
   readyState = 0
   binaryType = 'arraybuffer'
@@ -82,6 +83,7 @@ class FakeSocket {
         role: FakeSocket.role,
         mode: FakeSocket.mode,
         preset: FakeSocket.preset,
+        ai_enabled: FakeSocket.aiEnabled,
         permissions: {
           can_edit: FakeSocket.role === 'host' ? true : FakeSocket.initialCanEdit,
           can_run: true,
@@ -114,6 +116,7 @@ describe('RoomPage pair presets and edit indicators (US-37, FR19.2)', () => {
     FakeSocket.mode = 'pair'
     FakeSocket.preset = 'teach_interview'
     FakeSocket.initialCanEdit = false
+    FakeSocket.aiEnabled = false
     monacoUpdateOptionsSpy.mockClear()
 
     originalPathname = window.location.pathname
@@ -289,5 +292,45 @@ describe('RoomPage pair presets and edit indicators (US-37, FR19.2)', () => {
 
     expect(container?.querySelector('[data-testid="room-preset-badge"]')).toBeNull()
     expect(container?.querySelector('[data-testid="room-edit-status-badge"]')).toBeNull()
+  })
+})
+
+
+describe('US-59 room AI switch indicators', () => {
+  let container: HTMLDivElement | null = null
+  let root: ReturnType<typeof createRoot> | null = null
+  let priorPath: string
+  beforeEach(() => {
+    priorPath = window.location.pathname
+    window.history.replaceState({}, '', '/room/room-pair-preset-test')
+    FakeSocket.instances = []
+    FakeSocket.role = 'participant'
+    FakeSocket.aiEnabled = false
+    FakeSocket.preset = 'teach_interview'
+    sessionStorage.clear()
+    localStorage.clear()
+  })
+  afterEach(async () => {
+    if (root) await act(async () => root?.unmount())
+    container?.remove()
+    root = null
+    container = null
+    window.history.replaceState({}, '', priorPath)
+  })
+  it('shows a guest the server value and updates on a room-state message without reload', async () => {
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    root = createRoot(container)
+    await act(async () => root?.render(<RoomPage wsOptions={{ WebSocketClass: FakeSocket as unknown as typeof WebSocket, sessionId: SESSION_ID }} />))
+    const input = container.querySelector<HTMLInputElement>('#display-name')!
+    await act(async () => {
+      input.value = 'Guest'
+      container!.querySelector<HTMLFormElement>('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+    })
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 45)) })
+    expect(container.querySelector('[data-testid="room-ai-status"]')?.textContent).toBe('AI off')
+    expect(container.querySelector('[data-testid="host-ai-switch-toggle"]')).toBeNull()
+    await act(async () => FakeSocket.instances[0].receive({ type: 'room-state', ai_enabled: true }))
+    expect(container.querySelector('[data-testid="room-ai-status"]')?.textContent).toBe('AI on')
   })
 })

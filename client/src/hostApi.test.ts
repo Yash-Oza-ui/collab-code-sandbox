@@ -6,6 +6,7 @@ import {
   regenerateLink,
   removeMember,
   setEditAccess,
+  setAiSwitch,
   type HostCallContext,
 } from './hostApi'
 
@@ -176,5 +177,26 @@ describe('hostApi errors', () => {
     for (const call of bad) {
       expect(await call()).toMatchObject({ ok: false, code: 'BAD_RESPONSE' })
     }
+  })
+})
+
+
+describe('US-59 Host AI switch API', () => {
+  it('PATCHes the server switch using Host credentials and a boolean', async () => {
+    const fn = okJson({ ai_enabled: false })
+    expect(await setAiSwitch(ctx(fn), false)).toEqual({ ok: true, data: { ai_enabled: false } })
+    const [url, init] = fn.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('http://sync.test/v1/rooms/Zq8-Lw2Ef6Th0Yx4Rn7JbA/ai-switch')
+    expect(init.method).toBe('PATCH')
+    expect(init.headers).toMatchObject({ 'X-Session-Id': SESSION, 'X-Owner-Token': TOKEN })
+    expect(init.body).toBe(JSON.stringify({ ai_enabled: false }))
+  })
+  it('rejects a non-boolean server response', async () => {
+    expect(await setAiSwitch(ctx(okJson({ ai_enabled: 'false' })), false))
+      .toMatchObject({ ok: false, code: 'BAD_RESPONSE' })
+  })
+  it('surfaces the NOT_OWNER result to a non-Host', async () => {
+    expect(await setAiSwitch(ctx(failJson(403, 'NOT_OWNER')), true))
+      .toMatchObject({ ok: false, status: 403, code: 'NOT_OWNER' })
   })
 })

@@ -185,6 +185,14 @@ public class RoomService {
      * Returns the room, or null if it is unknown. See {@link #setMemberRunAllowed}
      * for the audit (US-58) note.
      */
+    /** US-59: update the one authoritative room-level AI switch. */
+    public synchronized Room setAiEnabled(String roomId, boolean enabled) {
+        Room room = store.get(roomId);
+        if (room == null || room.isClosed()) return null;
+        room.setAiEnabled(enabled);
+        return room;
+    }
+
     public synchronized Room setHostOnlyRun(String roomId, boolean hostOnlyRun) {
         Room room = store.get(roomId);
         if (room == null) {
