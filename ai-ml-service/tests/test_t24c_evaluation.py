@@ -4,7 +4,7 @@ Covers:
 - Task 4 (US-73, US-74): Sanitizer crash parsing matrix, plain-language explanation,
   relevant-code isolation, canary tests, and caching behavior.
 - Task 5 (US-75, US-24, US-78): AI usage counters, multi-room aggregation, monthly cost cap,
-  reservation concurrency, fallbacks (consent missing, cost cap reached, service unavailable,
+  atomic reservation concurrency, fallbacks (consent missing, cost cap reached, service unavailable,
   AI disabled), and multi-room concurrent load evaluation.
 
 All model clients are strictly mocked (zero paid LLM calls).
@@ -14,6 +14,7 @@ All code and traffic is synthetic and isolated.
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import logging
+import threading
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -266,14 +267,20 @@ def test_sanitizer_unsupported_language_rejection():
 # ============================================================================
 
 def test_crash_explanation_identification_and_limits():
-    """Verify explanation pipeline identifies crash, enforces 3-sentence limit, and provides fix."""
+    """Verify explanation pipeline identifies crash, programmatically truncates verbose output
+
+    to <= 3 sentences (FR13.1), and provides fix.
+    """
     room_id = "room-eval-exp-01"
     clear_room(room_id)
 
+    # 5-sentence mock output: sentences 4 and 5 MUST be pruned away by enforce_sentence_limit
     mock_llm_response = (
-        "Explanation: A heap-buffer-overflow occurred at line 5 due to an out-of-bounds vector read. "
-        "The requested index exceeded the number of allocated elements in the vector. "
-        "Accessing invalid memory can trigger segmentation faults or corruption.\n"
+        "Explanation: Sentence one describes a heap-buffer-overflow at line 5 due to an out-of-bounds read. "
+        "Sentence two details vector allocation boundaries. "
+        "Sentence three outlines the risk of memory corruption. "
+        "Sentence four is verbose filler that must be trimmed. "
+        "Sentence five must never appear in the output.\n"
         "Suggested Fix: Verify index bounds before accessing: if (index < v.size()) std::cout << v[index];"
     )
 
@@ -306,9 +313,11 @@ def test_crash_explanation_identification_and_limits():
         assert "heap-buffer-overflow" in explanation
         assert "line 5" in explanation
 
-        # 3-sentence limit check (FR13.1)
+        # 3-sentence limit check (FR13.1): Sentences 4 and 5 MUST have been truncated
         sentences = split_sentences(explanation)
-        assert len(sentences) <= 3, f"Explanation exceeded 3 sentences: {len(sentences)}"
+        assert len(sentences) == 3, f"Expected exactly 3 sentences after truncation, got {len(sentences)}"
+        assert "Sentence four" not in explanation
+        assert "Sentence five" not in explanation
 
         # Suggested fix check
         fix = ai_step["suggested_fix"]
@@ -320,8 +329,8 @@ def test_crash_explanation_identification_and_limits():
 # Task 4 — Relevant-Code Isolation and Canary Marker Tests
 # ============================================================================
 
-def test_canary_isolation_and_relevant_code_slicing():
-    """Verify canaries outside the crash window never reach the model prompt (FR40.2, US-74, US-76)."""
+def test_canary_isolation_and_relevant_code_slicing(caplog):
+    """Verify canaries outside the crash window never reach the model prompt, logs, or telemetry (FR40.2, US-74, US-76, NFR8.2)."""
     room_id = "room-eval-canary-01"
     clear_room(room_id)
 
@@ -359,9 +368,10 @@ def test_canary_isolation_and_relevant_code_slicing():
         "code_snippet": full_code,
     }
 
-    with patch("app.llm.client.LLMClient.complete", side_effect=mock_complete):
-        resp = client.post("/v1/analyses/crash-explanation", json=payload)
-        assert resp.status_code == 200
+    with caplog.at_level(logging.DEBUG):
+        with patch("app.llm.client.LLMClient.complete", side_effect=mock_complete):
+            resp = client.post("/v1/analyses/crash-explanation", json=payload)
+            assert resp.status_code == 200
 
     prompt = captured_prompt.get("text", "")
 
@@ -383,6 +393,11 @@ def test_canary_isolation_and_relevant_code_slicing():
     assert canary_bottom not in room_usage_str
     assert canary_top not in total_usage_str
     assert canary_bottom not in total_usage_str
+
+    # 5. Canaries MUST NOT leak into logger messages
+    log_text = " ".join(r.getMessage() for r in caplog.records)
+    assert canary_top not in log_text, f"Leak: {canary_top} appeared in logs!"
+    assert canary_bottom not in log_text, f"Leak: {canary_bottom} appeared in logs!"
 
 
 # ============================================================================
@@ -552,6 +567,51 @@ def test_monthly_cost_cap_admission_and_rejection(caplog):
     assert data["error_type"] == "heap-buffer-overflow"
 
 
+def test_concurrent_cost_cap_reservations_prevent_overshoot():
+    """Verify that simultaneous concurrent reservation attempts near the budget cap
+
+    are atomic and reject excess requests without bypassing the cap (NFR7.2, US-24).
+    """
+    reset_counters()
+    tracker = get_tracker()
+    tracker.token_cost_per_token = 0.0000035
+
+    # Headroom for exactly two 100-token reservations:
+    # 2 * 100 * 0.0000035 < 201 * 0.0000035 (budget)
+    # 3 * 100 * 0.0000035 >= 201 * 0.0000035 (rejection)
+    tracker.monthly_budget_usd = 201 * 0.0000035
+
+    successful = []
+    blocked = []
+    lock = threading.Lock()
+    barrier = threading.Barrier(10)
+
+    def attempt_reservation(worker_id: int):
+        barrier.wait()
+        try:
+            res = tracker.reserve_call(estimated_tokens=100)
+            with lock:
+                successful.append((worker_id, res))
+        except CostCapReachedError:
+            with lock:
+                blocked.append(worker_id)
+
+    threads = [threading.Thread(target=attempt_reservation, args=(i,)) for i in range(10)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(successful) == 2, f"Expected exactly 2 admissions under concurrency, got {len(successful)}"
+    assert len(blocked) == 8, f"Expected exactly 8 rejections under concurrency, got {len(blocked)}"
+    assert tracker.get_active_reservations_tokens() == 200
+
+    # Cleanup
+    for _, res in successful:
+        res.release()
+    assert tracker.get_active_reservations_tokens() == 0
+
+
 # ============================================================================
 # Task 5 — Fallback Behavior Evaluation (US-78)
 # ============================================================================
@@ -624,11 +684,14 @@ def test_fallback_provider_error():
 
 
 # ============================================================================
-# Task 5 — Multi-Room Concurrent Load Evaluation
+# Task 5 — Multi-Room Concurrent Load Evaluation & Stampede Analysis
 # ============================================================================
 
-def test_multi_room_concurrent_load():
-    """Execute synthetic concurrent load across 4 rooms and verify counts and latencies."""
+def test_multi_room_concurrent_load_staged():
+    """Execute synthetic concurrent load across 4 rooms in staged batches
+
+    to measure model-call latency, warm-cache latency, and fallback latency independently.
+    """
     reset_counters()
     get_analysis_cache().clear()
 
@@ -718,3 +781,65 @@ def test_multi_room_concurrent_load():
         assert ru["model_calls"] == 4, f"Room {r} expected 4 model calls, got {ru['model_calls']}"
         assert ru["cache_hits"] == 4, f"Room {r} expected 4 cache hits, got {ru['cache_hits']}"
         assert ru["fallback_activations"] == 2, f"Room {r} expected 2 fallbacks, got {ru['fallback_activations']}"
+
+
+def test_concurrent_cold_cache_stampede_behavior():
+    """Demonstrate that an uncoordinated burst of identical requests on a cold cache
+
+    proceeds to the model before any thread writes to cache (cold cache stampede),
+    while UsageTracker counters remain 100% thread-safe with zero corruption.
+    """
+    reset_counters()
+    get_analysis_cache().clear()
+    room_id = "room-stampede"
+
+    async def mock_execute(
+        self,
+        prompt,
+        api_key,
+        model,
+        base_url,
+        timeout_seconds,
+        room_id,
+        active_res,
+        max_tokens=None,
+    ):
+        await asyncio.sleep(0.01)  # 10ms provider latency
+        active_res.commit(room_id=room_id, tokens=50)
+        return "Explanation: Out of bounds read at line 5.\nSuggested Fix: Add boundary check."
+
+    def make_identical_request(req_id: int):
+        payload = {
+            "request_id": f"req-stampede-{req_id}",
+            "room_id": room_id,
+            "analysis_id": f"ana-stampede-{req_id}",
+            "request_type": "crash_explanation",
+            "language": "cpp",
+            "consent": True,
+            "ai_enabled": True,
+            "sanitizer_output": SANITIZER_FIXTURES[0]["raw_report"],
+            "code_snippet": "v[5] = 10;",
+        }
+        resp = client.post("/v1/analyses/crash-explanation", json=payload)
+        assert resp.status_code == 200
+        return resp.json()
+
+    with patch.object(LLMClient, "_execute_complete", mock_execute):
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            results = list(executor.map(make_identical_request, range(4)))
+
+    room_usage = get_room_usage(room_id)
+    total = get_total_usage()
+
+    # All 4 simultaneous calls checked the cache before any completed, resulting in 4 model calls
+    assert room_usage["model_calls"] == 4
+    assert room_usage["cache_hits"] == 0
+    assert room_usage["tokens_used"] == 200
+    assert total["total_model_calls"] == 4
+    assert total["total_tokens_used"] == 200
+
+    # The 5th sequential call arrives after cache is populated and MUST hit the cache
+    make_identical_request(99)
+    updated_usage = get_room_usage(room_id)
+    assert updated_usage["model_calls"] == 4  # No additional model calls
+    assert updated_usage["cache_hits"] == 1   # Hit warm cache
