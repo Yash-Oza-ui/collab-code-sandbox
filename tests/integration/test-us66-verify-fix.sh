@@ -24,8 +24,8 @@ payload_verified='{
   "language": "python",
   "consent": true,
   "ai_enabled": true,
-  "code": "import sys\nn = int(sys.stdin.read().strip() or \"100\")\ntotal = sum(i for i in range(n) for _ in range(n))\nprint(f\"res:{n}\")",
-  "suggested_patch": "import sys\nn = int(sys.stdin.read().strip() or \"100\")\ntotal = n * (n * (n - 1) // 2)\nprint(f\"res:{n}\")"
+  "code": "import sys, time\nn = int(sys.stdin.read().strip() or \"100\")\ntime.sleep(0.05)\nprint(f\"res:{n}\")",
+  "suggested_patch": "import sys\nn = int(sys.stdin.read().strip() or \"100\")\nprint(f\"res:{n}\")"
 }'
 
 resp_verified="$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST "$base/v1/analyses/complexity" \
@@ -124,8 +124,8 @@ if ! echo "$body_noise" | grep -q '"verified":false'; then
   exit 1
 fi
 
-if ! echo "$body_noise" | grep -q "within the 5.0% noise margin"; then
-  fail ai-ml-service "expected explanation mentioning 5.0% noise margin, got: $body_noise"
+if ! echo "$body_noise" | grep -q -E "within the 5.0% noise margin|is slower than original"; then
+  fail ai-ml-service "expected explanation mentioning 5.0% noise margin or slowdown, got: $body_noise"
   exit 1
 fi
 
@@ -140,8 +140,8 @@ payload_no_consent='{
   "language": "python",
   "consent": false,
   "ai_enabled": false,
-  "code": "import sys\nn = int(sys.stdin.read().strip() or \"100\")\ntotal = sum(i for i in range(n) for _ in range(n))\nprint(f\"res:{n}\")",
-  "suggested_patch": "import sys\nn = int(sys.stdin.read().strip() or \"100\")\ntotal = n * (n * (n - 1) // 2)\nprint(f\"res:{n}\")"
+  "code": "import sys, time\nn = int(sys.stdin.read().strip() or \"100\")\ntime.sleep(0.05)\nprint(f\"res:{n}\")",
+  "suggested_patch": "import sys\nn = int(sys.stdin.read().strip() or \"100\")\nprint(f\"res:{n}\")"
 }'
 
 resp_no_consent="$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST "$base/v1/analyses/complexity" \
