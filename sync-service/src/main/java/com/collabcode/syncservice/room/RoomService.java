@@ -1,6 +1,7 @@
 package com.collabcode.syncservice.room;
 
 import com.collabcode.syncservice.run.RunRecordStore;
+import com.collabcode.syncservice.run.SavedTestCaseStore;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
@@ -23,6 +24,21 @@ public class RoomService {
 
     private final RoomStore store;
     private final RunRecordStore runRecordStore;
+    private HostDepartureManager hostDepartures;
+    private RoomCleanupCoordinator roomCleanup;
+    private SavedTestCaseStore savedTests;
+    @Autowired(required = false)
+    public void setSavedTestCaseStore(SavedTestCaseStore store) { this.savedTests = store; }
+
+    @Autowired(required = false)
+    public void setRoomCleanupCoordinator(RoomCleanupCoordinator roomCleanup) {
+        this.roomCleanup = roomCleanup;
+    }
+
+    @Autowired(required = false)
+    public void setHostDepartureManager(HostDepartureManager hostDepartures) {
+        this.hostDepartures = hostDepartures;
+    }
 
     public RoomService(RoomStore store) {
         this(store, null);
@@ -43,8 +59,8 @@ public class RoomService {
     public synchronized JoinOutcome join(String roomId, String sessionId,
                                          String displayName, String ownerToken) {
         Room room = store.get(roomId);
-        if (room == null) {
-            throw new IllegalArgumentException("unknown room: " + roomId);
+        if (room == null || room.isClosed()) {
+            return JoinOutcome.refused("ROOM_CLOSED");
         }
 
         // US-28 (V2.18, CR04): a removed session is blocked — a reconnect, refresh,
@@ -168,6 +184,14 @@ public class RoomService {
         return member;
     }
 
+    /** US-59: update the one authoritative room-level AI switch. */
+    public synchronized Room setAiEnabled(String roomId, boolean enabled) {
+        Room room = store.get(roomId);
+        if (room == null || room.isClosed()) return null;
+        room.setAiEnabled(enabled);
+        return room;
+    }
+
     /**
      * Switch Host-only running on or off for the room (US-60, V2.20; FR41.3).
      * Returns the room, or null if it is unknown. See {@link #setMemberRunAllowed}
@@ -282,6 +306,7 @@ public class RoomService {
         target.setRole(Role.HOST);
         target.setCanEdit(computeCanEdit(room, Role.HOST));
         target.setCanRun(true);
+        if (hostDepartures != null) hostDepartures.hostTransferred(roomId);
         return target;
     }
 
@@ -342,12 +367,14 @@ public class RoomService {
      * Returns false if the room is unknown.
      */
     public boolean closeRoom(String roomId) {
+        if (roomCleanup != null) return roomCleanup.endRoom(roomId, "closed");
         Room room = store.get(roomId);
         if (room == null) return false;
         room.close();
         if (runRecordStore != null) {
             runRecordStore.deleteByRoom(roomId);
         }
+        if (savedTests != null) savedTests.deleteByRoom(roomId);
         return true;
     }
 
@@ -355,10 +382,12 @@ public class RoomService {
      * Purges room metadata and its run records (FR32, US-56 room destruction).
      */
     public boolean deleteRoom(String roomId) {
+        if (roomCleanup != null) return roomCleanup.endRoom(roomId, "deleted");
         Room room = store.remove(roomId);
         if (runRecordStore != null) {
             runRecordStore.deleteByRoom(roomId);
         }
+        if (savedTests != null) savedTests.deleteByRoom(roomId);
         return room != null;
     }
 }

@@ -1,4 +1,5 @@
 // @vitest-environment happy-dom
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -410,6 +411,159 @@ describe('RoomPage Workspace integration (US-39)', () => {
     // Alpha content is still pristine
     expect(alphaDoc.getText('monaco').toString()).toBe('# Alpha code: print("hello alpha")')
     expect(betaDoc.getText('monaco').toString()).toContain('def beta_func()')
+
+    act(() => {
+      root.unmount()
+    })
+  })
+
+  it('handles toggle runnable and set entry file with live module-updated push (US-46)', async () => {
+    MockWs.mode = 'open'
+    MockWs.language = 'python'
+
+    let alphaEntry = true
+    let betaRunnable = true
+
+    const fetchMock = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.includes('/modules/mod_beta') && init?.method === 'PATCH') {
+        const body = JSON.parse((init?.body as string) || '{}')
+        if ('runnable' in body) {
+          betaRunnable = body.runnable
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              module_id: 'mod_beta',
+              name: 'beta.py',
+              owner_member_id: 'm_host',
+              runnable: betaRunnable,
+              is_entry: false,
+              pending: false,
+            }),
+          }
+        }
+        if ('is_entry' in body) {
+          alphaEntry = false
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              module_id: 'mod_beta',
+              name: 'beta.py',
+              owner_member_id: 'm_host',
+              runnable: betaRunnable,
+              is_entry: true,
+              pending: false,
+            }),
+          }
+        }
+      }
+
+      if (url.includes('/modules')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => [
+            {
+              module_id: 'mod_alpha',
+              name: 'alpha.py',
+              owner_member_id: 'm_host',
+              runnable: true,
+              is_entry: alphaEntry,
+              pending: false,
+            },
+            {
+              module_id: 'mod_beta',
+              name: 'beta.py',
+              owner_member_id: 'm_host',
+              runnable: betaRunnable,
+              is_entry: false,
+              pending: false,
+            },
+          ],
+        }
+      }
+      return { ok: true, status: 200, json: async () => ({}) }
+    })
+
+    const root = createRoot(container)
+    act(() => {
+      root.render(
+        <RoomPage
+          wsOptions={{
+            WebSocketClass: MockWs as unknown as typeof WebSocket,
+            fetchFn: fetchMock as unknown as typeof fetch,
+          }}
+        />,
+      )
+    })
+
+    const nameInput = container.querySelector('input') as HTMLInputElement
+    const joinBtn = container.querySelector('button') as HTMLButtonElement
+    act(() => {
+      nameInput.value = 'Host User'
+      nameInput.dispatchEvent(new Event('input', { bubbles: true }))
+      joinBtn.click()
+    })
+
+    await vi.waitFor(() => {
+      expect(container.querySelector('[data-testid="module-mod_beta"]')).not.toBeNull()
+    })
+
+    // Initially mod_beta is runnable and not entry
+    const betaRunnableBadge = container.querySelector('[data-testid="runnable-badge-mod_beta"]')
+    expect(betaRunnableBadge?.textContent).toBe('runnable')
+
+    // Click toggle runnable on mod_beta
+    const toggleBtn = container.querySelector('[data-testid="toggle-runnable-mod_beta"]') as HTMLButtonElement
+    expect(toggleBtn).not.toBeNull()
+    expect(toggleBtn.textContent).toBe('Mark non-runnable')
+
+    act(() => {
+      toggleBtn.click()
+    })
+
+    await vi.waitFor(() => {
+      expect(container.querySelector('[data-testid="runnable-badge-mod_beta"]')?.textContent).toBe('non-runnable')
+    })
+
+    // Click set entry file on mod_beta
+    const setEntryBtn = container.querySelector('[data-testid="set-entry-mod_beta"]') as HTMLButtonElement
+    expect(setEntryBtn).not.toBeNull()
+
+    act(() => {
+      setEntryBtn.click()
+    })
+
+    await vi.waitFor(() => {
+      expect(container.querySelector('[data-testid="entry-badge-mod_beta"]')).not.toBeNull()
+      expect(container.querySelector('[data-testid="entry-badge-mod_alpha"]')).toBeNull()
+      expect(container.querySelector('[data-testid="entry-file-indicator"]')?.textContent).toContain('beta.py')
+    })
+
+    // Simulate incoming module-updated push from another user marking mod_beta runnable again
+    const controlWs = MockWs.instances[0]
+    act(() => {
+      controlWs.onmessage?.(
+        new MessageEvent('message', {
+          data: JSON.stringify({
+            type: 'module-updated',
+            module_id: 'mod_beta',
+            name: 'beta.py',
+            owner_member_id: 'm_host',
+            runnable: true,
+            is_entry: true,
+            version: 1,
+            pending: false,
+            deleted: false,
+          }),
+        }),
+      )
+    })
+
+    await vi.waitFor(() => {
+      expect(container.querySelector('[data-testid="runnable-badge-mod_beta"]')?.textContent).toBe('runnable')
+    })
 
     act(() => {
       root.unmount()

@@ -21,6 +21,13 @@ class Settings:
 
     def __init__(self) -> None:
         self.PORT: int = int(os.getenv("PORT", "8000"))
+        self.EXECUTION_SERVICE_URL: str = os.getenv("EXECUTION_SERVICE_URL", "http://execution-service:8080")
+        self.FAILING_INPUT_MAX_RUNS: int = max(1, min(10, int(os.getenv("FAILING_INPUT_MAX_RUNS", "8"))))
+        self.FAILING_INPUT_BUDGET_SECONDS: float = min(20.0, max(1.0, float(os.getenv("FAILING_INPUT_BUDGET_SECONDS", "20"))))
+        self.FAILING_INPUT_HTTP_TIMEOUT_SECONDS: float = max(1.0, float(os.getenv("FAILING_INPUT_HTTP_TIMEOUT_SECONDS", "35")))
+        self.FAILING_INPUT_SCRIPT_MAX_CHARS: int = max(100, int(os.getenv("FAILING_INPUT_SCRIPT_MAX_CHARS", "4000")))
+        self.FAILING_INPUT_MINIMIZER_MAX_ROUNDS: int = max(1, int(os.getenv("FAILING_INPUT_MINIMIZER_MAX_ROUNDS", "8")))
+        self.FAILING_INPUT_MINIMIZER_MAX_BATCHES: int = max(1, int(os.getenv("FAILING_INPUT_MINIMIZER_MAX_BATCHES", "12")))
         self.LLM_API_KEY: Optional[str] = os.getenv("LLM_API_KEY") or os.getenv("GEMINI_API_KEY")
         self.LLM_MODEL: str = os.getenv("LLM_MODEL", "gemini-1.5-flash")
         self.LLM_BASE_URL: Optional[str] = os.getenv("LLM_BASE_URL")
@@ -106,6 +113,25 @@ class Settings:
         self.SLOWDOWN_MODIFIED_Z_THRESHOLD: float = self.SLOWDOWN_OUTLIER_THRESHOLD
         self.SLOWDOWN_MIN_SAMPLES: int = int(os.getenv("SLOWDOWN_MIN_SAMPLES", "3"))
         self.SLOWDOWN_MAX_HISTORY: int = int(os.getenv("SLOWDOWN_MAX_HISTORY", "100"))
+
+        # Time complexity measurement and internal run configuration (US-64, US-65, T-18 Decision 7)
+        self.USE_STUB_RUNNER: bool = os.getenv("USE_STUB_RUNNER", "false").lower() in ("true", "1")
+        self.EXECUTION_SERVICE_URL: str = os.getenv(
+            "EXECUTION_SERVICE_URL", "http://execution-service:8082"
+        ).rstrip("/")
+        self.INTERNAL_API_TOKEN: str = os.getenv(
+            "INTERNAL_API_TOKEN", os.getenv("INTERNAL_TOKEN", "")
+        )
+        self.COMPLEXITY_BASE_INPUT_SIZE: int = int(os.getenv("COMPLEXITY_BASE_INPUT_SIZE", "100"))
+        self.COMPLEXITY_DEFAULT_REPEATS: int = int(os.getenv("COMPLEXITY_DEFAULT_REPEATS", "3"))
+        self.COMPLEXITY_TIMEOUT_MS: float = float(os.getenv("COMPLEXITY_TIMEOUT_MS", "5000.0"))
+        self.COMPLEXITY_R2_POOR_FIT_THRESHOLD: float = float(
+            os.getenv("COMPLEXITY_R2_POOR_FIT_THRESHOLD", "0.85")
+        )
+        # Sandbox fix verification configuration (US-66, FR36.3)
+        self.VERIFICATION_NOISE_MARGIN_PCT: float = float(
+            os.getenv("VERIFICATION_NOISE_MARGIN_PCT", "5.0")
+        )
 
     def __repr__(self) -> str:
         # Never print or log the actual API key (NFR8.2)

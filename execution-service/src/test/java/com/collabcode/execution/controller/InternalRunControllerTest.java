@@ -168,7 +168,8 @@ class InternalRunControllerTest {
                 .andExpect(jsonPath("$.purpose").value("measurement"))
                 .andExpect(jsonPath("$.completed_runs.length()").value(3))
                 .andExpect(jsonPath("$.completed_runs[0].input").value("100"))
-                .andExpect(jsonPath("$.completed_runs[0].runtimes_ms.length()").value(1));
+                .andExpect(jsonPath("$.completed_runs[0].runtimes_ms.length()").value(1))
+                .andExpect(jsonPath("$.completed_runs[0].output").exists());
 
         verify(codeRunner, times(3)).execute(any(RunSpec.class));
         verifyNoInteractions(broadcastService);

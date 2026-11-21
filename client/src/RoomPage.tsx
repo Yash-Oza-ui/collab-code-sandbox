@@ -13,9 +13,13 @@ import {
   approveModule,
   createModule,
   declineModule,
+  grantWriteAccess,
   listModules,
   listPendingModules,
   requestModule,
+  revokeWriteAccess,
+  setModuleEntry,
+  setModuleRunnable,
   validateModuleName,
   type WorkspaceModule,
 } from './workspaceApi'
@@ -47,6 +51,7 @@ import {
   regenerateLink,
   removeMember,
   setEditAccess,
+  setAiSwitch,
   type BlockedMember,
   type HostApiResult,
   type HostCallContext,
@@ -179,11 +184,24 @@ export default function RoomPage(props: RoomPageProps = {}) {
   const [roleChangeError, setRoleChangeError] = useState<string | null>(null)
   const [changingRoleFor, setChangingRoleFor] = useState<string | null>(null)
   const isObserver = role?.toLowerCase() === 'observer'
+  // In Open mode, editing requires being the owner or in the writers set (US-43, FR22.2)
+  const activeModule = workspaceModules.find((m) => m.module_id === activeModuleId)
+  const isModuleWriter = roomMode?.mode === 'open'
+    ? Boolean(
+        activeModule &&
+        !activeModule.pending &&
+        (activeModule.owner_member_id === myMemberId ||
+         (activeModule.writers || []).includes(myMemberId || ''))
+      )
+    : true
   // Run permission (US-60, V2.20): the server's answer for this member, from joined / roster.
   // Unknown (older server) is treated as allowed; the server still checks every run (FR41.4).
   const [myCanRun, setMyCanRun] = useState<boolean | null>(null)
   const [myRunDeniedReason, setMyRunDeniedReason] = useState<RunDeniedReason | null>(null)
   const [hostOnlyRun, setHostOnlyRun] = useState(false)
+  const [roomAiEnabled, setRoomAiEnabled] = useState<boolean | null>(null)
+  const [changingAiSwitch, setChangingAiSwitch] = useState(false)
+  const [aiSwitchError, setAiSwitchError] = useState<string | null>(null)
   const [runControlError, setRunControlError] = useState<string | null>(null)
   const [changingRunFor, setChangingRunFor] = useState<string | null>(null)
   const [changingHostOnly, setChangingHostOnly] = useState(false)
@@ -192,7 +210,10 @@ export default function RoomPage(props: RoomPageProps = {}) {
   const [changingEditFor, setChangingEditFor] = useState<string | null>(null)
   const [editAccessError, setEditAccessError] = useState<string | null>(null)
   const isHost = role?.toLowerCase() === 'host'
-  const isEditorReadOnly = isObserver || (roomMode?.mode === 'pair' && !isHost && myCanEdit === false)
+  const isEditorReadOnly =
+    isObserver ||
+    (roomMode?.mode === 'pair' && !isHost && myCanEdit === false) ||
+    (roomMode?.mode === 'open' && !isModuleWriter)
   const runDisabled = isObserver || myCanRun === false
   const runDisabledReason = runDisabled
     ? isObserver
@@ -391,7 +412,7 @@ export default function RoomPage(props: RoomPageProps = {}) {
     onDisplayNameAcceptedRef.current = onDisplayNameAccepted
   }, [onDisplayNameAccepted])
 
-  // Dynamically update Monaco Editor readOnly state if role or edit permissions change while editor is mounted (US-27, US-36)
+  // Dynamically update Monaco Editor readOnly state if role, edit permissions (Pair, US-36), or write access (Open, US-43) change while editor is mounted
   useEffect(() => {
     if (editorRef.current) {
       editorRef.current.updateOptions({ readOnly: isEditorReadOnly })
@@ -490,6 +511,7 @@ export default function RoomPage(props: RoomPageProps = {}) {
           setMyCanRun(typeof joined.permissions?.can_run === 'boolean' ? joined.permissions.can_run : null)
           setMyRunDeniedReason(joined.permissions?.run_denied_reason ?? null)
           setMyCanEdit(typeof joined.permissions?.can_edit === 'boolean' ? joined.permissions.can_edit : null)
+          setRoomAiEnabled(typeof joined.ai_enabled === 'boolean' ? joined.ai_enabled : null)
           const openLang = typeof joined.language === 'string' ? joined.language : undefined
           setWorkspaceLanguage(openLang)
           if (openLang) {
@@ -594,7 +616,11 @@ export default function RoomPage(props: RoomPageProps = {}) {
             }
           }
         },
+        onRoomState: (message) => {
+          if (typeof message.ai_enabled === 'boolean') setRoomAiEnabled(message.ai_enabled)
+        },
         onRoster: (roster) => {
+          if (typeof roster.ai_enabled === 'boolean') setRoomAiEnabled(roster.ai_enabled)
           rosterRef.current = roster.members ?? []
           setRoster(rosterRef.current)
           applyRosterNamesToAwareness(awareness, rosterRef.current)
@@ -1045,6 +1071,28 @@ export default function RoomPage(props: RoomPageProps = {}) {
     }
   }
 
+  async function handleToggleAiSwitch(next: boolean) {
+    if (!isHost) return
+    setAiSwitchError(null)
+    setChangingAiSwitch(true)
+    try {
+      const ctx = getHostContext()
+      if (!ctx) {
+        setAiSwitchError('Missing Host credentials. Please rejoin the room.')
+        return
+      }
+      const result = await setAiSwitch(ctx, next)
+      if (result.ok) {
+        // REST response is authoritative, as is the room-state control message.
+        setRoomAiEnabled(result.data.ai_enabled)
+      } else {
+        setAiSwitchError(result.error)
+      }
+    } finally {
+      setChangingAiSwitch(false)
+    }
+  }
+
   async function handleToggleHostOnly(next: boolean) {
     setRunControlError(null)
     setChangingHostOnly(true)
@@ -1232,6 +1280,154 @@ export default function RoomPage(props: RoomPageProps = {}) {
     [roomId, wsOptions?.fetchFn, wsOptions?.syncWsUrl],
   )
 
+  const handleGrantWriteAccess = useCallback(
+    async (moduleId: string, memberId: string) => {
+      if (!roomId) return
+      setWorkspaceError(null)
+      const token = readOwnerToken(roomId)
+      const currentSessionId = sessionIdRef.current ?? wsOptions?.sessionId ?? getCollabSessionId()
+      const syncBase = wsOptions?.syncWsUrl
+        ? wsOptions.syncWsUrl.replace(/^ws/, 'http').replace(/\/ws\/rooms.*$/, '')
+        : undefined
+      const res = await grantWriteAccess(
+        {
+          roomId,
+          sessionId: currentSessionId,
+          ownerToken: token,
+          baseUrl: syncBase,
+          fetchFn: wsOptions?.fetchFn,
+        },
+        moduleId,
+        memberId,
+      )
+      if (!res.ok) {
+        setWorkspaceError(res.error)
+      } else {
+        setWorkspaceModules((prev) => {
+          const idx = prev.findIndex((m) => m.module_id === moduleId)
+          if (idx >= 0) {
+            const copy = [...prev]
+            copy[idx] = res.data
+            return copy
+          }
+          return [...prev, res.data]
+        })
+      }
+    },
+    [roomId, wsOptions?.fetchFn, wsOptions?.syncWsUrl],
+  )
+
+  const handleRevokeWriteAccess = useCallback(
+    async (moduleId: string, memberId: string) => {
+      if (!roomId) return
+      setWorkspaceError(null)
+      const token = readOwnerToken(roomId)
+      const currentSessionId = sessionIdRef.current ?? wsOptions?.sessionId ?? getCollabSessionId()
+      const syncBase = wsOptions?.syncWsUrl
+        ? wsOptions.syncWsUrl.replace(/^ws/, 'http').replace(/\/ws\/rooms.*$/, '')
+        : undefined
+      const res = await revokeWriteAccess(
+        {
+          roomId,
+          sessionId: currentSessionId,
+          ownerToken: token,
+          baseUrl: syncBase,
+          fetchFn: wsOptions?.fetchFn,
+        },
+        moduleId,
+        memberId,
+      )
+      if (!res.ok) {
+        setWorkspaceError(res.error)
+      } else {
+        setWorkspaceModules((prev) => {
+          const idx = prev.findIndex((m) => m.module_id === moduleId)
+          if (idx >= 0) {
+            const copy = [...prev]
+            copy[idx] = res.data
+            return copy
+          }
+          return [...prev, res.data]
+        })
+      }
+    },
+    [roomId, wsOptions?.fetchFn, wsOptions?.syncWsUrl],
+  )
+
+  const handleToggleRunnable = useCallback(
+    async (moduleId: string, runnable: boolean) => {
+      if (!roomId) return
+      setWorkspaceError(null)
+      const currentSessionId = sessionIdRef.current ?? wsOptions?.sessionId ?? getCollabSessionId()
+      const syncBase = wsOptions?.syncWsUrl
+        ? wsOptions.syncWsUrl.replace(/^ws/, 'http').replace(/\/ws\/rooms.*$/, '')
+        : undefined
+      const res = await setModuleRunnable(
+        {
+          roomId,
+          sessionId: currentSessionId,
+          baseUrl: syncBase,
+          fetchFn: wsOptions?.fetchFn,
+        },
+        moduleId,
+        runnable,
+      )
+      if (!res.ok) {
+        setWorkspaceError(res.error)
+      } else {
+        setWorkspaceModules((prev) => {
+          const idx = prev.findIndex((m) => m.module_id === moduleId)
+          if (idx >= 0) {
+            const copy = [...prev]
+            copy[idx] = res.data
+            return copy
+          }
+          return [...prev, res.data]
+        })
+      }
+    },
+    [roomId, wsOptions?.fetchFn, wsOptions?.syncWsUrl],
+  )
+
+  const handleSetEntry = useCallback(
+    async (moduleId: string) => {
+      if (!roomId) return
+      setWorkspaceError(null)
+      const token = readOwnerToken(roomId)
+      const currentSessionId = sessionIdRef.current ?? wsOptions?.sessionId ?? getCollabSessionId()
+      const syncBase = wsOptions?.syncWsUrl
+        ? wsOptions.syncWsUrl.replace(/^ws/, 'http').replace(/\/ws\/rooms.*$/, '')
+        : undefined
+      const res = await setModuleEntry(
+        {
+          roomId,
+          sessionId: currentSessionId,
+          ownerToken: token,
+          baseUrl: syncBase,
+          fetchFn: wsOptions?.fetchFn,
+        },
+        moduleId,
+        true,
+      )
+      if (!res.ok) {
+        setWorkspaceError(res.error)
+      } else {
+        setWorkspaceModules((prev) =>
+          prev.map((m) => {
+            if (m.module_id === moduleId) {
+              return res.data
+            }
+            if (m.is_entry) {
+              return { ...m, is_entry: false }
+            }
+            return m
+          }),
+        )
+      }
+    },
+    [roomId, wsOptions?.fetchFn, wsOptions?.syncWsUrl],
+  )
+
   // A run-result frame can carry a stale or untrusted display_name. Only the
   // server roster's member_id -> display_name mapping may label the runner.
   const runnerMember = runOutput?.runner?.member_id
@@ -1298,6 +1494,28 @@ export default function RoomPage(props: RoomPageProps = {}) {
             {roomMode.mode === 'pair' ? 'Pair' : 'Open'}{roomMode.detail ? ` · ${roomMode.detail}` : ''}
           </span>
         )}
+        {roomMode?.mode === 'pair' && roomMode.detail && (
+          <span className="room-preset-badge" data-testid="room-preset-badge">
+            {roomMode.detail === 'teach_interview'
+              ? 'Teach / Interview'
+              : roomMode.detail === 'debug_together'
+                ? 'Debug together'
+                : roomMode.detail}
+          </span>
+        )}
+        {roomAiEnabled !== null && (
+          <span data-testid="room-ai-status" role="status">
+            AI {roomAiEnabled ? 'on' : 'off'}
+          </span>
+        )}
+        {roomMode?.mode === 'pair' && (
+          <span
+            className={`room-edit-status-badge ${!isObserver && (isHost || myCanEdit === true) ? 'can-edit' : 'read-only'}`}
+            data-testid="room-edit-status-badge"
+          >
+            {!isObserver && (isHost || myCanEdit === true) ? 'You can edit' : 'Read only'}
+          </span>
+        )}
         {displayName && (
           <>
             <span className="room-header-separator" aria-hidden="true"> · </span>
@@ -1348,6 +1566,10 @@ export default function RoomPage(props: RoomPageProps = {}) {
           onRequestModule={handleRequestModule}
           onApproveModule={handleApproveModule}
           onDeclineModule={handleDeclineModule}
+          onToggleRunnable={handleToggleRunnable}
+          onSetEntry={handleSetEntry}
+          onGrantWriteAccess={handleGrantWriteAccess}
+          onRevokeWriteAccess={handleRevokeWriteAccess}
           creationError={workspaceError}
           isCreating={isCreatingModule}
           roster={roster}
@@ -1490,6 +1712,15 @@ export default function RoomPage(props: RoomPageProps = {}) {
           </p>
         )}
 
+        {isHost && roomAiEnabled !== null && (
+          <label data-testid="host-ai-switch-label">
+            <input type="checkbox" data-testid="host-ai-switch-toggle"
+              checked={roomAiEnabled} disabled={changingAiSwitch}
+              onChange={(e) => void handleToggleAiSwitch(e.target.checked)} />{' '}
+            Enable AI for this room
+          </label>
+        )}
+        {aiSwitchError && <p role="alert" data-testid="ai-switch-error">{aiSwitchError}</p>}
         {isHost && (
           <label data-testid="host-only-run-label">
             <input
@@ -1577,8 +1808,23 @@ export default function RoomPage(props: RoomPageProps = {}) {
       >
         {displayRunOutput ? (
           <RunOutputPanel
+            key={displayRunOutput.request_id}
             result={displayRunOutput}
             analysisResult={analysisResults[displayRunOutput.request_id] ?? null}
+            currentViewerMemberId={myMemberId ?? undefined}
+            onSaveTestCase={async (testCase) => {
+              const sessionId = sessionIdRef.current
+              if (!roomId || !sessionId) throw new Error('Not joined to a room')
+              const response = await (wsOptions?.fetchFn ?? fetch)(
+                `${config.platformApiUrl}/v1/rooms/${encodeURIComponent(roomId)}/saved-tests`,
+                {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json', 'X-Session-Id': sessionId },
+                  body: JSON.stringify(testCase),
+                },
+              )
+              if (!response.ok) throw new Error('Could not save test case')
+            }}
           />
         ) : null}
       </RunPanel>

@@ -19,6 +19,7 @@ import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BooleanSupplier;
 
 /**
  * Asynchronous AI analysis execution and fallback management service (US-78, NFR9, CR08, T-18).
@@ -93,6 +94,34 @@ public class AnalysisService {
     }
 
     /**
+     * US-59: evaluate room AI permission on this service's executor, not on the
+     * /v1/runs request thread. A failed lookup disables paid AI, never the
+     * deterministic analysis. Caller consent is still enforced separately.
+     */
+    public CompletableFuture<AnalysisResultMessage> performAnalysisWithFreshSwitchAsync(
+            String requestId,
+            String analysisId,
+            String roomId,
+            String sessionId,
+            String visibility,
+            String task,
+            String language,
+            Boolean consent,
+            BooleanSupplier aiEnabledSupplier,
+            Map<String, Object> payload) {
+        return CompletableFuture.supplyAsync(() -> {
+            boolean enabled = false;
+            try {
+                enabled = aiEnabledSupplier != null && aiEnabledSupplier.getAsBoolean();
+            } catch (Exception ignored) {
+                // Network/lookup failures are fail closed for external AI.
+            }
+            return performAnalysis(requestId, analysisId, roomId, sessionId,
+                    visibility, task, language, consent, enabled, payload);
+        }, executorService);
+    }
+
+    /**
      * Perform analysis with bounded timeout, handle failures, and emit exactly once.
      */
     public AnalysisResultMessage performAnalysis(
@@ -127,12 +156,18 @@ public class AnalysisService {
             requestBody.put("analysis_id", safeAnalysisId);
             requestBody.put("request_type", safeTask);
             requestBody.put("language", language);
-            requestBody.put("consent", consent != null ? consent : false);
-            requestBody.put("ai_enabled", aiEnabled != null ? aiEnabled : false);
-
             if (payload != null) {
                 requestBody.putAll(payload);
             }
+            // These values come from the authenticated permission lookup and
+            // caller consent, never from arbitrary analysis payload fields.
+            requestBody.put("consent", Boolean.TRUE.equals(consent));
+            requestBody.put("ai_enabled", Boolean.TRUE.equals(aiEnabled));
+            requestBody.put("request_id", requestId);
+            requestBody.put("room_id", roomId);
+            requestBody.put("analysis_id", safeAnalysisId);
+            requestBody.put("request_type", safeTask);
+            requestBody.put("language", language);
 
             byte[] jsonBytes = objectMapper.writeValueAsBytes(requestBody);
 

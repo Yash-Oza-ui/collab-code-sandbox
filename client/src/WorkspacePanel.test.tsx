@@ -329,4 +329,358 @@ describe('WorkspacePanel', () => {
       root.unmount()
     })
   })
+
+  it('renders write access toggle controls for owner or Host, and manages grants/revokes (US-43, FR22.1)', async () => {
+    const root = createRoot(container)
+    const onGrant = vi.fn()
+    const onRevoke = vi.fn()
+    const modulesWithWriters: WorkspaceModule[] = [
+      {
+        module_id: 'mod_1',
+        name: 'main.py',
+        owner_member_id: 'm_owner',
+        writers: ['m_part1'],
+        is_entry: true,
+        pending: false,
+      },
+    ]
+    const roster = [
+      { member_id: 'm_owner', display_name: 'Alice Owner', role: 'participant' },
+      { member_id: 'm_part1', display_name: 'Bob Writer', role: 'participant' },
+      { member_id: 'm_part2', display_name: 'Charlie NonWriter', role: 'participant' },
+    ]
+
+    // As module owner
+    act(() => {
+      root.render(
+        <WorkspacePanel
+          roomId="room-1"
+          isHost={false}
+          language="python"
+          modules={modulesWithWriters}
+          activeModuleId="mod_1"
+          onSelectModule={vi.fn()}
+          onGrantWriteAccess={onGrant}
+          onRevokeWriteAccess={onRevoke}
+          roster={roster}
+          myMemberId="m_owner"
+        />,
+      )
+    })
+
+    const toggleBtn = container.querySelector('[data-testid="toggle-writers-mod_1"]') as HTMLButtonElement
+    expect(toggleBtn).not.toBeNull()
+    expect(toggleBtn.textContent).toContain('Write access (2)') // 1 writer + 1 owner
+
+    // Expand dropdown
+    act(() => {
+      toggleBtn.click()
+    })
+
+    const dropdown = container.querySelector('[data-testid="writers-dropdown-mod_1"]')
+    expect(dropdown).not.toBeNull()
+
+    // Owner switch is checked and disabled
+    const ownerSwitch = container.querySelector(
+      '[data-testid="writer-toggle-mod_1-m_owner"]',
+    ) as HTMLInputElement
+    expect(ownerSwitch).not.toBeNull()
+    expect(ownerSwitch.checked).toBe(true)
+    expect(ownerSwitch.disabled).toBe(true)
+
+    // Bob switch is checked (already writer)
+    const bobSwitch = container.querySelector(
+      '[data-testid="writer-toggle-mod_1-m_part1"]',
+    ) as HTMLInputElement
+    expect(bobSwitch).not.toBeNull()
+    expect(bobSwitch.checked).toBe(true)
+    expect(bobSwitch.disabled).toBe(false)
+
+    // Charlie switch is unchecked
+    const charlieSwitch = container.querySelector(
+      '[data-testid="writer-toggle-mod_1-m_part2"]',
+    ) as HTMLInputElement
+    expect(charlieSwitch).not.toBeNull()
+    expect(charlieSwitch.checked).toBe(false)
+    expect(charlieSwitch.disabled).toBe(false)
+
+    // Toggle Bob to revoke
+    act(() => {
+      bobSwitch.click()
+    })
+    expect(onRevoke).toHaveBeenCalledWith('mod_1', 'm_part1')
+
+    // Toggle Charlie to grant
+    act(() => {
+      charlieSwitch.click()
+    })
+    expect(onGrant).toHaveBeenCalledWith('mod_1', 'm_part2')
+
+    act(() => {
+      root.unmount()
+    })
+  })
+
+  it('renders read-only badge for non-owner non-host participants without write access (US-43, FR22.2)', async () => {
+    const root = createRoot(container)
+    const modulesWithWriters: WorkspaceModule[] = [
+      {
+        module_id: 'mod_1',
+        name: 'main.py',
+        owner_member_id: 'm_owner',
+        writers: [],
+        is_entry: true,
+        pending: false,
+      },
+    ]
+
+    act(() => {
+      root.render(
+        <WorkspacePanel
+          roomId="room-1"
+          isHost={false}
+          language="python"
+          modules={modulesWithWriters}
+          activeModuleId="mod_1"
+          onSelectModule={vi.fn()}
+          myMemberId="m_guest"
+        />,
+      )
+    })
+
+    // Writers control button not visible
+    expect(container.querySelector('[data-testid="writers-control-mod_1"]')).toBeNull()
+
+    // Read-only badge is displayed
+    const badge = container.querySelector('[data-testid="access-badge-mod_1"]')
+    expect(badge).not.toBeNull()
+    expect(badge?.textContent).toBe('Read-only')
+
+    act(() => {
+      root.unmount()
+    })
+  })
+
+  it('renders runnable and non-runnable badges for modules (US-46, FR20.2)', async () => {
+    const root = createRoot(container)
+    const modules: WorkspaceModule[] = [
+      { module_id: 'mod_1', name: 'main.py', owner_member_id: 'm_1', runnable: true, pending: false },
+      { module_id: 'mod_2', name: 'helper.py', owner_member_id: 'm_2', runnable: false, pending: false },
+    ]
+
+    act(() => {
+      root.render(
+        <WorkspacePanel
+          roomId="room-1"
+          isHost={false}
+          language="python"
+          modules={modules}
+          activeModuleId="mod_1"
+          onSelectModule={vi.fn()}
+        />,
+      )
+    })
+
+    const badge1 = container.querySelector('[data-testid="runnable-badge-mod_1"]')
+    expect(badge1?.textContent).toBe('runnable')
+    expect(badge1?.className).toContain('runnable-badge')
+
+    const badge2 = container.querySelector('[data-testid="runnable-badge-mod_2"]')
+    expect(badge2?.textContent).toBe('non-runnable')
+    expect(badge2?.className).toContain('non-runnable-badge')
+
+    act(() => {
+      root.unmount()
+    })
+  })
+
+  it('displays "No entry file set" status when no entry file exists (US-46)', async () => {
+    const root = createRoot(container)
+    const modules: WorkspaceModule[] = [
+      { module_id: 'mod_1', name: 'a.py', owner_member_id: 'm_1', is_entry: false, pending: false },
+      { module_id: 'mod_2', name: 'b.py', owner_member_id: 'm_2', is_entry: false, pending: false },
+    ]
+
+    act(() => {
+      root.render(
+        <WorkspacePanel
+          roomId="room-1"
+          isHost={true}
+          language="python"
+          modules={modules}
+          activeModuleId="mod_1"
+          onSelectModule={vi.fn()}
+          onSetEntry={vi.fn()}
+        />,
+      )
+    })
+
+    const noEntryMsg = container.querySelector('[data-testid="no-entry-file-message"]')
+    expect(noEntryMsg).not.toBeNull()
+    expect(noEntryMsg?.textContent).toContain('No entry file set')
+
+    // Host sees the control to set entry file
+    expect(container.querySelector('[data-testid="set-entry-mod_1"]')).not.toBeNull()
+    expect(container.querySelector('[data-testid="set-entry-mod_2"]')).not.toBeNull()
+
+    act(() => {
+      root.unmount()
+    })
+  })
+
+  it('displays designated entry file in workspace status (US-46)', async () => {
+    const root = createRoot(container)
+    const modules: WorkspaceModule[] = [
+      { module_id: 'mod_1', name: 'main.py', owner_member_id: 'm_1', is_entry: true, pending: false },
+      { module_id: 'mod_2', name: 'utils.py', owner_member_id: 'm_2', is_entry: false, pending: false },
+    ]
+
+    act(() => {
+      root.render(
+        <WorkspacePanel
+          roomId="room-1"
+          isHost={true}
+          language="python"
+          modules={modules}
+          activeModuleId="mod_1"
+          onSelectModule={vi.fn()}
+          onSetEntry={vi.fn()}
+        />,
+      )
+    })
+
+    const entryIndicator = container.querySelector('[data-testid="entry-file-indicator"]')
+    expect(entryIndicator?.textContent).toContain('Entry file: main.py')
+
+    // Host sees "Set as entry" on utils.py (non-entry), but not on main.py (already entry)
+    expect(container.querySelector('[data-testid="set-entry-mod_1"]')).toBeNull()
+    expect(container.querySelector('[data-testid="set-entry-mod_2"]')).not.toBeNull()
+
+    act(() => {
+      root.unmount()
+    })
+  })
+
+  it('renders runnable toggle only for the module owner and calls onToggleRunnable (US-46, FR20.2)', async () => {
+    const root = createRoot(container)
+    const onToggle = vi.fn()
+    const modules: WorkspaceModule[] = [
+      { module_id: 'mod_1', name: 'main.py', owner_member_id: 'm_host', runnable: true, pending: false },
+      { module_id: 'mod_2', name: 'solver.py', owner_member_id: 'm_alice', runnable: false, pending: false },
+    ]
+
+    // Render as Alice (m_alice)
+    act(() => {
+      root.render(
+        <WorkspacePanel
+          roomId="room-1"
+          isHost={false}
+          language="python"
+          modules={modules}
+          activeModuleId="mod_1"
+          onSelectModule={vi.fn()}
+          onToggleRunnable={onToggle}
+          myMemberId="m_alice"
+        />,
+      )
+    })
+
+    // Alice is owner of mod_2, but not mod_1
+    expect(container.querySelector('[data-testid="toggle-runnable-mod_1"]')).toBeNull()
+    const aliceBtn = container.querySelector('[data-testid="toggle-runnable-mod_2"]') as HTMLButtonElement
+    expect(aliceBtn).not.toBeNull()
+    expect(aliceBtn.textContent).toBe('Mark runnable')
+
+    act(() => {
+      aliceBtn.click()
+    })
+
+    expect(onToggle).toHaveBeenCalledWith('mod_2', true)
+
+    act(() => {
+      root.unmount()
+    })
+  })
+
+  it('renders "Set as entry" only for Host and calls onSetEntry (US-46, FR20.3)', async () => {
+    const root = createRoot(container)
+    const onSetEntry = vi.fn()
+    const modules: WorkspaceModule[] = [
+      { module_id: 'mod_1', name: 'main.py', owner_member_id: 'm_host', is_entry: true, pending: false },
+      { module_id: 'mod_2', name: 'solver.py', owner_member_id: 'm_alice', is_entry: false, pending: false },
+    ]
+
+    // Non-Host does not see set-entry buttons
+    act(() => {
+      root.render(
+        <WorkspacePanel
+          roomId="room-1"
+          isHost={false}
+          language="python"
+          modules={modules}
+          activeModuleId="mod_1"
+          onSelectModule={vi.fn()}
+          onSetEntry={onSetEntry}
+          myMemberId="m_alice"
+        />,
+      )
+    })
+
+    expect(container.querySelector('[data-testid="set-entry-mod_1"]')).toBeNull()
+    expect(container.querySelector('[data-testid="set-entry-mod_2"]')).toBeNull()
+
+    // Host sees set-entry on mod_2 (non-entry)
+    act(() => {
+      root.render(
+        <WorkspacePanel
+          roomId="room-1"
+          isHost={true}
+          language="python"
+          modules={modules}
+          activeModuleId="mod_1"
+          onSelectModule={vi.fn()}
+          onSetEntry={onSetEntry}
+          myMemberId="m_host"
+        />,
+      )
+    })
+
+    const setEntryBtn = container.querySelector('[data-testid="set-entry-mod_2"]') as HTMLButtonElement
+    expect(setEntryBtn).not.toBeNull()
+
+    act(() => {
+      setEntryBtn.click()
+    })
+
+    expect(onSetEntry).toHaveBeenCalledWith('mod_2')
+
+    act(() => {
+      root.unmount()
+    })
+  })
+
+  it('renders plain-words error message when actionError is provided (US-46)', async () => {
+    const root = createRoot(container)
+
+    act(() => {
+      root.render(
+        <WorkspacePanel
+          roomId="room-1"
+          isHost={false}
+          language="python"
+          modules={sampleModules}
+          activeModuleId="mod_1"
+          onSelectModule={vi.fn()}
+          actionError="Only the module owner can change its runnable status."
+        />,
+      )
+    })
+
+    const error = container.querySelector('[data-testid="workspace-error"]')
+    expect(error?.textContent).toContain('Only the module owner can change its runnable status.')
+
+    act(() => {
+      root.unmount()
+    })
+  })
 })

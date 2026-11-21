@@ -236,4 +236,98 @@ class RoomServiceTest {
         assertThat(service.setEditAccess(room.getRoomId(), "non-existent-member", true)).isNull();
     }
 
+    @Test
+    void teachInterview_hostCanEdit_firstAndLaterParticipantsCannot() {
+        Room teach = pairRoom("teach_interview", "secret");
+
+        // Host joins with valid owner token
+        JoinOutcome host = service.join(teach.getRoomId(), "sess-host", "Host", "secret");
+        assertThat(host.getMember().getRole()).isEqualTo(Role.HOST);
+        assertThat(host.getMember().isCanEdit()).isTrue();
+
+        // First participant joins
+        JoinOutcome p1 = service.join(teach.getRoomId(), "sess-p1", "Participant1", null);
+        assertThat(p1.getMember().getRole()).isEqualTo(Role.PARTICIPANT);
+        assertThat(p1.getMember().isCanEdit()).isFalse();
+
+        // Later participant joins
+        JoinOutcome p2 = service.join(teach.getRoomId(), "sess-p2", "Participant2", null);
+        assertThat(p2.getMember().getRole()).isEqualTo(Role.PARTICIPANT);
+        assertThat(p2.getMember().isCanEdit()).isFalse();
+    }
+
+    @Test
+    void debugTogether_hostAndAllJoinersCanEdit_includingAfterRevocation() {
+        Room debug = new Room("DebugRoom0000000000AA", RoomMode.PAIR, "debug_together", null,
+                OwnerTokens.hash("secret"));
+        store.put(debug);
+
+        // Host joins
+        JoinOutcome host = service.join(debug.getRoomId(), "sess-host", "Host", "secret");
+        assertThat(host.getMember().getRole()).isEqualTo(Role.HOST);
+        assertThat(host.getMember().isCanEdit()).isTrue();
+
+        // First participant joins
+        JoinOutcome p1 = service.join(debug.getRoomId(), "sess-p1", "Participant1", null);
+        assertThat(p1.getMember().getRole()).isEqualTo(Role.PARTICIPANT);
+        assertThat(p1.getMember().isCanEdit()).isTrue();
+
+        // Host revokes p1's edit access
+        service.setEditAccess(debug.getRoomId(), p1.getMember().getMemberId(), false);
+        assertThat(p1.getMember().isCanEdit()).isFalse();
+
+        // Later participant joins: starts with default can_edit=true
+        JoinOutcome p2 = service.join(debug.getRoomId(), "sess-p2", "Participant2", null);
+        assertThat(p2.getMember().getRole()).isEqualTo(Role.PARTICIPANT);
+        assertThat(p2.getMember().isCanEdit()).isTrue();
+    }
+
+    @Test
+    void observerCannotEdit_inEitherPreset() {
+        // Teach / Interview
+        Room teach = pairRoom("teach_interview", "secret");
+        JoinOutcome teachMember = service.join(teach.getRoomId(), "sess-t", "Tom", null);
+        Member teachObs = service.changeRole(teach.getRoomId(), teachMember.getMember().getMemberId(), Role.OBSERVER);
+        assertThat(teachObs.getRole()).isEqualTo(Role.OBSERVER);
+        assertThat(teachObs.isCanEdit()).isFalse();
+
+        // Debug together
+        setUp();
+        Room debug = new Room("DebugRoom0000000000AA", RoomMode.PAIR, "debug_together", null,
+                OwnerTokens.hash("secret"));
+        store.put(debug);
+        JoinOutcome debugMember = service.join(debug.getRoomId(), "sess-d", "Dan", null);
+        assertThat(debugMember.getMember().isCanEdit()).isTrue();
+        Member debugObs = service.changeRole(debug.getRoomId(), debugMember.getMember().getMemberId(), Role.OBSERVER);
+        assertThat(debugObs.getRole()).isEqualTo(Role.OBSERVER);
+        assertThat(debugObs.isCanEdit()).isFalse();
+    }
+
+    @Test
+    void reconnectKeepsCurrentAccess_noResetToDefault() {
+        // Teach/Interview: participant granted access keeps it on reconnect
+        Room teach = pairRoom("teach_interview", "secret");
+        JoinOutcome p1 = service.join(teach.getRoomId(), "sess-p1", "Pat", null);
+        assertThat(p1.getMember().isCanEdit()).isFalse();
+        service.setEditAccess(teach.getRoomId(), p1.getMember().getMemberId(), true);
+        assertThat(p1.getMember().isCanEdit()).isTrue();
+
+        JoinOutcome reconnectTeach = service.join(teach.getRoomId(), "sess-p1", "Pat", null);
+        assertThat(reconnectTeach.isJoined()).isTrue();
+        assertThat(reconnectTeach.getMember().isCanEdit()).isTrue();
+
+        // Debug together: participant whose access was revoked keeps false on reconnect
+        setUp();
+        Room debug = new Room("DebugRoom0000000000AA", RoomMode.PAIR, "debug_together", null,
+                OwnerTokens.hash("secret"));
+        store.put(debug);
+        JoinOutcome p2 = service.join(debug.getRoomId(), "sess-p2", "Dana", null);
+        assertThat(p2.getMember().isCanEdit()).isTrue();
+        service.setEditAccess(debug.getRoomId(), p2.getMember().getMemberId(), false);
+        assertThat(p2.getMember().isCanEdit()).isFalse();
+
+        JoinOutcome reconnectDebug = service.join(debug.getRoomId(), "sess-p2", "Dana", null);
+        assertThat(reconnectDebug.isJoined()).isTrue();
+        assertThat(reconnectDebug.getMember().isCanEdit()).isFalse();
+    }
 }

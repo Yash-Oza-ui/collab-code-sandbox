@@ -8,7 +8,7 @@ Endpoints:
 
 import logging
 import re
-from typing import Any, Literal, Optional
+from typing import Any, Literal, Optional, Union
 
 import numpy as np
 from fastapi import APIRouter, HTTPException, Request
@@ -16,6 +16,12 @@ from pydantic import BaseModel, Field
 
 from app import chain
 from app.chain import ChainRequest
+from app.complexity import (
+    ComplexityFitResult,
+    MeasurementItem,
+    fit_complexity_curve,
+    map_growth_rate_to_complexity,
+)
 from app.config import settings
 from app.cache import compute_cache_key, get_analysis_cache
 from app.counters import (
@@ -23,6 +29,12 @@ from app.counters import (
     get_room_usage,
     get_total_usage,
     record_fallback,
+)
+from app.internal_runner import (
+    ExecutionServiceUnavailableError,
+    InternalMeasurementResult,
+    RunBudgetExceededError,
+    get_measurement_runner,
 )
 from app.limiter import get_room_rate_limiter
 from app.llm import (
@@ -49,6 +61,7 @@ from app.slowdown import (
     get_slowdown_store,
     validate_threshold_overrides,
 )
+from app.verification import FixVerificationResult, verify_suggested_fix
 
 logger = logging.getLogger(__name__)
 
@@ -60,11 +73,6 @@ router = APIRouter(prefix="/v1")
 # ============================================================================
 
 
-class MeasurementItem(BaseModel):
-    input_size: int
-    runtimes_ms: list[float]
-
-
 class ComplexityRequest(BaseModel):
     request_id: str
     room_id: str
@@ -74,8 +82,12 @@ class ComplexityRequest(BaseModel):
     consent: Optional[bool] = None
     ai_enabled: Optional[bool] = None
     code: str
+    base_input_size: Optional[int] = Field(default=100, description="Base input size n (default: 100)")
+    inputs: Optional[list[str]] = Field(default=None, description="Explicit measurement inputs if overriding default [n, 2n, 4n]")
+    repeats: Optional[int] = Field(default=3, description="Repeats per input size (default: 3)")
     measurements: list[MeasurementItem] = Field(default_factory=list)
     suggested_patch: Optional[str] = None
+    suggested_fix: Optional[str] = None
     suggested_patch_runtimes_ms: Optional[list[float]] = None
     rules_first: Optional[bool] = Field(
         default=True,
@@ -95,17 +107,23 @@ class AIStepResponse(BaseModel):
     suggested_fix: Optional[str] = None
     verified: bool = False
     verified_speedup_pct: Optional[float] = None
+    original_runtime_ms: Optional[float] = None
+    patch_runtime_ms: Optional[float] = None
+    verification_reason: Optional[str] = None
 
 
 class ComplexityResponse(BaseModel):
     request_id: str
     analysis_id: str
     task: Literal["complexity"] = "complexity"
-    growth_rate: float
+    growth_rate: Optional[float] = None
     estimated_complexity: str
-    r2_score: float
-    projected_timeout_input_size: int
-    slow_patterns: list[SlowPatternItem]
+    r2_score: Optional[float] = None
+    projected_timeout_input_size: Optional[Union[int, str]] = None
+    timeout_at_size: Optional[int] = None
+    is_poor_fit: Optional[bool] = None
+    message: Optional[str] = None
+    slow_patterns: list[SlowPatternItem] = Field(default_factory=list)
     ai_step: AIStepResponse
 
 
@@ -148,77 +166,29 @@ class CrashExplanationResponse(BaseModel):
 # ============================================================================
 
 
-def estimate_complexity_from_measurements(measurements: list[MeasurementItem]) -> dict[str, Any]:
+def estimate_complexity_from_measurements(
+    measurements: list[MeasurementItem],
+    time_limit_ms: float = 5000.0,
+    r2_threshold: float = 0.85,
+    budget_refusal_reason: Optional[str] = None,
+) -> dict[str, Any]:
     """Fit log-log linear regression to runtime measurements and determine Big-O (FR36.2, US-65)."""
-    if not measurements or len(measurements) < 2:
-        return {
-            "growth_rate": 0.0,
-            "estimated_complexity": "O(1)",
-            "r2_score": 1.0,
-            "projected_timeout_input_size": 1000000,
-        }
-
-    input_sizes = []
-    median_runtimes = []
-    for m in measurements:
-        if m.runtimes_ms:
-            input_sizes.append(m.input_size)
-            median_runtimes.append(float(np.median(m.runtimes_ms)))
-
-    if len(input_sizes) < 2:
-        return {
-            "growth_rate": 0.0,
-            "estimated_complexity": "O(1)",
-            "r2_score": 1.0,
-            "projected_timeout_input_size": 1000000,
-        }
-
-    log_n = np.log(np.array(input_sizes, dtype=float))
-    log_t = np.log(np.array(median_runtimes, dtype=float))
-
-    try:
-        m, c = np.polyfit(log_n, log_t, 1)
-        pred = m * log_n + c
-        ss_res = np.sum((log_t - pred) ** 2)
-        ss_tot = np.sum((log_t - np.mean(log_t)) ** 2)
-        r2 = 1.0 - (ss_res / ss_tot) if ss_tot > 0 else 1.0
-        r2 = max(0.0, min(1.0, float(r2)))
-
-        if m < 0.2:
-            comp = "O(1)"
-        elif m < 0.8:
-            comp = "O(log n)"
-        elif m < 1.3:
-            comp = "O(n)"
-        elif m < 1.8:
-            comp = "O(n log n)"
-        elif m < 2.5:
-            comp = "O(n^2)"
-        elif m < 3.5:
-            comp = "O(n^3)"
-        else:
-            comp = "O(2^n)"
-
-        timeout_n = 1000000
-        if m > 0.05:
-            val = np.exp((np.log(5000.0) - c) / m)
-            if not np.isnan(val) and not np.isinf(val) and val > 0:
-                timeout_n = int(round(val))
-
-        return {
-            "growth_rate": round(float(m), 2),
-            "estimated_complexity": comp,
-            "r2_score": round(float(r2), 3),
-            "projected_timeout_input_size": timeout_n,
-        }
-    except Exception as e:
-        logger.warning("Error computing regression: %s", type(e).__name__)
-        return {
-            "growth_rate": 0.0,
-            "estimated_complexity": "O(1)",
-            "r2_score": 1.0,
-            "projected_timeout_input_size": 1000000,
-        }
+    res = fit_complexity_curve(
+        measurements=measurements,
+        time_limit_ms=time_limit_ms,
+        r2_threshold=r2_threshold,
+        budget_refusal_reason=budget_refusal_reason,
+    )
+    return {
+        "growth_rate": res.growth_rate,
+        "estimated_complexity": res.estimated_complexity,
+        "r2_score": res.r2_score,
+        "projected_timeout_input_size": res.projected_timeout_input_size,
+        "timeout_at_size": res.timeout_at_size,
+        "is_poor_fit": res.is_poor_fit,
+        "can_estimate": res.can_estimate,
+        "message": res.message,
+    }
 
 
 # ============================================================================
@@ -234,8 +204,99 @@ async def analyze_complexity(payload: ComplexityRequest, request: Request) -> Co
     request.state.request_type = payload.request_type
     request.state.language = payload.language
 
-    # 1. Compute empirical complexity metrics from measurements (FR36.1, FR36.2)
-    comp_metrics = estimate_complexity_from_measurements(payload.measurements)
+    # 1. Obtain measurements: either provided in payload or run via measurement runner (US-64, US-65)
+    budget_refusal_reason: Optional[str] = None
+    incomplete_reason: Optional[str] = None
+    measurements = payload.measurements
+    orig_completed_runs = []
+    step1_meas_res: Optional[InternalMeasurementResult] = None
+
+    if not measurements:
+        base_n = payload.base_input_size or getattr(settings, "COMPLEXITY_BASE_INPUT_SIZE", 100)
+        repeats = payload.repeats or getattr(settings, "COMPLEXITY_DEFAULT_REPEATS", 3)
+        inputs = payload.inputs or [str(base_n), str(base_n * 2), str(base_n * 4)]
+
+        # Pre-validate 10-run per-request limit before dispatching (US-64, NFR14)
+        total_runs_requested = len(inputs) * repeats
+        if total_runs_requested > 10:
+            request.state.error_code = "RUN_BUDGET_EXCEEDED"
+            raise HTTPException(
+                status_code=429,
+                detail={
+                    "code": "RUN_BUDGET_EXCEEDED",
+                    "message": (
+                        f"Requested measurement run count ({total_runs_requested}) exceeds the "
+                        f"maximum limit of 10 runs per request (US-64, NFR14)."
+                    ),
+                    "reason": "max_runs_per_request",
+                    "retry_after_seconds": 30,
+                },
+                headers={"Retry-After": "30"},
+            )
+
+        runner = get_measurement_runner()
+        try:
+            meas_res = await runner.run_measurement(
+                request_id=payload.request_id,
+                room_id=payload.room_id,
+                language=payload.language,
+                code=payload.code,
+                inputs=inputs,
+                repeats=repeats,
+            )
+            if meas_res.refused and meas_res.refusal_code == "RUN_BUDGET_EXCEEDED":
+                budget_refusal_reason = meas_res.refusal_reason or "aggregate_time_budget"
+                request.state.error_code = "RUN_BUDGET_EXCEEDED"
+                raise HTTPException(
+                    status_code=429,
+                    detail={
+                        "code": "RUN_BUDGET_EXCEEDED",
+                        "message": f"Aggregate repeated-run execution budget exceeded ({budget_refusal_reason}).",
+                        "reason": budget_refusal_reason,
+                        "retry_after_seconds": meas_res.retry_after_seconds or 30,
+                    },
+                    headers={"Retry-After": str(meas_res.retry_after_seconds or 30)},
+                )
+            if meas_res.incomplete:
+                incomplete_reason = meas_res.incomplete_reason
+
+            step1_meas_res = meas_res
+            orig_completed_runs = meas_res.completed_runs
+            measurements = meas_res.measurements
+        except ExecutionServiceUnavailableError as esu:
+            request.state.error_code = esu.code
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": esu.code,
+                    "message": esu.message,
+                    "retry_after_seconds": esu.retry_after_seconds,
+                },
+                headers={"Retry-After": str(esu.retry_after_seconds or 5)},
+            ) from esu
+        except HTTPException:
+            raise
+        except RunBudgetExceededError as rbe:
+            request.state.error_code = "RUN_BUDGET_EXCEEDED"
+            raise HTTPException(
+                status_code=429,
+                detail={
+                    "code": "RUN_BUDGET_EXCEEDED",
+                    "message": rbe.message,
+                    "reason": rbe.reason,
+                    "retry_after_seconds": rbe.retry_after_seconds,
+                },
+                headers={"Retry-After": str(rbe.retry_after_seconds)},
+            ) from rbe
+
+    # Compute empirical complexity metrics from measurements (FR36.1, FR36.2, US-65)
+    comp_metrics = fit_complexity_curve(
+        measurements=measurements,
+        time_limit_ms=getattr(settings, "COMPLEXITY_TIMEOUT_MS", 5000.0),
+        r2_threshold=getattr(settings, "COMPLEXITY_R2_POOR_FIT_THRESHOLD", 0.85),
+        budget_refusal_reason=budget_refusal_reason,
+        incomplete_reason=incomplete_reason,
+    )
 
     # 2. Rules-First Static Analysis via Central Method Chain (US-77, US-67, FR40.3)
     rules_first = (
@@ -256,21 +317,131 @@ async def analyze_complexity(payload: ComplexityRequest, request: Request) -> Co
     ai_step = rule_analysis["ai_step"]
     request.state.error_code = ai_step.get("error_code")
 
-    # 3. Sandbox patch verification (FR36.3, US-66)
-    if ai_step.get("status") == "ok":
-        if payload.suggested_patch and payload.suggested_patch_runtimes_ms and payload.measurements:
-            orig_medians = [float(np.median(m.runtimes_ms)) for m in payload.measurements if m.runtimes_ms]
-            if orig_medians:
-                orig_median = orig_medians[-1]
-                patch_median = float(np.median(payload.suggested_patch_runtimes_ms))
-                if patch_median < orig_median:
-                    ai_step["verified"] = True
-                    ai_step["verified_speedup_pct"] = round(
-                        ((orig_median - patch_median) / orig_median) * 100.0, 1
+    # 3. Sandbox fix verification (FR36.3, US-66)
+    # External fix generation was gated on consent/AI state above in run_rule_based_analysis_with_ai_fallback.
+    # An already-given candidate fix (payload.suggested_patch or payload.suggested_fix) or AI-generated fix
+    # is run and verified in the sandbox. Verifying an already-given fix requires no AI consent (US-66, FR36.3).
+    candidate_fix = None
+    if ai_step.get("error_code") not in ("CONSENT_MISSING", "AI_DISABLED"):
+        candidate_fix = ai_step.get("suggested_fix")
+
+    if not candidate_fix:
+        candidate_fix = payload.suggested_patch or payload.suggested_fix
+
+    if candidate_fix:
+        if ai_step.get("error_code") not in ("CONSENT_MISSING", "AI_DISABLED") and not ai_step.get("suggested_fix"):
+            ai_step["suggested_fix"] = candidate_fix
+
+        base_n = payload.base_input_size or getattr(settings, "COMPLEXITY_BASE_INPUT_SIZE", 100)
+        meas_inputs = payload.inputs or [str(base_n), str(base_n * 2), str(base_n * 4)]
+        repeats = payload.repeats or getattr(settings, "COMPLEXITY_DEFAULT_REPEATS", 3)
+        runner = get_measurement_runner()
+
+        orig_error: Optional[FixVerificationResult] = None
+        if step1_meas_res is not None:
+            if step1_meas_res.failed:
+                orig_error = FixVerificationResult(
+                    verified=False,
+                    reason=f"Original code failed to compile or crashed: {step1_meas_res.failure_reason or 'Execution failure'}.",
+                    error_code="EXECUTION_FAILED",
+                )
+            elif step1_meas_res.timed_out:
+                timeout_sz = step1_meas_res.timed_out_size or (meas_inputs[-1] if meas_inputs else 400)
+                orig_error = FixVerificationResult(
+                    verified=False,
+                    reason=f"Original code execution timed out at input size {timeout_sz} (5000 ms limit reached).",
+                    error_code="TIMEOUT",
+                )
+            elif step1_meas_res.incomplete:
+                orig_error = FixVerificationResult(
+                    verified=False,
+                    reason=f"Original code verification incomplete: {step1_meas_res.incomplete_reason or 'Incomplete measurement runs'}.",
+                    error_code="INCOMPLETE_MEASUREMENTS",
+                )
+        elif not orig_completed_runs:
+            # If measurements were provided in payload instead of executing original code,
+            # run original code via runner so comparable outputs and baseline runtimes are captured.
+            # Baseline measurements returned by the sandbox execution ALWAYS overwrite caller-provided
+            # measurements for verification comparisons (FR36.3, US-66).
+            try:
+                orig_meas_res = await runner.run_measurement(
+                    request_id=f"{payload.request_id}-orig",
+                    room_id=payload.room_id,
+                    language=payload.language,
+                    code=payload.code,
+                    inputs=meas_inputs,
+                    repeats=repeats,
+                )
+                if orig_meas_res.refused and orig_meas_res.refusal_code == "RUN_BUDGET_EXCEEDED":
+                    budget_reason = orig_meas_res.refusal_reason or "aggregate_time_budget"
+                    orig_error = FixVerificationResult(
+                        verified=False,
+                        reason=f"Verification could not be performed: repeated-run execution budget exceeded ({budget_reason}).",
+                        error_code="RUN_BUDGET_EXCEEDED",
+                    )
+                elif orig_meas_res.failed:
+                    orig_error = FixVerificationResult(
+                        verified=False,
+                        reason=f"Original code failed to compile or crashed: {orig_meas_res.failure_reason or 'Execution failure'}.",
+                        error_code="EXECUTION_FAILED",
+                    )
+                elif orig_meas_res.timed_out:
+                    timeout_sz = orig_meas_res.timed_out_size or (meas_inputs[-1] if meas_inputs else 400)
+                    orig_error = FixVerificationResult(
+                        verified=False,
+                        reason=f"Original code execution timed out at input size {timeout_sz} (5000 ms limit reached).",
+                        error_code="TIMEOUT",
+                    )
+                elif orig_meas_res.incomplete:
+                    orig_error = FixVerificationResult(
+                        verified=False,
+                        reason=f"Original code verification incomplete: {orig_meas_res.incomplete_reason or 'Incomplete measurement runs'}.",
+                        error_code="INCOMPLETE_MEASUREMENTS",
                     )
                 else:
-                    ai_step["verified"] = False
-                    ai_step["verified_speedup_pct"] = None
+                    orig_completed_runs = orig_meas_res.completed_runs
+                    measurements = orig_meas_res.measurements
+            except ExecutionServiceUnavailableError as esu:
+                orig_error = FixVerificationResult(
+                    verified=False,
+                    reason=f"Execution service unavailable for fix verification: {esu.message}",
+                    error_code=esu.code,
+                )
+            except RunBudgetExceededError as rbe:
+                orig_error = FixVerificationResult(
+                    verified=False,
+                    reason=f"Verification could not be performed: repeated-run execution budget exceeded ({rbe.reason}).",
+                    error_code="RUN_BUDGET_EXCEEDED",
+                )
+            except Exception as e:
+                logger.warning("Could not execute original code for verification comparison: %s", e)
+                orig_error = FixVerificationResult(
+                    verified=False,
+                    reason=f"Original code execution failed unexpectedly: {type(e).__name__}",
+                    error_code="INTERNAL_ERROR",
+                )
+
+        if orig_error is not None:
+            verif_res = orig_error
+        else:
+            verif_res = await verify_suggested_fix(
+                runner=runner,
+                request_id=payload.request_id,
+                room_id=payload.room_id,
+                language=payload.language,
+                original_code=payload.code,
+                suggested_fix=candidate_fix,
+                inputs=meas_inputs,
+                repeats=repeats,
+                original_measurements=measurements,
+                original_runs=orig_completed_runs,
+                noise_margin_pct=getattr(settings, "VERIFICATION_NOISE_MARGIN_PCT", 5.0),
+            )
+        ai_step["verified"] = verif_res.verified
+        ai_step["verified_speedup_pct"] = verif_res.verified_speedup_pct
+        ai_step["original_runtime_ms"] = verif_res.original_runtime_ms
+        ai_step["patch_runtime_ms"] = verif_res.patch_runtime_ms
+        ai_step["verification_reason"] = verif_res.reason
 
     slow_patterns_list = [
         SlowPatternItem(
@@ -285,10 +456,13 @@ async def analyze_complexity(payload: ComplexityRequest, request: Request) -> Co
         request_id=payload.request_id,
         analysis_id=payload.analysis_id,
         task="complexity",
-        growth_rate=comp_metrics["growth_rate"],
-        estimated_complexity=comp_metrics["estimated_complexity"],
-        r2_score=comp_metrics["r2_score"],
-        projected_timeout_input_size=comp_metrics["projected_timeout_input_size"],
+        growth_rate=comp_metrics.growth_rate,
+        estimated_complexity=comp_metrics.estimated_complexity,
+        r2_score=comp_metrics.r2_score,
+        projected_timeout_input_size=comp_metrics.projected_timeout_input_size,
+        timeout_at_size=comp_metrics.timeout_at_size,
+        is_poor_fit=comp_metrics.is_poor_fit,
+        message=comp_metrics.message,
         slow_patterns=slow_patterns_list,
         ai_step=AIStepResponse(
             status=ai_step["status"],
@@ -296,6 +470,9 @@ async def analyze_complexity(payload: ComplexityRequest, request: Request) -> Co
             suggested_fix=ai_step.get("suggested_fix"),
             verified=ai_step.get("verified", False),
             verified_speedup_pct=ai_step.get("verified_speedup_pct"),
+            original_runtime_ms=ai_step.get("original_runtime_ms"),
+            patch_runtime_ms=ai_step.get("patch_runtime_ms"),
+            verification_reason=ai_step.get("verification_reason"),
         ),
     )
 

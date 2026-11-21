@@ -11,6 +11,12 @@
     "consent": { "type": "boolean" },
     "ai_enabled": { "type": "boolean" },
     "code": { "type": "string" },
+    "base_input_size": { "type": "integer" },
+    "inputs": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "repeats": { "type": "integer" },
     "measurements": {
       "type": "array",
       "items": {
@@ -27,6 +33,7 @@
       }
     },
     "suggested_patch": { "type": ["string", "null"] },
+    "suggested_fix": { "type": ["string", "null"] },
     "suggested_patch_runtimes_ms": {
       "type": ["array", "null"],
       "items": { "type": "number" }
@@ -40,8 +47,7 @@
     "language",
     "consent",
     "ai_enabled",
-    "code",
-    "measurements"
+    "code"
   ],
   "additionalProperties": false
 }

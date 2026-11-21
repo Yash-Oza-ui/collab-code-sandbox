@@ -325,4 +325,169 @@ class ModuleServiceTest {
         assertThat(result.pending()).isFalse();
         assertThat(result.ownerMemberId()).isIn("m_host", "m_part");
     }
+
+    @Test
+    @DisplayName("Owner can grant and revoke write access (FR22.1)")
+    void owner_canGrantAndRevokeWriteAccess() {
+        ModuleRecord module = moduleService.createApprovedModule(OPEN_ROOM_ID, host, "owner-control.py");
+        assertThat(moduleService.canEdit(OPEN_ROOM_ID, module.moduleId(), participant)).isFalse();
+
+        // Grant write access to participant
+        moduleService.grantWriteAccess(OPEN_ROOM_ID, module.moduleId(), host, null, participant.getMemberId());
+        assertThat(module.writers()).contains(participant.getMemberId());
+        assertThat(moduleService.canEdit(OPEN_ROOM_ID, module.moduleId(), participant)).isTrue();
+
+        // Revoke write access
+        moduleService.revokeWriteAccess(OPEN_ROOM_ID, module.moduleId(), host, null, participant.getMemberId());
+        assertThat(module.writers()).doesNotContain(participant.getMemberId());
+        assertThat(moduleService.canEdit(OPEN_ROOM_ID, module.moduleId(), participant)).isFalse();
+    }
+
+    @Test
+    @DisplayName("Host with valid token can grant write access to participant and to Host (FR22.1)")
+    void host_withOwnerToken_canGrantWriteAccess() {
+        // Module owned by participant
+        ModuleRecord module = moduleService.createModule(OPEN_ROOM_ID, participant.getMemberId(), "part-owned.py", false);
+        assertThat(moduleService.canEdit(OPEN_ROOM_ID, module.moduleId(), host)).isFalse();
+
+        // Host grants write access to Host
+        moduleService.grantWriteAccess(OPEN_ROOM_ID, module.moduleId(), host, OWNER_TOKEN, host.getMemberId());
+        assertThat(module.writers()).contains(host.getMemberId());
+        assertThat(moduleService.canEdit(OPEN_ROOM_ID, module.moduleId(), host)).isTrue();
+    }
+
+    @Test
+    @DisplayName("Non-owner non-host cannot grant or revoke write access (NOT_MODULE_OWNER)")
+    void nonOwnerNonHost_cannotChangeWriteAccess() {
+        ModuleRecord module = moduleService.createApprovedModule(OPEN_ROOM_ID, host, "host-mod.py");
+
+        assertThatThrownBy(() -> moduleService.grantWriteAccess(
+                OPEN_ROOM_ID, module.moduleId(), participant, null, participant.getMemberId()))
+                .isInstanceOf(SecurityException.class)
+                .hasMessage("NOT_MODULE_OWNER");
+
+        module.addWriter(participant.getMemberId());
+
+        assertThatThrownBy(() -> moduleService.revokeWriteAccess(
+                OPEN_ROOM_ID, module.moduleId(), participant, null, participant.getMemberId()))
+                .isInstanceOf(SecurityException.class)
+                .hasMessage("NOT_MODULE_OWNER");
+    }
+
+    @Test
+    @DisplayName("Module owner cannot lose write access")
+    void owner_cannotLoseWriteAccess() {
+        ModuleRecord module = moduleService.createApprovedModule(OPEN_ROOM_ID, host, "permanent-owner.py");
+
+        assertThatThrownBy(() -> moduleService.revokeWriteAccess(
+                OPEN_ROOM_ID, module.moduleId(), host, null, host.getMemberId()))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("OWNER_CANNOT_LOSE_WRITE_ACCESS");
+
+        assertThat(moduleService.canEdit(OPEN_ROOM_ID, module.moduleId(), host)).isTrue();
+    }
+
+    @Test
+    @DisplayName("Observer cannot edit even if write access recorded (reason observer)")
+    void observer_cannotEditEvenIfInWriters() {
+        Member observer = new Member("m_obs", "s_obs", "Observer", Role.OBSERVER, false, false);
+        Room room = roomStore.get(OPEN_ROOM_ID);
+        room.getMembers().put(observer.getMemberId(), observer);
+
+        ModuleRecord module = moduleService.createApprovedModule(OPEN_ROOM_ID, host, "obs-test.py");
+        moduleService.grantWriteAccess(OPEN_ROOM_ID, module.moduleId(), host, null, observer.getMemberId());
+
+        assertThat(module.writers()).contains(observer.getMemberId());
+        // must be false because member is OBSERVER
+        assertThat(moduleService.canEdit(OPEN_ROOM_ID, module.moduleId(), observer)).isFalse();
+    }
+
+    @Test
+    @DisplayName("Owner can mark and unmark runnable (US-46, FR20.2)")
+    void setRunnable_ownerCanToggleRunnable() {
+        ModuleRecord module = moduleService.createApprovedModule(OPEN_ROOM_ID, participant, "helper.py");
+        assertThat(module.runnable()).isTrue();
+
+        ModuleRecord unmarked = moduleService.setRunnable(OPEN_ROOM_ID, module.moduleId(), participant, false);
+        assertThat(unmarked.runnable()).isFalse();
+
+        ModuleRecord marked = moduleService.setRunnable(OPEN_ROOM_ID, module.moduleId(), participant, true);
+        assertThat(marked.runnable()).isTrue();
+    }
+
+    @Test
+    @DisplayName("Non-owner setting runnable is refused with NOT_MODULE_OWNER (US-46, FR20.2)")
+    void setRunnable_nonOwnerThrowsSecurityException() {
+        ModuleRecord module = moduleService.createApprovedModule(OPEN_ROOM_ID, participant, "helper.py");
+
+        assertThatThrownBy(() -> moduleService.setRunnable(OPEN_ROOM_ID, module.moduleId(), host, false))
+                .isInstanceOf(SecurityException.class)
+                .hasMessage("NOT_MODULE_OWNER");
+    }
+
+    @Test
+    @DisplayName("Host can set entry file and replacing it unsets previous entry file (US-46, FR20.3)")
+    void setEntry_hostCanSetAndReplaceEntryFile() {
+        ModuleRecord m1 = moduleService.createApprovedModule(OPEN_ROOM_ID, host, "main.py");
+        ModuleRecord m2 = moduleService.createApprovedModule(OPEN_ROOM_ID, participant, "app.py");
+
+        ModuleService.EntryChangeResult res1 = moduleService.setEntry(OPEN_ROOM_ID, m1.moduleId(), host, OWNER_TOKEN, true);
+        assertThat(res1.updated().isEntry()).isTrue();
+        assertThat(res1.replaced()).isNull();
+
+        ModuleService.EntryChangeResult res2 = moduleService.setEntry(OPEN_ROOM_ID, m2.moduleId(), host, OWNER_TOKEN, true);
+        assertThat(res2.updated().isEntry()).isTrue();
+        assertThat(res2.replaced()).isNotNull();
+        assertThat(res2.replaced().moduleId()).isEqualTo(m1.moduleId());
+        assertThat(res2.replaced().isEntry()).isFalse();
+        assertThat(m1.isEntry()).isFalse();
+    }
+
+    @Test
+    @DisplayName("Non-host or wrong token setting entry is refused with NOT_OWNER (US-46, FR20.3)")
+    void setEntry_nonHostOrInvalidTokenThrowsSecurityException() {
+        ModuleRecord m = moduleService.createApprovedModule(OPEN_ROOM_ID, host, "main.py");
+
+        assertThatThrownBy(() -> moduleService.setEntry(OPEN_ROOM_ID, m.moduleId(), participant, OWNER_TOKEN, true))
+                .isInstanceOf(SecurityException.class)
+                .hasMessage("NOT_OWNER");
+
+        assertThatThrownBy(() -> moduleService.setEntry(OPEN_ROOM_ID, m.moduleId(), host, "wrong-token", true))
+                .isInstanceOf(SecurityException.class)
+                .hasMessage("NOT_OWNER");
+    }
+
+    @Test
+    @DisplayName("Setting runnable or entry on non-existent module throws MODULE_NOT_FOUND")
+    void setRunnableAndEntry_unknownModuleThrows() {
+        assertThatThrownBy(() -> moduleService.setRunnable(OPEN_ROOM_ID, "mod_unknown12345678", host, true))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("MODULE_NOT_FOUND");
+
+        assertThatThrownBy(() -> moduleService.setEntry(OPEN_ROOM_ID, "mod_unknown12345678", host, OWNER_TOKEN, true))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("MODULE_NOT_FOUND");
+    }
+
+    @Test
+    @DisplayName("Setting runnable on pending module throws MODULE_PENDING (US-46)")
+    void setRunnable_pendingModuleThrows() {
+        ModuleRecord pending = moduleService.requestCreate(OPEN_ROOM_ID, participant, "pending_tool.py");
+        assertThat(pending.pending()).isTrue();
+
+        assertThatThrownBy(() -> moduleService.setRunnable(OPEN_ROOM_ID, pending.moduleId(), participant, true))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("MODULE_PENDING");
+    }
+
+    @Test
+    @DisplayName("Setting entry file on pending module throws MODULE_PENDING (US-46)")
+    void setEntry_pendingModuleThrows() {
+        ModuleRecord pending = moduleService.requestCreate(OPEN_ROOM_ID, participant, "pending_entry.py");
+        assertThat(pending.pending()).isTrue();
+
+        assertThatThrownBy(() -> moduleService.setEntry(OPEN_ROOM_ID, pending.moduleId(), host, OWNER_TOKEN, true))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("MODULE_PENDING");
+    }
 }

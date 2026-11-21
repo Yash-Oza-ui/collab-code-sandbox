@@ -176,6 +176,31 @@
     },
     "ai_step": {
       "$ref": "#/definitions/ai_step"
+    },
+    "original_size": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "minimized_size": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "reference_used": {
+      "type": "boolean"
+    },
+    "minimization_rounds": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "minimization_batches": {
+      "type": "integer",
+      "minimum": 0
     }
   },
   "required": [
