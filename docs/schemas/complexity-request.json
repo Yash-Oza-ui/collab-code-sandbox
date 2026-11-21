@@ -33,6 +33,7 @@
       }
     },
     "suggested_patch": { "type": ["string", "null"] },
+    "suggested_fix": { "type": ["string", "null"] },
     "suggested_patch_runtimes_ms": {
       "type": ["array", "null"],
       "items": { "type": "number" }

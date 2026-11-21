@@ -18,6 +18,10 @@
           "runtimes_ms": {
             "type": "array",
             "items": { "type": "number" }
+          },
+          "output": {
+            "type": ["string", "null"],
+            "description": "Standard output captured from the executed process for output equivalence verification (US-66, FR36.3)."
           }
         },
         "required": ["input", "runtimes_ms"],

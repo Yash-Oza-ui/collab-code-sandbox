@@ -19,7 +19,18 @@ def isolate_service_state():
     clear_analysis_cache()
     clear_room_rate_limiter()
     # Explicitly inject test stub runner for unit test runs
-    set_measurement_runner(StubMeasurementRunner(growth_type="linear", base_time_ms=1.0))
+    set_measurement_runner(
+        StubMeasurementRunner(
+            growth_type="linear",
+            base_time_ms=1.0,
+            code_overrides={
+                "for j in range": {
+                    "growth_type": "quadratic",
+                    "base_time_ms": 1.12,
+                },
+            },
+        )
+    )
     yield
     set_measurement_runner(None)
     reset_counters()
