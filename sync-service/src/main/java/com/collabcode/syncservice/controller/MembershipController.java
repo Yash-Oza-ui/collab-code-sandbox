@@ -115,6 +115,9 @@ public class MembershipController {
             controlHandler.broadcastModuleUpdated(roomId, RoomMessages.moduleUpdated(pendingMod, true));
         }
 
+        // Drop any pending edit-access requests created by the removed member (US-38)
+        controlHandler.clearAndNotifyEditRequest(roomId, memberId, "removed");
+
         // Close the removed member's control AND document sockets (4403, V2.3/V2.5),
         // then broadcast the updated roster to whoever remains (V2.4).
         closeSessions(registry.findAllBySessionId(roomId, removed.getSessionId()),

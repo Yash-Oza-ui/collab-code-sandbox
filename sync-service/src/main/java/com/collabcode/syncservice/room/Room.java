@@ -59,6 +59,14 @@ public class Room {
      */
     private final Map<String, BlockedSession> blocked = new ConcurrentHashMap<>();
 
+    /**
+     * Pending edit access request for a participant in Pair mode (US-38, V2.22; FR19.3).
+     */
+    public record EditRequest(String memberId, String displayName, Instant requestedAt) {}
+
+    /** memberId -> EditRequest. At most one pending request per member. */
+    private final Map<String, EditRequest> pendingEditRequests = new ConcurrentHashMap<>();
+
     public Room(String roomId, RoomMode mode, String preset, String language, String ownerTokenHash) {
         this.roomId = roomId;
         this.mode = mode;
@@ -92,6 +100,7 @@ public class Room {
         ownerTokenHash = null;
         members.clear();
         blocked.clear();
+        pendingEditRequests.clear();
         requiresApproval = false;
         hostOnlyRun = false;
     }
@@ -147,7 +156,30 @@ public class Room {
         copy.requiresApproval = this.requiresApproval;
         copy.hostOnlyRun = this.hostOnlyRun;
         copy.members.putAll(this.members);
+        copy.pendingEditRequests.putAll(this.pendingEditRequests);
         return copy;
+    }
+
+    // ----- Edit requests in Pair mode (US-38, V2.22) -----
+
+    public boolean addEditRequest(String memberId, String displayName, Instant requestedAt) {
+        return pendingEditRequests.putIfAbsent(memberId, new EditRequest(memberId, displayName, requestedAt)) == null;
+    }
+
+    public EditRequest getEditRequest(String memberId) {
+        return pendingEditRequests.get(memberId);
+    }
+
+    public EditRequest removeEditRequest(String memberId) {
+        return pendingEditRequests.remove(memberId);
+    }
+
+    public Map<String, EditRequest> getPendingEditRequests() {
+        return pendingEditRequests;
+    }
+
+    public boolean hasPendingEditRequest(String memberId) {
+        return pendingEditRequests.containsKey(memberId);
     }
 
     // ----- Block list (US-28, V2.18) -----
