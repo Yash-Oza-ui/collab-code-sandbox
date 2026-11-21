@@ -189,6 +189,7 @@ public class InternalRunController {
         List<Map<String, Object>> completedRuns = new ArrayList<>();
         for (String input : inputs) {
             List<Double> runtimes = new ArrayList<>(repeats);
+            String lastStdout = null;
             for (int r = 0; r < repeats; r++) {
                 RunSpec spec = new RunSpec(
                         language,
@@ -198,10 +199,14 @@ public class InternalRunController {
                 );
                 ExecutionResult res = budget.execute(() -> codeRunner.execute(spec));
                 runtimes.add(res.getExecutionTimeMs());
+                if (res.getStdout() != null) {
+                    lastStdout = res.getStdout();
+                }
             }
             Map<String, Object> entry = new LinkedHashMap<>();
             entry.put("input", input);
             entry.put("runtimes_ms", runtimes);
+            entry.put("output", lastStdout != null ? lastStdout : "");
             completedRuns.add(entry);
         }
 

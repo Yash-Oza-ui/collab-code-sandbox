@@ -126,6 +126,10 @@ class Settings:
         self.COMPLEXITY_R2_POOR_FIT_THRESHOLD: float = float(
             os.getenv("COMPLEXITY_R2_POOR_FIT_THRESHOLD", "0.85")
         )
+        # Sandbox fix verification configuration (US-66, FR36.3)
+        self.VERIFICATION_NOISE_MARGIN_PCT: float = float(
+            os.getenv("VERIFICATION_NOISE_MARGIN_PCT", "5.0")
+        )
 
     def __repr__(self) -> str:
         # Never print or log the actual API key (NFR8.2)

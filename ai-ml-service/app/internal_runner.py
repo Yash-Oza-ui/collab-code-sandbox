@@ -78,6 +78,7 @@ class MeasurementRunItem(BaseModel):
 
     input: str
     runtimes_ms: list[float]
+    output: Optional[str] = None
 
 
 class InternalMeasurementResult(BaseModel):
@@ -95,12 +96,14 @@ class InternalMeasurementResult(BaseModel):
     retry_after_seconds: Optional[int] = None
     incomplete: bool = False
     incomplete_reason: Optional[str] = None
+    failed: bool = False
+    failure_reason: Optional[str] = None
     total_runs_completed: int = 0
     total_runs_requested: int = 0
 
     @property
     def can_estimate(self) -> bool:
-        if self.refused or self.timed_out or self.incomplete:
+        if self.refused or self.timed_out or self.incomplete or self.failed:
             return False
         return len(self.measurements) >= 3
 
@@ -140,6 +143,10 @@ class StubMeasurementRunner(MeasurementRunner):
         retry_after_seconds: Optional[int] = 30,
         predefined_runs: Optional[list[dict[str, Any]]] = None,
         incomplete_reason: Optional[str] = None,
+        failed: bool = False,
+        failure_reason: Optional[str] = None,
+        default_output: Optional[str] = "",
+        code_overrides: Optional[dict[str, dict[str, Any]]] = None,
     ) -> None:
         self.growth_type = growth_type
         self.base_time_ms = base_time_ms
@@ -149,6 +156,10 @@ class StubMeasurementRunner(MeasurementRunner):
         self.retry_after_seconds = retry_after_seconds
         self.predefined_runs = predefined_runs
         self.incomplete_reason = incomplete_reason
+        self.failed = failed
+        self.failure_reason = failure_reason
+        self.default_output = default_output
+        self.code_overrides = code_overrides or {}
         self.call_count = 0
         self.total_runs_requested = 0
         self.last_request: Optional[dict[str, Any]] = None
@@ -173,42 +184,74 @@ class StubMeasurementRunner(MeasurementRunner):
             "repeats": repeats,
         }
 
-        # 0. Incomplete Simulation
-        if self.incomplete_reason:
+        # Resolve any per-code behavior overrides for testing fixes vs original code
+        override: dict[str, Any] = {}
+        if self.code_overrides:
+            for marker, ov in self.code_overrides.items():
+                if marker in code:
+                    override = ov
+                    break
+
+        failed = override.get("failed", self.failed)
+        failure_reason = override.get("failure_reason", self.failure_reason)
+        incomplete_reason = override.get("incomplete_reason", self.incomplete_reason)
+        refusal_code = override.get("refusal_code", self.refusal_code)
+        refusal_reason = override.get("refusal_reason", self.refusal_reason)
+        retry_after = override.get("retry_after_seconds", self.retry_after_seconds)
+        predefined_runs = override.get("predefined_runs", self.predefined_runs)
+        timeout_sizes = override.get("timeout_sizes", self.timeout_sizes)
+        growth_type = override.get("growth_type", self.growth_type)
+        base_time_ms = override.get("base_time_ms", self.base_time_ms)
+        output_val = override.get("output", self.default_output)
+
+        # 0. Failure Simulation (compile error, crash)
+        if failed:
             return InternalMeasurementResult(
                 request_id=request_id,
                 purpose="measurement",
-                incomplete=True,
-                incomplete_reason=self.incomplete_reason,
+                failed=True,
+                failure_reason=failure_reason or "Code failed to compile or run.",
                 total_runs_requested=runs_requested,
                 total_runs_completed=0,
             )
 
-        # 1. Budget Refusal Simulation (AC 5, US-64)
-        if self.refusal_code == "RUN_BUDGET_EXCEEDED":
-            reason = self.refusal_reason or "aggregate_time_budget"
+        # 1. Incomplete Simulation
+        if incomplete_reason:
+            return InternalMeasurementResult(
+                request_id=request_id,
+                purpose="measurement",
+                incomplete=True,
+                incomplete_reason=incomplete_reason,
+                total_runs_requested=runs_requested,
+                total_runs_completed=0,
+            )
+
+        # 2. Budget Refusal Simulation (AC 5, US-64)
+        if refusal_code == "RUN_BUDGET_EXCEEDED":
+            reason = refusal_reason or "aggregate_time_budget"
             return InternalMeasurementResult(
                 request_id=request_id,
                 purpose="measurement",
                 refused=True,
                 refusal_code="RUN_BUDGET_EXCEEDED",
                 refusal_reason=reason,
-                retry_after_seconds=self.retry_after_seconds,
+                retry_after_seconds=retry_after,
                 total_runs_requested=runs_requested,
                 total_runs_completed=0,
             )
 
-        # 2. Predefined runs if provided
+        # 3. Predefined runs if provided
         completed_run_items: list[MeasurementRunItem] = []
         measurements: list[MeasurementItem] = []
         timed_out = False
         first_timed_out_size: Optional[int] = None
 
-        if self.predefined_runs is not None:
-            for item in self.predefined_runs:
+        if predefined_runs is not None:
+            for item in predefined_runs:
                 inp_str = str(item["input"])
                 runtimes = [float(x) for x in item["runtimes_ms"]]
-                completed_run_items.append(MeasurementRunItem(input=inp_str, runtimes_ms=runtimes))
+                item_out = item.get("output", output_val)
+                completed_run_items.append(MeasurementRunItem(input=inp_str, runtimes_ms=runtimes, output=item_out))
                 try:
                     size = int(inp_str)
                     measurements.append(MeasurementItem(input_size=size, runtimes_ms=runtimes))
@@ -228,7 +271,7 @@ class StubMeasurementRunner(MeasurementRunner):
                 total_runs_requested=runs_requested,
             )
 
-        # 3. Synthetic Generation Based on growth_type
+        # 4. Synthetic Generation Based on growth_type
         # Default n=100 as base
         for inp_str in inputs:
             try:
@@ -237,32 +280,32 @@ class StubMeasurementRunner(MeasurementRunner):
                 size = 100
 
             # Check for simulated timeout
-            if inp_str in self.timeout_sizes or str(size) in self.timeout_sizes:
+            if inp_str in timeout_sizes or str(size) in timeout_sizes:
                 runtimes = [5000.0] * repeats
                 timed_out = True
                 if first_timed_out_size is None:
                     first_timed_out_size = size
-            elif self.growth_type == "constant":
+            elif growth_type == "constant":
                 # O(1) -> timings flat
-                runtimes = [round(self.base_time_ms * (1.0 + (i * 0.02 - 0.02)), 3) for i in range(repeats)]
-            elif self.growth_type == "linear":
+                runtimes = [round(base_time_ms * (1.0 + (i * 0.02 - 0.02)), 3) for i in range(repeats)]
+            elif growth_type == "linear":
                 # O(n) -> time scales linearly with size / 100
                 scale = size / 100.0
-                runtimes = [round(self.base_time_ms * scale * (1.0 + (i * 0.02 - 0.02)), 3) for i in range(repeats)]
-            elif self.growth_type == "quadratic":
+                runtimes = [round(base_time_ms * scale * (1.0 + (i * 0.02 - 0.02)), 3) for i in range(repeats)]
+            elif growth_type == "quadratic":
                 # O(n^2) -> time scales quadratically with (size / 100)^2
                 scale = (size / 100.0) ** 2
-                runtimes = [round(self.base_time_ms * scale * (1.0 + (i * 0.02 - 0.02)), 3) for i in range(repeats)]
-            elif self.growth_type == "noisy":
+                runtimes = [round(base_time_ms * scale * (1.0 + (i * 0.02 - 0.02)), 3) for i in range(repeats)]
+            elif growth_type == "noisy":
                 # High jitter to simulate poor fit (R^2 < 0.85)
                 # Vary irregularly across repeats and sizes
-                runtimes = [round(self.base_time_ms * ((size % 3 + 1) * 2.5 + i * 5.0), 3) for i in range(repeats)]
+                runtimes = [round(base_time_ms * ((size % 3 + 1) * 2.5 + i * 5.0), 3) for i in range(repeats)]
             else:
                 # Default linear scaling
                 scale = size / 100.0
-                runtimes = [round(self.base_time_ms * scale, 3) for _ in range(repeats)]
+                runtimes = [round(base_time_ms * scale, 3) for _ in range(repeats)]
 
-            completed_run_items.append(MeasurementRunItem(input=inp_str, runtimes_ms=runtimes))
+            completed_run_items.append(MeasurementRunItem(input=inp_str, runtimes_ms=runtimes, output=output_val))
             measurements.append(MeasurementItem(input_size=size, runtimes_ms=runtimes))
 
         return InternalMeasurementResult(
@@ -404,7 +447,10 @@ class HttpInternalRunClient(MeasurementRunner):
             inp_str = str(item.get("input", ""))
             returned_inputs.add(inp_str)
             runtimes = [float(r) for r in item.get("runtimes_ms", [])]
-            completed_run_items.append(MeasurementRunItem(input=inp_str, runtimes_ms=runtimes))
+            item_out = item.get("output")
+            if item_out is None:
+                item_out = item.get("stdout")
+            completed_run_items.append(MeasurementRunItem(input=inp_str, runtimes_ms=runtimes, output=item_out))
 
             # Check if any input has fewer repeats than requested
             if len(runtimes) < repeats:
