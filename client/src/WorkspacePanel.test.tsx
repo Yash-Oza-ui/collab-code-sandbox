@@ -329,4 +329,135 @@ describe('WorkspacePanel', () => {
       root.unmount()
     })
   })
+
+  it('renders write access toggle controls for owner or Host, and manages grants/revokes (US-43, FR22.1)', async () => {
+    const root = createRoot(container)
+    const onGrant = vi.fn()
+    const onRevoke = vi.fn()
+    const modulesWithWriters: WorkspaceModule[] = [
+      {
+        module_id: 'mod_1',
+        name: 'main.py',
+        owner_member_id: 'm_owner',
+        writers: ['m_part1'],
+        is_entry: true,
+        pending: false,
+      },
+    ]
+    const roster = [
+      { member_id: 'm_owner', display_name: 'Alice Owner', role: 'participant' },
+      { member_id: 'm_part1', display_name: 'Bob Writer', role: 'participant' },
+      { member_id: 'm_part2', display_name: 'Charlie NonWriter', role: 'participant' },
+    ]
+
+    // As module owner
+    act(() => {
+      root.render(
+        <WorkspacePanel
+          roomId="room-1"
+          isHost={false}
+          language="python"
+          modules={modulesWithWriters}
+          activeModuleId="mod_1"
+          onSelectModule={vi.fn()}
+          onGrantWriteAccess={onGrant}
+          onRevokeWriteAccess={onRevoke}
+          roster={roster}
+          myMemberId="m_owner"
+        />,
+      )
+    })
+
+    const toggleBtn = container.querySelector('[data-testid="toggle-writers-mod_1"]') as HTMLButtonElement
+    expect(toggleBtn).not.toBeNull()
+    expect(toggleBtn.textContent).toContain('Write access (2)') // 1 writer + 1 owner
+
+    // Expand dropdown
+    act(() => {
+      toggleBtn.click()
+    })
+
+    const dropdown = container.querySelector('[data-testid="writers-dropdown-mod_1"]')
+    expect(dropdown).not.toBeNull()
+
+    // Owner switch is checked and disabled
+    const ownerSwitch = container.querySelector(
+      '[data-testid="writer-toggle-mod_1-m_owner"]',
+    ) as HTMLInputElement
+    expect(ownerSwitch).not.toBeNull()
+    expect(ownerSwitch.checked).toBe(true)
+    expect(ownerSwitch.disabled).toBe(true)
+
+    // Bob switch is checked (already writer)
+    const bobSwitch = container.querySelector(
+      '[data-testid="writer-toggle-mod_1-m_part1"]',
+    ) as HTMLInputElement
+    expect(bobSwitch).not.toBeNull()
+    expect(bobSwitch.checked).toBe(true)
+    expect(bobSwitch.disabled).toBe(false)
+
+    // Charlie switch is unchecked
+    const charlieSwitch = container.querySelector(
+      '[data-testid="writer-toggle-mod_1-m_part2"]',
+    ) as HTMLInputElement
+    expect(charlieSwitch).not.toBeNull()
+    expect(charlieSwitch.checked).toBe(false)
+    expect(charlieSwitch.disabled).toBe(false)
+
+    // Toggle Bob to revoke
+    act(() => {
+      bobSwitch.click()
+    })
+    expect(onRevoke).toHaveBeenCalledWith('mod_1', 'm_part1')
+
+    // Toggle Charlie to grant
+    act(() => {
+      charlieSwitch.click()
+    })
+    expect(onGrant).toHaveBeenCalledWith('mod_1', 'm_part2')
+
+    act(() => {
+      root.unmount()
+    })
+  })
+
+  it('renders read-only badge for non-owner non-host participants without write access (US-43, FR22.2)', async () => {
+    const root = createRoot(container)
+    const modulesWithWriters: WorkspaceModule[] = [
+      {
+        module_id: 'mod_1',
+        name: 'main.py',
+        owner_member_id: 'm_owner',
+        writers: [],
+        is_entry: true,
+        pending: false,
+      },
+    ]
+
+    act(() => {
+      root.render(
+        <WorkspacePanel
+          roomId="room-1"
+          isHost={false}
+          language="python"
+          modules={modulesWithWriters}
+          activeModuleId="mod_1"
+          onSelectModule={vi.fn()}
+          myMemberId="m_guest"
+        />,
+      )
+    })
+
+    // Writers control button not visible
+    expect(container.querySelector('[data-testid="writers-control-mod_1"]')).toBeNull()
+
+    // Read-only badge is displayed
+    const badge = container.querySelector('[data-testid="access-badge-mod_1"]')
+    expect(badge).not.toBeNull()
+    expect(badge?.textContent).toBe('Read-only')
+
+    act(() => {
+      root.unmount()
+    })
+  })
 })

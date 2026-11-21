@@ -684,11 +684,16 @@ def compute_cache_key(
     hasher.update(b":")
     hasher.update((language or "").lower().encode("utf-8"))
     hasher.update(b":")
-    hasher.update((request_type or "").lower().encode("utf-8"))
+    req_type_lower = (request_type or "").lower()
+    hasher.update(req_type_lower.encode("utf-8"))
     hasher.update(b":")
     hasher.update((error_signature or "").strip().encode("utf-8"))
     hasher.update(b":")
-    hasher.update((error_output or "").strip().encode("utf-8"))
+    norm_err = (error_output or "").strip()
+    if req_type_lower in ("crash_explanation", "crash-explanation") and norm_err:
+        norm_err = re.sub(r"==\d+==", "==PID==", norm_err)
+        norm_err = re.sub(r"0x[0-9a-fA-F]+", "0xADDR", norm_err)
+    hasher.update(norm_err.encode("utf-8"))
 
     # Canonical representation of additional prompt-relevant context.
     context_json = json.dumps(

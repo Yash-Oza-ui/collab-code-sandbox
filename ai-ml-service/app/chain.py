@@ -93,7 +93,9 @@ from app.llm.client import (
 from app.llm.explainer import (
     build_explanation_prompt,
     enforce_sentence_limit,
+    parse_crash_explanation_output,
 )
+from app.llm.prompts import build_crash_explanation_prompt
 from app.rules.patterns import detect_slow_patterns
 from app.section import extract_error_line_from_stderr, extract_relevant_section
 
@@ -127,6 +129,7 @@ class ChainRequest:
     function_name: Optional[str] = None
     pre_sliced: bool = False
     sanitizer_output: Optional[str] = None
+    sanitizer_summary: Optional[str] = None
     measurements: Optional[list[Any]] = None
 
     # Extensible callbacks & overrides
@@ -255,7 +258,40 @@ def _build_default_prompt(request: ChainRequest) -> str:
             f"```\n{relevant_code}\n```"
         )
 
-    if request.request_type in ("explain", "explanation", "crash-explanation", "crash_explanation"):
+    if request.request_type in ("crash-explanation", "crash_explanation"):
+        summary = request.sanitizer_summary or request.error_signature or "Sanitizer crash detected."
+        if request.pre_sliced and request.code:
+            snippet_lines = request.code.splitlines()
+            if len(snippet_lines) <= settings.SECTION_MAX_LINES:
+                relevant_code = request.code
+            else:
+                relevant_code = "\n".join(snippet_lines[: settings.SECTION_MAX_LINES])
+        else:
+            snippet_lines = request.code.splitlines()
+            if request.error_line is not None and request.error_line <= len(snippet_lines):
+                relevant_code = extract_relevant_section(
+                    code=request.code,
+                    language=request.language,
+                    function_name=request.function_name,
+                    error_line=request.error_line,
+                )
+            else:
+                if len(snippet_lines) > settings.SECTION_MAX_LINES:
+                    relevant_code = extract_relevant_section(
+                        code=request.code,
+                        language=request.language,
+                        function_name=request.function_name,
+                        error_line=request.error_line,
+                    )
+                else:
+                    relevant_code = request.code
+
+        return build_crash_explanation_prompt(
+            summary=summary,
+            code=relevant_code,
+        )
+
+    if request.request_type in ("explain", "explanation"):
         if request.pre_sliced and request.code:
             code_lines = request.code.splitlines()
             if len(code_lines) <= settings.SECTION_MAX_LINES:
@@ -347,6 +383,7 @@ def _enforce_prompt_size(
             function_name=request.function_name,
             pre_sliced=True,
             sanitizer_output=request.sanitizer_output,
+            sanitizer_summary=request.sanitizer_summary,
         )
         candidate_prompt = _build_default_prompt(rebuilt_req)
         if len(candidate_prompt) <= max_prompt_length:
@@ -380,6 +417,10 @@ async def answer(request: ChainRequest) -> ChainResponse:
     req_type = request.request_type
     room_id = request.room_id
     req_id = request.request_id
+
+    # Crash explanation never uses deterministic complexity rules (US-74)
+    if req_type in ("crash-explanation", "crash_explanation"):
+        request.rules_first = False
 
     # Compute cache key upfront (NFR5.2, Decision 11, US-22)
     cache_key = compute_cache_key(
@@ -545,11 +586,23 @@ async def answer(request: ChainRequest) -> ChainResponse:
             req_type,
             room_id,
         )
+        if req_type in ("crash-explanation", "crash_explanation"):
+            local_ans, local_fix = parse_crash_explanation_output(
+                local_model_answer,
+                request.error_line,
+                request.error_signature,
+            )
+            local_expl = local_ans
+        else:
+            local_ans = local_model_answer
+            local_expl = local_model_answer
+            local_fix = local_model_answer
+
         ai_step = {
             "status": "ok",
             "error_code": None,
-            "suggested_fix": local_model_answer,
-            "explanation": local_model_answer,
+            "suggested_fix": local_fix,
+            "explanation": local_expl,
             "verified": False,
             "verified_speedup_pct": None,
             "stage": "local_model",
@@ -557,9 +610,9 @@ async def answer(request: ChainRequest) -> ChainResponse:
         cache.set(
             cache_key,
             {
-                "answer": local_model_answer,
-                "suggested_fix": local_model_answer,
-                "explanation": local_model_answer,
+                "answer": local_ans,
+                "suggested_fix": local_fix,
+                "explanation": local_expl,
                 "stage": "local_model",
             },
             room_id=room_id,
@@ -800,10 +853,21 @@ async def answer(request: ChainRequest) -> ChainResponse:
                 max_tokens=max_output_tokens,
             )
 
-        if req_type in ("explain", "explanation", "crash-explanation", "crash_explanation"):
+        if req_type in ("crash-explanation", "crash_explanation"):
+            paid_answer, suggested_fix = parse_crash_explanation_output(
+                paid_output,
+                request.error_line,
+                request.error_signature,
+            )
+            explanation = paid_answer
+        elif req_type in ("explain", "explanation"):
             paid_answer = enforce_sentence_limit(paid_output, max_sentences=3)
+            explanation = paid_answer
+            suggested_fix = paid_answer
         else:
             paid_answer = paid_output
+            explanation = paid_answer
+            suggested_fix = paid_answer
 
         logger.info(
             "Chain resolved at Stage 4 [paid_model]: request_id=%s request_type=%s room_id=%s",
@@ -817,8 +881,8 @@ async def answer(request: ChainRequest) -> ChainResponse:
             cache_key,
             {
                 "answer": paid_answer,
-                "suggested_fix": paid_answer,
-                "explanation": paid_answer,
+                "suggested_fix": suggested_fix,
+                "explanation": explanation,
                 "stage": "paid_model",
             },
             room_id=room_id,
@@ -827,8 +891,8 @@ async def answer(request: ChainRequest) -> ChainResponse:
         ai_step = {
             "status": "ok",
             "error_code": None,
-            "suggested_fix": paid_answer,
-            "explanation": paid_answer,
+            "suggested_fix": suggested_fix,
+            "explanation": explanation,
             "verified": False,
             "verified_speedup_pct": None,
             "stage": "paid_model",

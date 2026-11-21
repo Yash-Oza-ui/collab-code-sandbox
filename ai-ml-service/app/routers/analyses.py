@@ -343,12 +343,30 @@ async def explain_crash(payload: CrashExplanationRequest, request: Request) -> C
             ai_step=ai_step,
         )
 
-    # 3. Controlled AI pipeline using Central Method Chain (US-77, FR40.3)
+    # 3. Extract relevant localized code section around sanitizer line_number (FR40.2, US-74, US-76)
+    snippet_lines = payload.code_snippet.splitlines()
+    if line_number is not None and line_number <= len(snippet_lines):
+        localized_code = extract_relevant_section(
+            code=payload.code_snippet,
+            language=payload.language,
+            error_line=line_number,
+        )
+    else:
+        if len(snippet_lines) > settings.SECTION_MAX_LINES:
+            localized_code = extract_relevant_section(
+                code=payload.code_snippet,
+                language=payload.language,
+                error_line=line_number,
+            )
+        else:
+            localized_code = payload.code_snippet
+
+    # 4. Controlled AI pipeline using Central Method Chain (US-77, FR40.3)
     req_type = payload.request_type or "crash_explanation"
     err_sig = f"{error_type}:{line_number}" if error_type and line_number else (error_type or "")
     chain_req = ChainRequest(
         request_type=req_type,
-        code=payload.code_snippet,
+        code=localized_code,
         language=payload.language,
         room_id=payload.room_id,
         request_id=payload.request_id,
@@ -358,9 +376,11 @@ async def explain_crash(payload: CrashExplanationRequest, request: Request) -> C
         exit_code=139,
         error_output=payload.sanitizer_output,
         sanitizer_output=payload.sanitizer_output,
+        sanitizer_summary=summary,
         error_signature=err_sig,
         error_line=line_number,
         pre_sliced=True,
+        rules_first=False,
     )
     chain_resp = await chain.answer(chain_req)
     c_step = chain_resp.ai_step
@@ -370,7 +390,19 @@ async def explain_crash(payload: CrashExplanationRequest, request: Request) -> C
 
     if status_str == "ok":
         explanation = c_step.get("explanation") or chain_resp.answer
-        suggested_fix = c_step.get("suggested_fix") or (f"Add boundary check before line {line_number}." if line_number else None)
+        suggested_fix = c_step.get("suggested_fix")
+        if not suggested_fix:
+            err_lower = (error_type or "").lower()
+            if any(k in err_lower for k in ("overflow", "underflow", "shift", "zero", "divide", "float")):
+                suggested_fix = (
+                    f"Inspect line {line_number} to prevent undefined arithmetic or operations."
+                    if line_number
+                    else "Verify operand ranges and valid mathematical values."
+                )
+            elif line_number:
+                suggested_fix = f"Inspect and fix the faulty statement at line {line_number}."
+            else:
+                suggested_fix = "Verify pointer validity and operational constraints."
         ai_step = CrashAIStep(
             status="ok",
             error_code=None,
@@ -471,9 +503,9 @@ async def analyze_slowdown(
         )
     else:
         ai_step = result["ai_step"]
+        if ai_step.error_code:
+            record_fallback(payload.room_id)
 
-    if ai_step.error_code:
-        record_fallback(payload.room_id)
     request.state.error_code = ai_step.error_code
 
     return SlowdownAnalysisResponse(

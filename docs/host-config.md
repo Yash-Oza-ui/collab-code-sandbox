@@ -87,3 +87,13 @@ No code change is needed. The services read the values on startup.
 1. **Do not commit host-specific values** to this repository. Use a git-ignored `.env` file on each host.
 2. **Document final values** in a separate internal runbook after the deployment host is benchmarked.
 3. **Re-run the full CI suite** after changing any value to ensure no test assumes a previous default.
+
+### US-55 Host departure timeout
+
+`APP_ROOM_LIMITS_HOST_LEAVES_TIMEOUT_MS` (default **30,000 ms**, provisional)
+sets how long the Host may be disconnected before automatic closure. The
+`APP_ROOM_LIMITS_HOST_LEAVES_CHECK_INTERVAL_MS` scheduler interval defaults to
+**1,000 ms**. The latter controls scheduling precision, not the grace period.
+The central `HostDepartureManager.closeRoom` retains the closed-room tombstone
+for `4410` responses; US-56 will extend it to remove related data and document
+the final tombstone retention policy in both PRs.
