@@ -1541,7 +1541,8 @@ Rules:
 1. The Host cannot remove themselves and cannot remove another Host — either is `422 INVALID_REQUEST`.
 2. An unknown `member_id` is `404 MEMBER_NOT_FOUND`.
 3. The block holds until the Host re-admits that member (below) or regenerates the link.
-4. **Modules the removed member owned or could write are left as they are.** Their retired `member_id` stays in a module's `owner_member_id` or `writers` (V2.6); the data is not rewritten, and because the person is blocked they cannot act on it, while existing writers keep their access. Reassigning an orphaned module, and pruning a retired id from `writers`, is **not decided here — deferred to US-42** (V2.15).
+
+4. **Ownership and access cleanup on removal (US-42, FR21.5).** As part of the same atomic removal step, every module owned by the removed member is reassigned to the current Host by setting `owner_member_id` to the Host's `member_id`. The Host keeps ownership until an explicit transfer (US-41); ownership never returns automatically to the removed member. The removed member's `member_id` is removed from the `writers` list of every module, and their pending module requests are deleted. Send `module-updated` for every changed module. No request or run may observe a module without exactly one owner. A voluntary leave or temporary disconnect does not transfer ownership; only Host removal does. Pair mode has no modules, so nothing changes there.
 
 ### List removed members
 
