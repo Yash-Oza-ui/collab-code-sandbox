@@ -210,7 +210,7 @@ def test_fallback_telemetry_when_consent_missing(monkeypatch):
     monkeypatch.setattr(target, "sandbox_batch", fake_batch)
     before = get_room_usage(ROOM).get("fallback_activations", 0)
     response = TestClient(app).post("/v1/analyses/failing-input", json=payload())
-    after = get_room_usage(ROOM).get("fallbacks", 0)
+    after = get_room_usage(ROOM).get("fallback_activations", 0)
     assert response.status_code == 200
     assert after == before + 1
 
