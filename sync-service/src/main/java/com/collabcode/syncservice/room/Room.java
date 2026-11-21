@@ -86,6 +86,16 @@ public class Room {
     public boolean isClosed() { return closed; }
     public void close() { this.closed = true; }
 
+    /** US-56: retain only the closed-room tombstone, not private member/Host state. */
+    public void clearSensitiveState() {
+        closed = true;
+        ownerTokenHash = null;
+        members.clear();
+        blocked.clear();
+        requiresApproval = false;
+        hostOnlyRun = false;
+    }
+
     public boolean isRequiresApproval() { return requiresApproval; }
     public void setRequiresApproval(boolean v) { this.requiresApproval = v; }
 
