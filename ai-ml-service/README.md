@@ -636,3 +636,42 @@ Counters and application logs record **only** numeric counts, token consumption,
 
 - **Base Dependency:** US-77 is rebased directly on `feature/US-24-monthly-cost-cap` (PR #156), inheriting the persistent `UsageTracker`, atomic reservation lifecycle (`reserve_call()`), non-blocking webhook delivery (`ThreadPoolExecutor`), and `CostCapReachedError`.
 - **Zero Duplication:** Stage telemetry counters (`record_rules_answer()`, `record_local_model_answer()`, `get_stage_counters()`) cleanly extend `UsageTracker` without duplicating cost-cap accounting code.
+
+
+## US-70: Failing-input search
+
+`POST /v1/analyses/failing-input` uses the v2 request and response schemas in
+`docs/schemas/failing-input-*.json`. Requests begin with conservative deterministic
+edge cases: empty stdin and `1`. For evident whitespace-separated numeric input,
+duplicate and negative examples are also tried. Maximum bounds and any unknown
+input grammar are **not guessed**. The response headers
+`X-Failing-Input-Skipped-Cases`, `X-Failing-Input-Reference` and
+`X-Failing-Input-Scope` communicate omissions and the search's limitations.
+
+No reference: only crashes/timeouts can be established; a pass is **not proof of
+correctness**. To compare output, an authoritative reference supplied by the
+internal orchestrator is required with `X-Internal-Token`. The reference is
+executed in execution-service Docker using `purpose=test_batch` to obtain
+expected stdout; the student's batch is then executed against those outputs.
+The current US-71 contract does not execute `reference_solution` itself.
+The reference source must be server-controlled and must never be taken from
+untrusted public clients. If the reference fails, comparison is disabled.
+
+An AI-generated Python input script is optional, only with consent and AI on.
+It is obtained through the US-77 cheapest-method chain and US-22 cache. Its
+output is accepted only after the script has run as a Docker `test_batch`
+inside execution-service. No generated or submitted code is executed by
+ai-ml-service. A per-analysis process cap and time budget apply across both
+reference and candidate batches; 429 budget refusals preserve partial results.
+US-72 owns actual input minimization: US-70 preserves the original value in
+`minimized_input` only as a placeholder, not as evidence of shrinking.
+
+Set `EXECUTION_SERVICE_URL` to the internal execution-service origin and
+`INTERNAL_API_TOKEN` to the shared internal secret. Additional configurable
+limits: `FAILING_INPUT_MAX_RUNS` (default 8; max 10),
+`FAILING_INPUT_BUDGET_SECONDS` (default/max 20),
+`FAILING_INPUT_HTTP_TIMEOUT_SECONDS` (default 35), and
+`FAILING_INPUT_SCRIPT_MAX_CHARS` (default 4000).
+
+Run `pytest -k "failing_input or edge"` in `ai-ml-service/`. The unit tests
+mock Docker execution, so user code never runs on the host.

@@ -227,6 +227,20 @@ def _build_default_prompt(request: ChainRequest) -> str:
     if request.prompt:
         return request.prompt
 
+    if request.request_type == "failing_input":
+        # Preserve the requested task even when _enforce_prompt_size rebuilds
+        # an oversized prompt with a smaller relevant-code section.
+        relevant_code = (
+            request.code if request.pre_sliced
+            else extract_relevant_section(code=request.code, language=request.language)
+        )
+        return (
+            "Return ONLY Python 3 code that prints a JSON array of at most 3 short "
+            "stdin strings for edge cases of the following program. No prose, no "
+            "markdown. Do not import network or filesystem modules.\n"
+            f"Language: {request.language}\nRelevant code:\n{relevant_code}"
+        )
+
     if request.request_type == "complexity":
         detected_patterns = (
             request.rule_findings

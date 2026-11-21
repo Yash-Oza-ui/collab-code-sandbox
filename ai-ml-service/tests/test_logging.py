@@ -208,7 +208,8 @@ def _failing_input_payload(
         "consent": consent,
         "ai_enabled": ai_enabled,
         "code": f"# {marker}\nprint(int(input()) + 1)",
-        "reference_solution": f"# {marker}\nprint(int(input()))",
+        # Trusted references are covered by dedicated US-70 tests; this
+        # public-route logging audit must not supply arbitrary reference code.
     }
 
 
@@ -321,9 +322,22 @@ def test_log_marker_never_appears_in_logs_on_any_path(caplog):
         "/v1/analyses/crash-explanation",
     }.issubset(registered_post_paths)
 
+    async def fake_test_batch(payload, budget, code, inputs, **kwargs):
+        # Sandbox is mocked: never execute submitted or generated code on this host.
+        rows = [
+            {"input": value, "status": "pass", "stdout": "[]",
+             "exit_code": 0, "execution_time_ms": 1.0}
+            for value in inputs
+        ]
+        budget.record(len(rows))
+        return rows, False
+
     with caplog.at_level(logging.DEBUG):
         with patch.object(settings, "LLM_API_KEY", "test-fake-key"):
-            with patch("httpx.AsyncClient.post", new=AsyncMock(return_value=_MOCK_LLM_RESPONSE)):
+            with (
+                patch("httpx.AsyncClient.post", new=AsyncMock(return_value=_MOCK_LLM_RESPONSE)),
+                patch("app.failing_input.sandbox_batch", new=fake_test_batch),
+            ):
                 client.get("/health")
 
                 for case in route_cases:

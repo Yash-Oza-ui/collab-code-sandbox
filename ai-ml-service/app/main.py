@@ -16,6 +16,7 @@ from app.config import settings
 from app.counters import CostCapReachedError
 from app.llm.client import ConsentMissingError
 from app.routers import analyses, explain
+from app import failing_input
 
 # Configure basic logging to explicitly exclude request bodies (NFR8.2)
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -226,4 +227,5 @@ def health_check():
 
 # Register API routers
 app.include_router(analyses.router, tags=["analyses"])
+app.include_router(failing_input.router)
 app.include_router(explain.router)
