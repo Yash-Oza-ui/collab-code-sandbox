@@ -613,3 +613,55 @@ def test_api_incomplete_measurement_gives_no_estimate(client):
     assert data["estimated_complexity"] == "no estimate"
     assert data["growth_rate"] is None
     assert "incomplete data" in data["message"].lower()
+
+
+def test_to_uuid_string_conversion():
+    """Verify arbitrary request_id is safely converted to valid UUID string for execution-service."""
+    from app.internal_runner import UUID_REGEX, to_uuid_string
+
+    valid_uuid = "7a3e2b10-6c5d-4f8a-9e12-3456789abcde"
+    assert to_uuid_string(valid_uuid) == valid_uuid
+    assert UUID_REGEX.match(to_uuid_string(valid_uuid))
+
+    arbitrary_id = "test-int-complexity-false-004"
+    converted = to_uuid_string(arbitrary_id)
+    assert converted != arbitrary_id
+    assert UUID_REGEX.match(converted)
+    # Must be deterministic for the same request_id
+    assert to_uuid_string(arbitrary_id) == converted
+
+
+@pytest.mark.anyio
+async def test_http_runner_handles_422_as_incomplete():
+    """Verify HTTP runner transforms 422 unprocessable entity into incomplete result instead of 503."""
+    import json
+    from app.internal_runner import HttpInternalRunClient
+    import httpx
+
+    def mock_handler(request: httpx.Request):
+        assert "X-Internal-Token" in request.headers
+        data = json.loads(request.content.decode())
+        # Confirm request_id sent to execution-service is a valid UUID
+        from app.internal_runner import UUID_REGEX
+        assert UUID_REGEX.match(data["request_id"])
+        return httpx.Response(
+            422,
+            json={"error": {"code": "INVALID_REQUEST", "message": "Language not supported for measurement."}},
+        )
+
+    client = HttpInternalRunClient(base_url="http://fake-exec:8082")
+    transport = httpx.MockTransport(mock_handler)
+    orig_async_client = httpx.AsyncClient
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(httpx, "AsyncClient", lambda **kwargs: orig_async_client(transport=transport))
+        result = await client.run_measurement(
+            request_id="test-req-custom-string-id",
+            room_id="Zq8-Lw2Ef6Th0Yx4Rn7JbA",
+            language="unsupported",
+            code="print('hello')",
+            inputs=["10", "20", "40"],
+        )
+        assert result.incomplete is True
+        assert "could not process measurement" in result.incomplete_reason.lower()
+        assert result.can_estimate is False
+

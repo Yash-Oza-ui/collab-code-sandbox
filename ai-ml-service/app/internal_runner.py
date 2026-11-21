@@ -11,7 +11,9 @@ Includes:
 
 from abc import ABC, abstractmethod
 import logging
+import re
 from typing import Any, Optional
+import uuid
 
 import httpx
 from pydantic import BaseModel, Field
@@ -20,6 +22,22 @@ from app.complexity import MeasurementItem
 from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+UUID_REGEX = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+
+
+def to_uuid_string(val: str) -> str:
+    """Ensure val conforms to UUID format (8-4-4-4-12 hex) as required by internal-run schema."""
+    if val and UUID_REGEX.match(val):
+        return val
+    try:
+        return str(uuid.UUID(val))
+    except (ValueError, AttributeError, TypeError):
+        if val:
+            return str(uuid.uuid5(uuid.NAMESPACE_DNS, val))
+        return str(uuid.uuid4())
 
 
 class RunBudgetExceededError(Exception):
@@ -79,6 +97,12 @@ class InternalMeasurementResult(BaseModel):
     incomplete_reason: Optional[str] = None
     total_runs_completed: int = 0
     total_runs_requested: int = 0
+
+    @property
+    def can_estimate(self) -> bool:
+        if self.refused or self.timed_out or self.incomplete:
+            return False
+        return len(self.measurements) >= 3
 
 
 class MeasurementRunner(ABC):
@@ -279,8 +303,11 @@ class HttpInternalRunClient(MeasurementRunner):
             "Content-Type": "application/json",
             "X-Internal-Token": self.token,
         }
+        # execution-service internal endpoint strictly requires request_id to conform to UUID format (8-4-4-4-12 hex)
+        # per docs/schemas/internal-run-request.json.
+        internal_request_id = to_uuid_string(request_id)
         payload = {
-            "request_id": request_id,
+            "request_id": internal_request_id,
             "room_id": room_id,
             "purpose": "measurement",
             "language": language,
@@ -337,6 +364,25 @@ class HttpInternalRunClient(MeasurementRunner):
             retry = err.get("retry_after_seconds", 5)
             logger.warning("execution-service /internal/runs 503: %s", err_msg)
             raise ExecutionServiceUnavailableError(err_msg, retry_after_seconds=retry)
+
+        if resp.status_code == 422:
+            body = {}
+            try:
+                body = resp.json()
+            except Exception:
+                pass
+            err = body.get("error", {})
+            err_msg = err.get("message", "Execution service rejected measurement request.")
+            err_code = err.get("code", "INVALID_REQUEST")
+            logger.warning("execution-service /internal/runs 422: %s (%s)", err_msg, err_code)
+            return InternalMeasurementResult(
+                request_id=request_id,
+                purpose="measurement",
+                incomplete=True,
+                incomplete_reason=f"Execution service could not process measurement: {err_msg}",
+                total_runs_requested=len(inputs) * repeats,
+                total_runs_completed=0,
+            )
 
         if resp.status_code != 200:
             logger.warning("execution-service /internal/runs failed with status %d: %s", resp.status_code, resp.text[:200])
