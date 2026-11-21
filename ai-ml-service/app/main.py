@@ -150,6 +150,7 @@ async def http_exception_handler(request: Request, exc: HTTPException):
         request.state.error_code = detail.get("code", "HTTP_ERROR")
         return JSONResponse(
             status_code=exc.status_code,
+            headers=exc.headers,
             content={
                 "request_id": getattr(request.state, "request_id", None),
                 "error": detail,
@@ -158,6 +159,7 @@ async def http_exception_handler(request: Request, exc: HTTPException):
     request.state.error_code = "HTTP_ERROR"
     return JSONResponse(
         status_code=exc.status_code,
+        headers=exc.headers,
         content={
             "request_id": getattr(request.state, "request_id", None),
             "error": {
