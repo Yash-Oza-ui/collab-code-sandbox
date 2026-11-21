@@ -495,3 +495,196 @@ def test_endpoint_complexity_fix_budget_refusal_surfaces_budget():
     assert ai_step["verified_speedup_pct"] is None
     assert ai_step["patch_runtime_ms"] is None
     assert "repeated-run execution budget exceeded (aggregate_time_budget)" in ai_step["verification_reason"]
+
+
+def test_endpoint_complexity_candidate_fix_verified_with_consent_false_and_zero_llm_calls():
+    """AC 7 / Issue #185 Regression: Candidate fix is verified even when consent is false (0 LLM calls)."""
+    stub = StubMeasurementRunner(
+        growth_type="quadratic",
+        base_time_ms=2.0,
+        code_overrides={
+            "def fast_patch": {
+                "growth_type": "linear",
+                "base_time_ms": 0.5,
+            }
+        },
+    )
+    set_measurement_runner(stub)
+
+    payload = {
+        "request_id": "ca8f7b65-0c9d-4e3f-4a56-456789abcdef",
+        "room_id": "test-room-consent-verify",
+        "analysis_id": "db9f8c76-1e0f-4d4a-5b67-456789abcdef",
+        "request_type": "complexity",
+        "language": "python",
+        "consent": False,
+        "ai_enabled": False,
+        "code": "def solve(n): pass",
+        "suggested_patch": "def fast_patch(n): pass",
+    }
+
+    mock_llm_complete = AsyncMock(return_value="Suggested AI fix.")
+    with patch("app.llm.client.LLMClient.complete", mock_llm_complete):
+        resp = client.post("/v1/analyses/complexity", json=payload)
+        assert resp.status_code == 200
+        # Consent is false so external LLM client is called 0 times
+        assert mock_llm_complete.call_count == 0
+
+    data = resp.json()
+    ai_step = data["ai_step"]
+    # AI generation step was skipped with CONSENT_MISSING (no LLM fix generated)
+    assert ai_step["status"] == "skipped"
+    assert ai_step["error_code"] == "CONSENT_MISSING"
+    assert ai_step["suggested_fix"] is None
+
+    # But sandbox verification of already-supplied candidate fix succeeds without consent!
+    assert ai_step["verified"] is True
+    assert ai_step["verified_speedup_pct"] is not None
+    assert ai_step["verified_speedup_pct"] > 80.0
+    assert ai_step["original_runtime_ms"] is not None
+    assert ai_step["patch_runtime_ms"] is not None
+    assert ai_step["original_runtime_ms"] > ai_step["patch_runtime_ms"]
+    assert "Verified improvement" in ai_step["verification_reason"]
+
+
+@pytest.mark.anyio
+async def test_verify_suggested_fix_precomputed_timings_cannot_bypass_sandbox_runner():
+    """Reviewer Issue 2 Regression: Untrusted caller timings cannot bypass sandbox execution or award verified: true."""
+    # Runner simulates that the candidate fix is actually much SLOWER (quadratic 10.0ms vs original linear 1.0ms)
+    runner = StubMeasurementRunner(
+        growth_type="linear",
+        base_time_ms=1.0,
+        code_overrides={
+            "def slow_cheat": {
+                "growth_type": "quadratic",
+                "base_time_ms": 10.0,
+                "output": "ans_100",
+            }
+        },
+    )
+
+    orig_measurements = [
+        MeasurementItem(input_size=100, runtimes_ms=[1.0, 1.0, 1.0]),
+        MeasurementItem(input_size=200, runtimes_ms=[2.0, 2.0, 2.0]),
+        MeasurementItem(input_size=400, runtimes_ms=[4.0, 4.0, 4.0]),
+    ]
+    orig_runs = [
+        MeasurementRunItem(input="100", runtimes_ms=[1.0, 1.0, 1.0], output="ans_100"),
+        MeasurementRunItem(input="200", runtimes_ms=[2.0, 2.0, 2.0], output="ans_100"),
+        MeasurementRunItem(input="400", runtimes_ms=[4.0, 4.0, 4.0], output="ans_100"),
+    ]
+
+    # Caller passes suggested_patch_runtimes_ms asserting a 90% speedup (0.4ms)
+    res = await verify_suggested_fix(
+        runner=runner,
+        request_id="test-req-precompute-cheat",
+        room_id="room-cheat",
+        language="python",
+        original_code="def solve(n): pass",
+        suggested_fix="def slow_cheat(n): pass",
+        inputs=["100", "200", "400"],
+        repeats=3,
+        original_measurements=orig_measurements,
+        original_runs=orig_runs,
+        suggested_patch_runtimes_ms=[0.4, 0.4, 0.4],
+    )
+
+    # Must NOT award verified: true based on caller's asserted timings!
+    # Actual sandbox measurement (160.0ms) must be used.
+    assert res.verified is False
+    assert res.verified_speedup_pct is None
+    assert res.original_runtime_ms == 4.0
+    assert res.patch_runtime_ms == pytest.approx(160.0, abs=10.0)
+    assert "fix is slower than original" in (res.reason or "")
+
+
+@pytest.mark.anyio
+async def test_verify_suggested_fix_missing_outputs_fail_closed_under_real_contract():
+    """Reviewer Issue 3 Regression: Missing output on runner contract fails closed (verified: false)."""
+    # Simulate legacy or incomplete contract where output was not captured (output=None)
+    runner = StubMeasurementRunner(
+        default_output=None,
+        code_overrides={
+            "def faster_fix": {
+                "growth_type": "linear",
+                "base_time_ms": 0.5,
+                "output": None,
+            }
+        },
+    )
+
+    orig_measurements = [
+        MeasurementItem(input_size=100, runtimes_ms=[1.0, 1.0, 1.0]),
+        MeasurementItem(input_size=200, runtimes_ms=[4.0, 4.0, 4.0]),
+        MeasurementItem(input_size=400, runtimes_ms=[16.0, 16.0, 16.0]),
+    ]
+    orig_runs = [
+        MeasurementRunItem(input="100", runtimes_ms=[1.0, 1.0, 1.0], output=None),
+        MeasurementRunItem(input="200", runtimes_ms=[4.0, 4.0, 4.0], output=None),
+        MeasurementRunItem(input="400", runtimes_ms=[16.0, 16.0, 16.0], output=None),
+    ]
+
+    res = await verify_suggested_fix(
+        runner=runner,
+        request_id="test-req-missing-output",
+        room_id="room-output",
+        language="python",
+        original_code="def solve(n): pass",
+        suggested_fix="def faster_fix(n): pass",
+        inputs=["100", "200", "400"],
+        repeats=3,
+        original_measurements=orig_measurements,
+        original_runs=orig_runs,
+    )
+
+    # Must fail closed: verified: false with error_code OUTPUT_NOT_CAPTURED
+    assert res.verified is False
+    assert res.verified_speedup_pct is None
+    assert res.error_code == "OUTPUT_NOT_CAPTURED"
+    assert "output was not captured" in (res.reason or "")
+
+
+@pytest.mark.anyio
+async def test_verify_suggested_fix_real_contract_matching_output_verifies():
+    """Reviewer Issue 3 Regression: Contract with captured matching outputs verifies improvement."""
+    runner = StubMeasurementRunner(
+        default_output="expected_output_100\n",
+        code_overrides={
+            "def faster_correct_fix": {
+                "growth_type": "linear",
+                "base_time_ms": 0.5,
+                "output": "expected_output_100\n",
+            }
+        },
+    )
+
+    orig_measurements = [
+        MeasurementItem(input_size=100, runtimes_ms=[1.0, 1.0, 1.0]),
+        MeasurementItem(input_size=200, runtimes_ms=[4.0, 4.0, 4.0]),
+        MeasurementItem(input_size=400, runtimes_ms=[16.0, 16.0, 16.0]),
+    ]
+    orig_runs = [
+        MeasurementRunItem(input="100", runtimes_ms=[1.0, 1.0, 1.0], output="expected_output_100\n"),
+        MeasurementRunItem(input="200", runtimes_ms=[4.0, 4.0, 4.0], output="expected_output_100\n"),
+        MeasurementRunItem(input="400", runtimes_ms=[16.0, 16.0, 16.0], output="expected_output_100\n"),
+    ]
+
+    res = await verify_suggested_fix(
+        runner=runner,
+        request_id="test-req-matching-output",
+        room_id="room-output",
+        language="python",
+        original_code="def solve(n): pass",
+        suggested_fix="def faster_correct_fix(n): pass",
+        inputs=["100", "200", "400"],
+        repeats=3,
+        original_measurements=orig_measurements,
+        original_runs=orig_runs,
+    )
+
+    # Output matches and fix is faster -> verified: true
+    assert res.verified is True
+    assert res.verified_speedup_pct is not None
+    assert res.verified_speedup_pct > 80.0
+    assert "Verified improvement" in (res.reason or "")
+

@@ -95,7 +95,24 @@ async def verify_suggested_fix(
         else getattr(settings, "VERIFICATION_NOISE_MARGIN_PCT", 5.0)
     )
 
-    # 1. Determine original median runtime (evaluating at largest input size 4n where asymptotic differences dominate)
+    # 1. Determine original runs and baseline measurements
+    if not original_runs:
+        try:
+            orig_run_res = await runner.run_measurement(
+                request_id=f"{request_id}-orig",
+                room_id=room_id,
+                language=language,
+                code=original_code,
+                inputs=inputs,
+                repeats=repeats,
+            )
+            if orig_run_res.completed_runs:
+                original_runs = orig_run_res.completed_runs
+                if not original_measurements and orig_run_res.measurements:
+                    original_measurements = orig_run_res.measurements
+        except Exception as e:
+            logger.warning("Could not execute original code for verification: %s", e)
+
     if not original_measurements:
         return FixVerificationResult(
             verified=False,
@@ -115,27 +132,9 @@ async def verify_suggested_fix(
 
     orig_median = orig_medians[-1]
 
-    # 2. Case A: Fix runtimes explicitly provided in request payload (precomputed runtimes)
-    if suggested_patch_runtimes_ms:
-        patch_median = float(np.median(suggested_patch_runtimes_ms))
-        verified, speedup, reason = compare_runtimes(orig_median, patch_median, margin)
-        logger.info(
-            "Fix verification (precomputed): request_id=%s verified=%s orig_median=%.3f patch_median=%.3f speedup=%s",
-            request_id,
-            verified,
-            orig_median,
-            patch_median,
-            speedup,
-        )
-        return FixVerificationResult(
-            verified=verified,
-            verified_speedup_pct=speedup,
-            original_runtime_ms=round(orig_median, 3),
-            patch_runtime_ms=round(patch_median, 3),
-            reason=reason,
-        )
-
-    # 3. Case B: Execute fix via sandbox runner under identical conditions (same inputs, same repeats)
+    # 2. Execute fix via sandbox runner under identical conditions (same runner, same inputs, same repeats)
+    # Caller-supplied timing data (e.g. suggested_patch_runtimes_ms) cannot bypass sandbox execution;
+    # actual sandbox measurements and output validation are strictly required (US-66, FR36.3).
     verify_request_id = f"{request_id}-verify"
     try:
         patch_res = await runner.run_measurement(
@@ -230,21 +229,45 @@ async def verify_suggested_fix(
     ]
     patch_median = patch_medians[-1] if patch_medians else None
 
-    if original_runs and patch_res.completed_runs:
-        orig_outputs = {r.input: r.output for r in original_runs if r.output is not None}
-        fix_outputs = {r.input: r.output for r in patch_res.completed_runs if r.output is not None}
-        for inp in inputs:
-            if inp in orig_outputs and inp in fix_outputs:
-                if orig_outputs[inp] != fix_outputs[inp]:
-                    logger.info("Fix produced mismatched output on input size %s", inp)
-                    return FixVerificationResult(
-                        verified=False,
-                        verified_speedup_pct=None,
-                        original_runtime_ms=round(orig_median, 3),
-                        patch_runtime_ms=round(patch_median, 3) if patch_median is not None else None,
-                        reason=f"Output mismatch on input '{inp}': fix produced different output than original code.",
-                        error_code="OUTPUT_MISMATCH",
-                    )
+    # The real runner contract must provide outputs for every measured input (US-66, FR36.3).
+    # If outputs are missing/not captured, fail closed (verified: false) rather than asserting an improvement.
+    if not original_runs or not patch_res.completed_runs:
+        logger.warning("Verification cannot verify output equivalence: missing run records.")
+        return FixVerificationResult(
+            verified=False,
+            original_runtime_ms=round(orig_median, 3),
+            patch_runtime_ms=round(patch_median, 3) if patch_median is not None else None,
+            reason="Cannot verify improvement: execution outputs were not captured for output equivalence comparison.",
+            error_code="OUTPUT_NOT_CAPTURED",
+        )
+
+    orig_outputs = {r.input: r.output for r in original_runs}
+    fix_outputs = {r.input: r.output for r in patch_res.completed_runs}
+
+    for inp in inputs:
+        orig_out = orig_outputs.get(inp)
+        fix_out = fix_outputs.get(inp)
+
+        if orig_out is None or fix_out is None:
+            logger.warning("Verification cannot verify output equivalence: missing output for input '%s'.", inp)
+            return FixVerificationResult(
+                verified=False,
+                original_runtime_ms=round(orig_median, 3),
+                patch_runtime_ms=round(patch_median, 3) if patch_median is not None else None,
+                reason=f"Cannot verify improvement: output was not captured for input '{inp}'.",
+                error_code="OUTPUT_NOT_CAPTURED",
+            )
+
+        if orig_out != fix_out:
+            logger.info("Fix produced mismatched output on input size %s", inp)
+            return FixVerificationResult(
+                verified=False,
+                verified_speedup_pct=None,
+                original_runtime_ms=round(orig_median, 3),
+                patch_runtime_ms=round(patch_median, 3) if patch_median is not None else None,
+                reason=f"Output mismatch on input '{inp}': fix produced different output than original code.",
+                error_code="OUTPUT_MISMATCH",
+            )
 
     if patch_median is None:
         return FixVerificationResult(

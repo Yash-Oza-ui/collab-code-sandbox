@@ -145,7 +145,7 @@ class StubMeasurementRunner(MeasurementRunner):
         incomplete_reason: Optional[str] = None,
         failed: bool = False,
         failure_reason: Optional[str] = None,
-        default_output: Optional[str] = None,
+        default_output: Optional[str] = "",
         code_overrides: Optional[dict[str, dict[str, Any]]] = None,
     ) -> None:
         self.growth_type = growth_type
@@ -447,7 +447,9 @@ class HttpInternalRunClient(MeasurementRunner):
             inp_str = str(item.get("input", ""))
             returned_inputs.add(inp_str)
             runtimes = [float(r) for r in item.get("runtimes_ms", [])]
-            item_out = item.get("output") or item.get("stdout")
+            item_out = item.get("output")
+            if item_out is None:
+                item_out = item.get("stdout")
             completed_run_items.append(MeasurementRunItem(input=inp_str, runtimes_ms=runtimes, output=item_out))
 
             # Check if any input has fewer repeats than requested

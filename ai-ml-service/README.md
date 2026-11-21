@@ -346,16 +346,18 @@ A suggested optimization fix is executed in the isolated sandbox under identical
   1. Identical Sandbox Constraints: Both programs execute under identical container cgroup limits (128 MB RAM, swap disabled, 5 s wall-clock time limit, 64 pids, `--network none`).
   2. Balanced Ordering: Runs for the original and suggested fix are executed under matched conditions using the same geometric sizes ($n, 2n, 4n$) and repeats ($k=3$), minimizing temporal drift between variants.
 
-#### 4. Output Equivalence Check
+#### 4. Output Equivalence Check & Fail-Closed Enforcement
 - A faster program that produces different output is **not** an improvement.
-- When outputs are captured across the measured inputs, the service checks that `output_fix(input) == output_orig(input)`.
-- If an output mismatch is detected on any input size:
+- **Real Runner Contract:** Under `docs/schemas/internal-run-response.json`, `completed_runs` captures process standard output (`output`) for every measured input size.
+- **Fail-Closed Missing Output Rule:** If execution outputs are missing or not captured for any measured input in either original or patch runs, the verification **fails closed** (`verified: false`, `error_code: "OUTPUT_NOT_CAPTURED"`) rather than assuming equivalence.
+- **Output Mismatch:** If an output mismatch is detected on any input size (`output_fix(input) != output_orig(input)`):
   - `verified: false`
   - `verified_speedup_pct: null`
   - Reason explicitly notes: `"Output mismatch on input '<input>': fix produced different output than original code."`
 
 #### 5. Reporting Numbers & Failure Explanations
 - **Measured Numbers Included:** No claim is made without numbers. Both `original_runtime_ms` and `patch_runtime_ms` are recorded in the response alongside `verification_reason`.
+- **Untrusted Timing Guard:** Caller-supplied precomputed timings (such as `suggested_patch_runtimes_ms`) can never award `verified: true` or bypass sandbox execution; candidate fixes must execute in the sandbox runner and pass output equivalence.
 - **Compile Failure:** If the fix fails compilation (syntax error, type error, or missing symbol), `verified: false` is returned with the compiler message.
 - **Runtime Crash:** If the fix terminates with a non-zero exit code or uncaught exception, `verified: false` is returned with the crash details.
 - **Timeout (5 s limit, NFR4.1):** If the fix hits the 5,000 ms wall-time limit at any size, `verified: false` is returned naming the size that timed out.
@@ -363,7 +365,7 @@ A suggested optimization fix is executed in the isolated sandbox under identical
 
 ### AI Gating & Consent Rules (FR12, FR35, NFR7.5)
 - **Fix Generation:** Generating a fix via an external LLM requires `consent: true` and `ai_enabled: true`. If either is missing, the AI step is skipped (`status: "skipped"`, `error_code: "CONSENT_MISSING"` or `"AI_DISABLED"`), and the external AI service is called **0 times**.
-- **Fix Verification:** Verifying an existing fix (either provided in `suggested_patch` or already generated) is pure sandbox execution and statistics. It requires **no AI call** and operates regardless of consent.
+- **Fix Verification:** Verifying an existing fix (either provided in `suggested_patch` / `suggested_fix` or already generated) is pure sandbox execution and statistics. It requires **no AI call** and operates regardless of consent. When consent is declined, AI fix generation is skipped (`CONSENT_MISSING`, `suggested_fix: null`) while the already-supplied candidate fix is verified in the sandbox.
 
 ### Asynchronous Delivery & Zero Execution Delay (NFR9, CR08)
 - Optimization verification never blocks or delays the initial execution result.

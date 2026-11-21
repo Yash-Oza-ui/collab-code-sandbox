@@ -24,14 +24,8 @@ payload_verified='{
   "language": "python",
   "consent": true,
   "ai_enabled": true,
-  "code": "def solve(n): pass",
-  "measurements": [
-    {"input_size": 100, "runtimes_ms": [2.0, 2.1, 2.0]},
-    {"input_size": 200, "runtimes_ms": [8.0, 8.1, 8.0]},
-    {"input_size": 400, "runtimes_ms": [32.0, 32.2, 32.1]}
-  ],
-  "suggested_patch": "def solve_fast(n): return n",
-  "suggested_patch_runtimes_ms": [2.0, 2.1, 2.0]
+  "code": "import sys\nn = int(sys.stdin.read().strip() or \"100\")\ntotal = sum(i for i in range(n) for _ in range(n))\nprint(f\"res:{n}\")",
+  "suggested_patch": "import sys\nn = int(sys.stdin.read().strip() or \"100\")\ntotal = n * (n * (n - 1) // 2)\nprint(f\"res:{n}\")"
 }'
 
 resp_verified="$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST "$base/v1/analyses/complexity" \
@@ -72,14 +66,8 @@ payload_slower='{
   "language": "python",
   "consent": true,
   "ai_enabled": true,
-  "code": "def solve(n): pass",
-  "measurements": [
-    {"input_size": 100, "runtimes_ms": [2.0, 2.1, 2.0]},
-    {"input_size": 200, "runtimes_ms": [8.0, 8.1, 8.0]},
-    {"input_size": 400, "runtimes_ms": [16.0, 16.2, 16.1]}
-  ],
-  "suggested_patch": "def solve_slower(n): pass",
-  "suggested_patch_runtimes_ms": [40.0, 40.5, 40.2]
+  "code": "import sys\nn = int(sys.stdin.read().strip() or \"100\")\nprint(f\"res:{n}\")",
+  "suggested_patch": "import sys, time\nn = int(sys.stdin.read().strip() or \"100\")\ntime.sleep(0.05)\nprint(f\"res:{n}\")"
 }'
 
 resp_slower="$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST "$base/v1/analyses/complexity" \
@@ -115,14 +103,8 @@ payload_noise='{
   "language": "python",
   "consent": true,
   "ai_enabled": true,
-  "code": "def solve(n): pass",
-  "measurements": [
-    {"input_size": 100, "runtimes_ms": [10.0, 10.0, 10.0]},
-    {"input_size": 200, "runtimes_ms": [20.0, 20.0, 20.0]},
-    {"input_size": 400, "runtimes_ms": [100.0, 100.0, 100.0]}
-  ],
-  "suggested_patch": "def solve_marginal(n): pass",
-  "suggested_patch_runtimes_ms": [97.0, 97.0, 97.0]
+  "code": "import sys\nn = int(sys.stdin.read().strip() or \"100\")\nprint(f\"res:{n}\")",
+  "suggested_patch": "import sys\nn = int(sys.stdin.read().strip() or \"100\")\nprint(f\"res:{n}\")"
 }'
 
 resp_noise="$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST "$base/v1/analyses/complexity" \
@@ -149,7 +131,7 @@ fi
 
 pass ai-ml-service "fix within 5.0% noise margin not labeled verified (US-66, FR36.3)"
 
-# 4. Test: Consent missing skips AI step while returning AI-free parts intact (FR12.3, NFR7.5)
+# 4. Test: Consent missing skips AI fix generation while candidate fix is verified in sandbox (US-66, FR36.3)
 payload_no_consent='{
   "request_id": "ba7f6b54-9c8d-4a2c-3b45-456789abcdef",
   "room_id": "room-us66-test",
@@ -158,14 +140,8 @@ payload_no_consent='{
   "language": "python",
   "consent": false,
   "ai_enabled": false,
-  "code": "def solve(n): pass",
-  "measurements": [
-    {"input_size": 100, "runtimes_ms": [2.0, 2.0, 2.0]},
-    {"input_size": 200, "runtimes_ms": [8.0, 8.0, 8.0]},
-    {"input_size": 400, "runtimes_ms": [32.0, 32.0, 32.0]}
-  ],
-  "suggested_patch": "def solve_fast(n): return n",
-  "suggested_patch_runtimes_ms": [2.0, 2.0, 2.0]
+  "code": "import sys\nn = int(sys.stdin.read().strip() or \"100\")\ntotal = sum(i for i in range(n) for _ in range(n))\nprint(f\"res:{n}\")",
+  "suggested_patch": "import sys\nn = int(sys.stdin.read().strip() or \"100\")\ntotal = n * (n * (n - 1) // 2)\nprint(f\"res:{n}\")"
 }'
 
 resp_no_consent="$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST "$base/v1/analyses/complexity" \
@@ -190,10 +166,57 @@ if ! echo "$body_no_consent" | grep -q '"error_code":"CONSENT_MISSING"'; then
   exit 1
 fi
 
+if ! echo "$body_no_consent" | grep -q '"suggested_fix":null'; then
+  fail ai-ml-service "expected suggested_fix:null when consent:false, got: $body_no_consent"
+  exit 1
+fi
+
+if ! echo "$body_no_consent" | grep -q '"verified":true'; then
+  fail ai-ml-service "expected candidate fix verified:true even when consent:false, got: $body_no_consent"
+  exit 1
+fi
+
 if ! echo "$body_no_consent" | grep -q '"estimated_complexity"'; then
   fail ai-ml-service "expected estimated_complexity returned when consent:false, got: $body_no_consent"
   exit 1
 fi
 
-pass ai-ml-service "declining consent skips AI step while returning AI-free parts intact (FR12.3, NFR7.5, US-66)"
+pass ai-ml-service "candidate fix verified in sandbox without consent (US-66, FR36.3, NFR7.5)"
+
+# 5. Test: Output mismatch fails closed with verified:false and OUTPUT_MISMATCH
+payload_mismatch='{
+  "request_id": "ca8f7b65-0c9d-4e3f-4a56-456789abcdef",
+  "room_id": "room-us66-test",
+  "analysis_id": "db9f8c76-1e0f-4d4a-5b67-456789abcdef",
+  "request_type": "complexity",
+  "language": "python",
+  "consent": true,
+  "ai_enabled": true,
+  "code": "import sys\nn = int(sys.stdin.read().strip() or \"100\")\ntotal = sum(i for i in range(n) for _ in range(n))\nprint(f\"res:{n}\")",
+  "suggested_patch": "import sys\nn = int(sys.stdin.read().strip() or \"100\")\nprint(f\"wrong_res:{n}\")"
+}'
+
+resp_mismatch="$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST "$base/v1/analyses/complexity" \
+  -H "Content-Type: application/json" \
+  -d "$payload_mismatch")"
+
+status_mismatch="$(echo "$resp_mismatch" | grep 'HTTP_STATUS:' | cut -d':' -f2)"
+body_mismatch="$(echo "$resp_mismatch" | grep -v 'HTTP_STATUS:')"
+
+if [ "$status_mismatch" != "200" ]; then
+  fail ai-ml-service "expected HTTP 200 on output mismatch payload, got $status_mismatch. Body: $body_mismatch"
+  exit 1
+fi
+
+if ! echo "$body_mismatch" | grep -q '"verified":false'; then
+  fail ai-ml-service "expected verified:false on output mismatch, got: $body_mismatch"
+  exit 1
+fi
+
+if ! echo "$body_mismatch" | grep -q "Output mismatch on input"; then
+  fail ai-ml-service "expected output mismatch explanation, got: $body_mismatch"
+  exit 1
+fi
+
+pass ai-ml-service "output mismatch fails closed without verified label (US-66, FR36.3)"
 

@@ -315,36 +315,62 @@ async def analyze_complexity(payload: ComplexityRequest, request: Request) -> Co
     request.state.error_code = ai_step.get("error_code")
 
     # 3. Sandbox fix verification (FR36.3, US-66)
+    # External fix generation was gated on consent/AI state above in run_rule_based_analysis_with_ai_fallback.
+    # An already-given candidate fix (payload.suggested_patch or payload.suggested_fix) or AI-generated fix
+    # is run and verified in the sandbox. Verifying an already-given fix requires no AI consent (US-66, FR36.3).
+    candidate_fix = None
     if ai_step.get("error_code") not in ("CONSENT_MISSING", "AI_DISABLED"):
-        candidate_fix = ai_step.get("suggested_fix") or payload.suggested_patch or payload.suggested_fix
-        if candidate_fix:
-            if ai_step.get("status") == "ok" and not ai_step.get("suggested_fix"):
-                ai_step["suggested_fix"] = candidate_fix
+        candidate_fix = ai_step.get("suggested_fix")
 
-            base_n = payload.base_input_size or getattr(settings, "COMPLEXITY_BASE_INPUT_SIZE", 100)
-            meas_inputs = payload.inputs or [str(base_n), str(base_n * 2), str(base_n * 4)]
-            repeats = payload.repeats or getattr(settings, "COMPLEXITY_DEFAULT_REPEATS", 3)
-            runner = get_measurement_runner()
+    if not candidate_fix:
+        candidate_fix = payload.suggested_patch or payload.suggested_fix
 
-            verif_res = await verify_suggested_fix(
-                runner=runner,
-                request_id=payload.request_id,
-                room_id=payload.room_id,
-                language=payload.language,
-                original_code=payload.code,
-                suggested_fix=candidate_fix,
-                inputs=meas_inputs,
-                repeats=repeats,
-                original_measurements=measurements,
-                original_runs=orig_completed_runs,
-                suggested_patch_runtimes_ms=payload.suggested_patch_runtimes_ms,
-                noise_margin_pct=getattr(settings, "VERIFICATION_NOISE_MARGIN_PCT", 5.0),
-            )
-            ai_step["verified"] = verif_res.verified
-            ai_step["verified_speedup_pct"] = verif_res.verified_speedup_pct
-            ai_step["original_runtime_ms"] = verif_res.original_runtime_ms
-            ai_step["patch_runtime_ms"] = verif_res.patch_runtime_ms
-            ai_step["verification_reason"] = verif_res.reason
+    if candidate_fix:
+        if ai_step.get("error_code") not in ("CONSENT_MISSING", "AI_DISABLED") and not ai_step.get("suggested_fix"):
+            ai_step["suggested_fix"] = candidate_fix
+
+        base_n = payload.base_input_size or getattr(settings, "COMPLEXITY_BASE_INPUT_SIZE", 100)
+        meas_inputs = payload.inputs or [str(base_n), str(base_n * 2), str(base_n * 4)]
+        repeats = payload.repeats or getattr(settings, "COMPLEXITY_DEFAULT_REPEATS", 3)
+        runner = get_measurement_runner()
+
+        # If measurements were provided in payload instead of executing original code,
+        # run original code via runner so comparable outputs and baseline runtimes are captured (FR36.3).
+        if not orig_completed_runs:
+            try:
+                orig_meas_res = await runner.run_measurement(
+                    request_id=f"{payload.request_id}-orig",
+                    room_id=payload.room_id,
+                    language=payload.language,
+                    code=payload.code,
+                    inputs=meas_inputs,
+                    repeats=repeats,
+                )
+                if not orig_meas_res.refused and not orig_meas_res.failed:
+                    orig_completed_runs = orig_meas_res.completed_runs
+                    if not measurements:
+                        measurements = orig_meas_res.measurements
+            except Exception as e:
+                logger.warning("Could not execute original code for verification comparison: %s", e)
+
+        verif_res = await verify_suggested_fix(
+            runner=runner,
+            request_id=payload.request_id,
+            room_id=payload.room_id,
+            language=payload.language,
+            original_code=payload.code,
+            suggested_fix=candidate_fix,
+            inputs=meas_inputs,
+            repeats=repeats,
+            original_measurements=measurements,
+            original_runs=orig_completed_runs,
+            noise_margin_pct=getattr(settings, "VERIFICATION_NOISE_MARGIN_PCT", 5.0),
+        )
+        ai_step["verified"] = verif_res.verified
+        ai_step["verified_speedup_pct"] = verif_res.verified_speedup_pct
+        ai_step["original_runtime_ms"] = verif_res.original_runtime_ms
+        ai_step["patch_runtime_ms"] = verif_res.patch_runtime_ms
+        ai_step["verification_reason"] = verif_res.reason
 
     slow_patterns_list = [
         SlowPatternItem(
