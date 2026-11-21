@@ -45,7 +45,10 @@
         },
         "suggested_fix": { "type": ["string", "null"] },
         "verified": { "type": "boolean" },
-        "verified_speedup_pct": { "type": ["number", "null"] }
+        "verified_speedup_pct": { "type": ["number", "null"] },
+        "original_runtime_ms": { "type": ["number", "null"] },
+        "patch_runtime_ms": { "type": ["number", "null"] },
+        "verification_reason": { "type": ["string", "null"] }
       },
       "required": ["status", "error_code", "suggested_fix", "verified", "verified_speedup_pct"],
       "additionalProperties": false

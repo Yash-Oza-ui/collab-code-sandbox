@@ -4,15 +4,18 @@
   "completed_runs": [
     {
       "input": "100",
-      "runtimes_ms": [1.12, 1.15, 1.14]
+      "runtimes_ms": [1.12, 1.15, 1.14],
+      "output": "100\n"
     },
     {
       "input": "200",
-      "runtimes_ms": [4.45, 4.52, 4.48]
+      "runtimes_ms": [4.45, 4.52, 4.48],
+      "output": "200\n"
     },
     {
       "input": "400",
-      "runtimes_ms": [17.85, 18.02, 17.91]
+      "runtimes_ms": [17.85, 18.02, 17.91],
+      "output": "400\n"
     }
   ]
 }

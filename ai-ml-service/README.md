@@ -313,6 +313,64 @@ $$\ln(5000) = m \cdot \ln(N_{\text{limit}}) + c \implies N_{\text{limit}} = \ope
 - **No AI Call Required (NFR7.5):** Complexity curve fitting is pure mathematical statistics. It operates unconditionally regardless of user consent (`consent: false`) or the room AI switch (`ai_enabled: false`).
 - **Metadata-Only Logging (NFR8.2):** Service logs record only request identifiers, input sizes, slope, $R^2$, and status codes. User source code and stdin input text are **never logged**.
 
+## Optimization Sandbox Verification (US-66, FR36.3)
+
+### User Story & Purpose (US-66)
+As a student, I want a suggested fix tested before it is called an improvement so that I can trust it.
+
+A suggested optimization fix is executed in the isolated sandbox under identical conditions to the original program. It is presented as a **verified improvement** (`verified: true`) only if its measured execution time is genuinely lower than the original code under comparable conditions. If the fix fails to compile, crashes, times out, exceeds the run budget, produces mismatched output, or fails to beat the noise margin, it is presented without that label (`verified: false`), accompanied by the measured numbers and an explicit explanation.
+
+### Definition of "Lower" & "Comparable Conditions" (FR36.3)
+
+#### 1. Statistic Compared: Medians across Repeats
+- **Statistic:** The comparison uses the median execution time ($\tilde{T}$) rather than the arithmetic mean or minimum:
+  $$\tilde{T} = \operatorname{median}(t_1, t_2, \dots, t_k)$$
+  Medians are robust against transient operating system scheduling jitter, garbage collection interruptions, and container startup variance.
+- **Evaluation Input Size:** To measure algorithmic improvement, the primary comparison evaluates medians at the largest completed geometric input size ($4n$, or across the matched input points) where asymptotic complexity differences dominate over constant startup overheads.
+- **Speedup Percentage Formula:**
+  $$\text{speedup\_pct} = \frac{\tilde{T}_{\text{orig}} - \tilde{T}_{\text{fix}}}{\tilde{T}_{\text{orig}}} \times 100$$
+
+#### 2. Noise Margin Configuration (`VERIFICATION_NOISE_MARGIN_PCT`)
+- **Noise Threshold:** A fix is declared a verified improvement **only if** the speedup strictly exceeds the configured noise margin $\delta$ (default `5.0`% via `VERIFICATION_NOISE_MARGIN_PCT`):
+  $$\text{speedup\_pct} > \delta$$
+  Equivalently:
+  $$\tilde{T}_{\text{fix}} < \tilde{T}_{\text{orig}} \cdot \left(1 - \frac{\delta}{100}\right)$$
+- **Boundary Handling:**
+  - If $\text{speedup\_pct} > 5.0\%$: Marked `verified: true` with `verified_speedup_pct = round(speedup_pct, 1)`.
+  - If $0 \le \text{speedup\_pct} \le 5.0\%$: Marked `verified: false`, `verified_speedup_pct = null`. Reason explicitly states that the gain is within the 5.0% noise margin.
+  - If $\text{speedup\_pct} < 0$: Marked `verified: false`, `verified_speedup_pct = null`. Reason states that the fix is slower than the original.
+
+#### 3. Run Ordering to Reduce Drift
+- **Drift Mitigation Protocol:** Sequential execution of all original runs followed by all fix runs can suffer from systematic hardware drift (e.g. CPU thermal throttling, CPU frequency scaling changes, or changing host load).
+- **Execution Strategy:**
+  1. Identical Sandbox Constraints: Both programs execute under identical container cgroup limits (128 MB RAM, swap disabled, 5 s wall-clock time limit, 64 pids, `--network none`).
+  2. Balanced Ordering: Runs for the original and suggested fix are executed under matched conditions using the same geometric sizes ($n, 2n, 4n$) and repeats ($k=3$), minimizing temporal drift between variants.
+
+#### 4. Output Equivalence Check & Fail-Closed Enforcement
+- A faster program that produces different output is **not** an improvement.
+- **Real Runner Contract:** Under `docs/schemas/internal-run-response.json`, `completed_runs` captures process standard output (`output`) for every measured input size.
+- **Fail-Closed Missing Output Rule:** If execution outputs are missing or not captured for any measured input in either original or patch runs, the verification **fails closed** (`verified: false`, `error_code: "OUTPUT_NOT_CAPTURED"`) rather than assuming equivalence.
+- **Output Mismatch:** If an output mismatch is detected on any input size (`output_fix(input) != output_orig(input)`):
+  - `verified: false`
+  - `verified_speedup_pct: null`
+  - Reason explicitly notes: `"Output mismatch on input '<input>': fix produced different output than original code."`
+
+#### 5. Reporting Numbers & Failure Explanations
+- **Measured Numbers Included:** No claim is made without numbers. Both `original_runtime_ms` and `patch_runtime_ms` are recorded in the response alongside `verification_reason`.
+- **Untrusted Timing Guard:** Caller-supplied precomputed timings (such as `suggested_patch_runtimes_ms`) can never award `verified: true` or bypass sandbox execution; candidate fixes must execute in the sandbox runner and pass output equivalence.
+- **Compile Failure:** If the fix fails compilation (syntax error, type error, or missing symbol), `verified: false` is returned with the compiler message.
+- **Runtime Crash:** If the fix terminates with a non-zero exit code or uncaught exception, `verified: false` is returned with the crash details.
+- **Timeout (5 s limit, NFR4.1):** If the fix hits the 5,000 ms wall-time limit at any size, `verified: false` is returned naming the size that timed out.
+- **Budget Refusal (`RUN_BUDGET_EXCEEDED`, 429, US-64):** If a measurement run is refused by `execution-service` (429), the fix remains unverified and surfaces the specific budget hit (`max_runs_per_request` or `aggregate_time_budget`).
+
+### AI Gating & Consent Rules (FR12, FR35, NFR7.5)
+- **Fix Generation:** Generating a fix via an external LLM requires `consent: true` and `ai_enabled: true`. If either is missing, the AI step is skipped (`status: "skipped"`, `error_code: "CONSENT_MISSING"` or `"AI_DISABLED"`), and the external AI service is called **0 times**.
+- **Fix Verification:** Verifying an existing fix (either provided in `suggested_patch` / `suggested_fix` or already generated) is pure sandbox execution and statistics. It requires **no AI call** and operates regardless of consent. When consent is declined, AI fix generation is skipped (`CONSENT_MISSING`, `suggested_fix: null`) while the already-supplied candidate fix is verified in the sandbox.
+
+### Asynchronous Delivery & Zero Execution Delay (NFR9, CR08)
+- Optimization verification never blocks or delays the initial execution result.
+- Analysis outcomes are dispatched afterwards as a separate `analysis-result` message with `task: "complexity"` and `ai_step`.
+
 ## Slowdown Detection in Run History (US-68, FR37, T-18 v2 §16.2)
 
 ### User Story & Purpose (US-68)
