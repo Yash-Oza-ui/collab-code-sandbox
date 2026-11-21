@@ -27,6 +27,10 @@ export interface BlockedMember {
   removed_at: string
 }
 
+export interface AiSwitchResponse {
+  ai_enabled: boolean
+}
+
 export interface EditAccessResponse {
   member_id: string
   display_name: string
@@ -169,5 +173,15 @@ export function setEditAccess(ctx: HostCallContext, memberId: string, canEdit: b
       return raw as unknown as EditAccessResponse
     },
     { can_edit: canEdit },
+  )
+}
+
+/** Host-only room AI switch: the server broadcasts the resulting value to everyone. */
+export function setAiSwitch(ctx: HostCallContext, enabled: boolean) {
+  return hostRequest<AiSwitchResponse>(ctx, 'PATCH', '/ai-switch', (raw) =>
+    isObject(raw) && typeof raw.ai_enabled === 'boolean'
+      ? { ai_enabled: raw.ai_enabled }
+      : null,
+    { ai_enabled: enabled },
   )
 }

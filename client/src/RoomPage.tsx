@@ -51,6 +51,7 @@ import {
   regenerateLink,
   removeMember,
   setEditAccess,
+  setAiSwitch,
   type BlockedMember,
   type HostApiResult,
   type HostCallContext,
@@ -198,6 +199,9 @@ export default function RoomPage(props: RoomPageProps = {}) {
   const [myCanRun, setMyCanRun] = useState<boolean | null>(null)
   const [myRunDeniedReason, setMyRunDeniedReason] = useState<RunDeniedReason | null>(null)
   const [hostOnlyRun, setHostOnlyRun] = useState(false)
+  const [roomAiEnabled, setRoomAiEnabled] = useState<boolean | null>(null)
+  const [changingAiSwitch, setChangingAiSwitch] = useState(false)
+  const [aiSwitchError, setAiSwitchError] = useState<string | null>(null)
   const [runControlError, setRunControlError] = useState<string | null>(null)
   const [changingRunFor, setChangingRunFor] = useState<string | null>(null)
   const [changingHostOnly, setChangingHostOnly] = useState(false)
@@ -507,6 +511,7 @@ export default function RoomPage(props: RoomPageProps = {}) {
           setMyCanRun(typeof joined.permissions?.can_run === 'boolean' ? joined.permissions.can_run : null)
           setMyRunDeniedReason(joined.permissions?.run_denied_reason ?? null)
           setMyCanEdit(typeof joined.permissions?.can_edit === 'boolean' ? joined.permissions.can_edit : null)
+          setRoomAiEnabled(typeof joined.ai_enabled === 'boolean' ? joined.ai_enabled : null)
           const openLang = typeof joined.language === 'string' ? joined.language : undefined
           setWorkspaceLanguage(openLang)
           if (openLang) {
@@ -611,7 +616,11 @@ export default function RoomPage(props: RoomPageProps = {}) {
             }
           }
         },
+        onRoomState: (message) => {
+          if (typeof message.ai_enabled === 'boolean') setRoomAiEnabled(message.ai_enabled)
+        },
         onRoster: (roster) => {
+          if (typeof roster.ai_enabled === 'boolean') setRoomAiEnabled(roster.ai_enabled)
           rosterRef.current = roster.members ?? []
           setRoster(rosterRef.current)
           applyRosterNamesToAwareness(awareness, rosterRef.current)
@@ -1062,6 +1071,28 @@ export default function RoomPage(props: RoomPageProps = {}) {
     }
   }
 
+  async function handleToggleAiSwitch(next: boolean) {
+    if (!isHost) return
+    setAiSwitchError(null)
+    setChangingAiSwitch(true)
+    try {
+      const ctx = getHostContext()
+      if (!ctx) {
+        setAiSwitchError('Missing Host credentials. Please rejoin the room.')
+        return
+      }
+      const result = await setAiSwitch(ctx, next)
+      if (result.ok) {
+        // REST response is authoritative, as is the room-state control message.
+        setRoomAiEnabled(result.data.ai_enabled)
+      } else {
+        setAiSwitchError(result.error)
+      }
+    } finally {
+      setChangingAiSwitch(false)
+    }
+  }
+
   async function handleToggleHostOnly(next: boolean) {
     setRunControlError(null)
     setChangingHostOnly(true)
@@ -1472,6 +1503,11 @@ export default function RoomPage(props: RoomPageProps = {}) {
                 : roomMode.detail}
           </span>
         )}
+        {roomAiEnabled !== null && (
+          <span data-testid="room-ai-status" role="status">
+            AI {roomAiEnabled ? 'on' : 'off'}
+          </span>
+        )}
         {roomMode?.mode === 'pair' && (
           <span
             className={`room-edit-status-badge ${!isObserver && (isHost || myCanEdit === true) ? 'can-edit' : 'read-only'}`}
@@ -1676,6 +1712,15 @@ export default function RoomPage(props: RoomPageProps = {}) {
           </p>
         )}
 
+        {isHost && roomAiEnabled !== null && (
+          <label data-testid="host-ai-switch-label">
+            <input type="checkbox" data-testid="host-ai-switch-toggle"
+              checked={roomAiEnabled} disabled={changingAiSwitch}
+              onChange={(e) => void handleToggleAiSwitch(e.target.checked)} />{' '}
+            Enable AI for this room
+          </label>
+        )}
+        {aiSwitchError && <p role="alert" data-testid="ai-switch-error">{aiSwitchError}</p>}
         {isHost && (
           <label data-testid="host-only-run-label">
             <input

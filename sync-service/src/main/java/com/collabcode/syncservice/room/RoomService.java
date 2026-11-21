@@ -184,6 +184,14 @@ public class RoomService {
         return member;
     }
 
+    /** US-59: update the one authoritative room-level AI switch. */
+    public synchronized Room setAiEnabled(String roomId, boolean enabled) {
+        Room room = store.get(roomId);
+        if (room == null || room.isClosed()) return null;
+        room.setAiEnabled(enabled);
+        return room;
+    }
+
     /**
      * Switch Host-only running on or off for the room (US-60, V2.20; FR41.3).
      * Returns the room, or null if it is unknown. See {@link #setMemberRunAllowed}
