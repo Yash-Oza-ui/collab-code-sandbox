@@ -858,6 +858,44 @@ class SocketsAndEditCheckIntegrationTest {
     }
 
     @Test
+    void pairMode_modifiedClient_claimingCanEditAtJoin_isIgnoredAndEditsRejected() throws Exception {
+        // teach_interview: the participant attempts to claim can_edit in the join frame
+        Map<String, Object> room = createRoom("pair", "teach_interview", null);
+        String roomId = (String) room.get("room_id");
+        String ownerToken = (String) room.get("owner_token");
+
+        try (WsClient ctrlA = connectControl(roomId, SESSION_A);
+             WsClient ctrlB = connectControl(roomId, SESSION_B)) {
+            sendJoin(ctrlA, "Alice", ownerToken);
+            drainText(ctrlA, 2);
+
+            // Modified client sends join with claimed permissions / can_edit
+            ctrlB.sendText("{\"type\":\"join\",\"display_name\":\"Hacker\",\"can_edit\":true,\"permissions\":{\"can_edit\":true}}");
+            String joined = ctrlB.pollText(3, TimeUnit.SECONDS);
+            assertThat(joined).contains("\"type\":\"joined\"");
+            assertThat(joined).contains("\"can_edit\":false"); // Server ignored client claim
+
+            drainText(ctrlB, 1); // drain roster
+            drainText(ctrlA, 1); // drain roster on ctrlA
+
+            try (WsClient docA = connectDoc(roomId, "main", SESSION_A);
+                 WsClient docB = connectDoc(roomId, "main", SESSION_B)) {
+
+                // Send update frame from B
+                byte[] update = new byte[] {0, 2, 1, 2, 3};
+                docB.sendBinary(update);
+
+                String rejected = pollControlMessage(ctrlB, "edit-rejected", 3, TimeUnit.SECONDS);
+                assertThat(rejected)
+                        .contains("\"doc_id\":\"main\"")
+                        .contains("\"reason\":\"no_edit_access\"");
+
+                assertThat(docA.pollBinary(500, TimeUnit.MILLISECONDS)).isNull();
+            }
+        }
+    }
+
+    @Test
     void pairMode_participantWithoutEditAccess_awarenessAndQueryAwarenessStillHandled() throws Exception {
         Map<String, Object> room = createRoom("pair", "teach_interview", null);
         String roomId     = (String) room.get("room_id");
