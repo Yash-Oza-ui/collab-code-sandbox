@@ -13,9 +13,11 @@ import {
   approveModule,
   createModule,
   declineModule,
+  grantWriteAccess,
   listModules,
   listPendingModules,
   requestModule,
+  revokeWriteAccess,
   validateModuleName,
   type WorkspaceModule,
 } from './workspaceApi'
@@ -29,6 +31,7 @@ import {
 import {
   connectAwarenessWs,
   getCollabSessionId,
+  type AnalysisResultMessage,
   type AwarenessWsConnection,
   type JoinedMessage,
   type RosterMember,
@@ -45,6 +48,7 @@ import {
   readmitMember,
   regenerateLink,
   removeMember,
+  setEditAccess,
   type BlockedMember,
   type HostApiResult,
   type HostCallContext,
@@ -157,6 +161,7 @@ export default function RoomPage(props: RoomPageProps = {}) {
   const [pendingName, setPendingName] = useState<string | null>(null)
   const [currentLanguage, setCurrentLanguage] = useState<SupportedLanguage>('python')
   const [runOutput, setRunOutput] = useState<RunResponseData | null>(null)
+  const [analysisResults, setAnalysisResults] = useState<Record<string, AnalysisResultMessage>>({})
   // Role from the server's `joined` or `roster` message (T-10 Host badge / US-27 Observer mode)
   const [roomMode, setRoomMode] = useState<{ mode: string; detail?: string } | null>(null)
   // Open mode workspace modules (US-39, V2.6)
@@ -176,6 +181,16 @@ export default function RoomPage(props: RoomPageProps = {}) {
   const [roleChangeError, setRoleChangeError] = useState<string | null>(null)
   const [changingRoleFor, setChangingRoleFor] = useState<string | null>(null)
   const isObserver = role?.toLowerCase() === 'observer'
+  // In Open mode, editing requires being the owner or in the writers set (US-43, FR22.2)
+  const activeModule = workspaceModules.find((m) => m.module_id === activeModuleId)
+  const isModuleWriter = roomMode?.mode === 'open'
+    ? Boolean(
+        activeModule &&
+        !activeModule.pending &&
+        (activeModule.owner_member_id === myMemberId ||
+         (activeModule.writers || []).includes(myMemberId || ''))
+      )
+    : true
   // Run permission (US-60, V2.20): the server's answer for this member, from joined / roster.
   // Unknown (older server) is treated as allowed; the server still checks every run (FR41.4).
   const [myCanRun, setMyCanRun] = useState<boolean | null>(null)
@@ -184,7 +199,15 @@ export default function RoomPage(props: RoomPageProps = {}) {
   const [runControlError, setRunControlError] = useState<string | null>(null)
   const [changingRunFor, setChangingRunFor] = useState<string | null>(null)
   const [changingHostOnly, setChangingHostOnly] = useState(false)
+  // Edit permission in Pair mode (US-36, V2.21): from joined / roster.
+  const [myCanEdit, setMyCanEdit] = useState<boolean | null>(null)
+  const [changingEditFor, setChangingEditFor] = useState<string | null>(null)
+  const [editAccessError, setEditAccessError] = useState<string | null>(null)
   const isHost = role?.toLowerCase() === 'host'
+  const isEditorReadOnly =
+    isObserver ||
+    (roomMode?.mode === 'pair' && !isHost && myCanEdit === false) ||
+    (roomMode?.mode === 'open' && !isModuleWriter)
   const runDisabled = isObserver || myCanRun === false
   const runDisabledReason = runDisabled
     ? isObserver
@@ -383,12 +406,12 @@ export default function RoomPage(props: RoomPageProps = {}) {
     onDisplayNameAcceptedRef.current = onDisplayNameAccepted
   }, [onDisplayNameAccepted])
 
-  // Dynamically update Monaco Editor readOnly state if role changes while editor is mounted (US-27)
+  // Dynamically update Monaco Editor readOnly state if role, edit permissions (Pair, US-36), or write access (Open, US-43) change while editor is mounted
   useEffect(() => {
     if (editorRef.current) {
-      editorRef.current.updateOptions({ readOnly: isObserver })
+      editorRef.current.updateOptions({ readOnly: isEditorReadOnly })
     }
-  }, [isObserver])
+  }, [isEditorReadOnly])
 
   // Manage Awareness instance lifecycle tied to active Y.Doc and WebSocket relay
   useEffect(() => {
@@ -481,6 +504,7 @@ export default function RoomPage(props: RoomPageProps = {}) {
           applyRole(joined.role)
           setMyCanRun(typeof joined.permissions?.can_run === 'boolean' ? joined.permissions.can_run : null)
           setMyRunDeniedReason(joined.permissions?.run_denied_reason ?? null)
+          setMyCanEdit(typeof joined.permissions?.can_edit === 'boolean' ? joined.permissions.can_edit : null)
           const openLang = typeof joined.language === 'string' ? joined.language : undefined
           setWorkspaceLanguage(openLang)
           if (openLang) {
@@ -617,6 +641,9 @@ export default function RoomPage(props: RoomPageProps = {}) {
               setMyCanRun(me.permissions.can_run)
               setMyRunDeniedReason(me.permissions.run_denied_reason ?? null)
             }
+            if (me?.permissions && typeof me.permissions.can_edit === 'boolean') {
+              setMyCanEdit(me.permissions.can_edit)
+            }
           }
           setHostOnlyRun(roster.host_only_run === true)
         },
@@ -727,6 +754,12 @@ export default function RoomPage(props: RoomPageProps = {}) {
         onRunResult: (msg) => {
           const parsed = parseRunResultFrame(msg, roomId)
           if (parsed.valid) showRunResult(parsed.data)
+        },
+        onAnalysisResult: (msg) => {
+          setAnalysisResults((prev) => ({
+            ...prev,
+            [msg.request_id]: msg,
+          }))
         },
         onEditRejected: (msg) => {
           let reasonText = 'You do not have permission to edit this document.'
@@ -1038,6 +1071,25 @@ export default function RoomPage(props: RoomPageProps = {}) {
     }
   }
 
+  async function handleToggleEditAccess(member: RosterMember, allow: boolean) {
+    if (!roomId || !isHost) return
+    setEditAccessError(null)
+    setChangingEditFor(member.member_id)
+    try {
+      const ctx = getHostContext()
+      if (!ctx) {
+        setEditAccessError('Missing Host credentials. Please rejoin the room.')
+        return
+      }
+      const result = await setEditAccess(ctx, member.member_id, allow)
+      if (!result.ok) {
+        setEditAccessError(result.error)
+      }
+    } finally {
+      setChangingEditFor(null)
+    }
+  }
+
   const handleSelectModule = useCallback(
     (moduleId: string) => {
       setActiveModuleId(moduleId)
@@ -1195,6 +1247,80 @@ export default function RoomPage(props: RoomPageProps = {}) {
     [roomId, wsOptions?.fetchFn, wsOptions?.syncWsUrl],
   )
 
+  const handleGrantWriteAccess = useCallback(
+    async (moduleId: string, memberId: string) => {
+      if (!roomId) return
+      setWorkspaceError(null)
+      const token = readOwnerToken(roomId)
+      const currentSessionId = sessionIdRef.current ?? wsOptions?.sessionId ?? getCollabSessionId()
+      const syncBase = wsOptions?.syncWsUrl
+        ? wsOptions.syncWsUrl.replace(/^ws/, 'http').replace(/\/ws\/rooms.*$/, '')
+        : undefined
+      const res = await grantWriteAccess(
+        {
+          roomId,
+          sessionId: currentSessionId,
+          ownerToken: token,
+          baseUrl: syncBase,
+          fetchFn: wsOptions?.fetchFn,
+        },
+        moduleId,
+        memberId,
+      )
+      if (!res.ok) {
+        setWorkspaceError(res.error)
+      } else {
+        setWorkspaceModules((prev) => {
+          const idx = prev.findIndex((m) => m.module_id === moduleId)
+          if (idx >= 0) {
+            const copy = [...prev]
+            copy[idx] = res.data
+            return copy
+          }
+          return [...prev, res.data]
+        })
+      }
+    },
+    [roomId, wsOptions?.fetchFn, wsOptions?.syncWsUrl],
+  )
+
+  const handleRevokeWriteAccess = useCallback(
+    async (moduleId: string, memberId: string) => {
+      if (!roomId) return
+      setWorkspaceError(null)
+      const token = readOwnerToken(roomId)
+      const currentSessionId = sessionIdRef.current ?? wsOptions?.sessionId ?? getCollabSessionId()
+      const syncBase = wsOptions?.syncWsUrl
+        ? wsOptions.syncWsUrl.replace(/^ws/, 'http').replace(/\/ws\/rooms.*$/, '')
+        : undefined
+      const res = await revokeWriteAccess(
+        {
+          roomId,
+          sessionId: currentSessionId,
+          ownerToken: token,
+          baseUrl: syncBase,
+          fetchFn: wsOptions?.fetchFn,
+        },
+        moduleId,
+        memberId,
+      )
+      if (!res.ok) {
+        setWorkspaceError(res.error)
+      } else {
+        setWorkspaceModules((prev) => {
+          const idx = prev.findIndex((m) => m.module_id === moduleId)
+          if (idx >= 0) {
+            const copy = [...prev]
+            copy[idx] = res.data
+            return copy
+          }
+          return [...prev, res.data]
+        })
+      }
+    },
+    [roomId, wsOptions?.fetchFn, wsOptions?.syncWsUrl],
+  )
+
   // A run-result frame can carry a stale or untrusted display_name. Only the
   // server roster's member_id -> display_name mapping may label the runner.
   const runnerMember = runOutput?.runner?.member_id
@@ -1311,6 +1437,8 @@ export default function RoomPage(props: RoomPageProps = {}) {
           onRequestModule={handleRequestModule}
           onApproveModule={handleApproveModule}
           onDeclineModule={handleDeclineModule}
+          onGrantWriteAccess={handleGrantWriteAccess}
+          onRevokeWriteAccess={handleRevokeWriteAccess}
           creationError={workspaceError}
           isCreating={isCreatingModule}
           roster={roster}
@@ -1350,6 +1478,28 @@ export default function RoomPage(props: RoomPageProps = {}) {
                   )}
 
                   {isMemberObserver && <span>Read-only</span>}
+
+                  {roomMode?.mode === 'pair' && isHost && !isSelf && !isMemberObserver && member.role.toLowerCase() === 'participant' && (
+                    member.permissions?.can_edit ? (
+                      <button
+                        type="button"
+                        data-testid={`toggle-edit-access-${member.member_id}`}
+                        onClick={() => void handleToggleEditAccess(member, false)}
+                        disabled={changingEditFor === member.member_id}
+                      >
+                        {changingEditFor === member.member_id ? 'Changing...' : 'Revoke Edit'}
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        data-testid={`toggle-edit-access-${member.member_id}`}
+                        onClick={() => void handleToggleEditAccess(member, true)}
+                        disabled={changingEditFor === member.member_id}
+                      >
+                        {changingEditFor === member.member_id ? 'Changing...' : 'Grant Edit'}
+                      </button>
+                    )
+                  )}
 
                   {isHost && !isSelf && !isMemberObserver && member.role.toLowerCase() !== 'host' && (
                     member.permissions?.run_denied_reason === 'run_revoked' ? (
@@ -1453,6 +1603,12 @@ export default function RoomPage(props: RoomPageProps = {}) {
           </p>
         )}
 
+        {editAccessError && (
+          <p role="alert" data-testid="edit-access-error">
+            {editAccessError}
+          </p>
+        )}
+
         {isHost && blocked.length > 0 && (
           <div data-testid="blocked-members" aria-label="Removed members">
             <h4>Removed ({blocked.length})</h4>
@@ -1510,7 +1666,12 @@ export default function RoomPage(props: RoomPageProps = {}) {
         disabled={runDisabled}
         disabledReason={runDisabledReason}
       >
-        {displayRunOutput ? <RunOutputPanel result={displayRunOutput} /> : null}
+        {displayRunOutput ? (
+          <RunOutputPanel
+            result={displayRunOutput}
+            analysisResult={analysisResults[displayRunOutput.request_id] ?? null}
+          />
+        ) : null}
       </RunPanel>
       <div className="room-editor">
         <Editor
@@ -1518,10 +1679,10 @@ export default function RoomPage(props: RoomPageProps = {}) {
           language={currentLanguage}
           defaultLanguage="python"
           defaultValue=""
-          options={{ readOnly: isObserver }}
+          options={{ readOnly: isEditorReadOnly }}
           onMount={(editor: MonacoEditor.IStandaloneCodeEditor) => {
             editorRef.current = editor
-            editor.updateOptions({ readOnly: isObserver })
+            editor.updateOptions({ readOnly: isEditorReadOnly })
             const doc = getActiveDoc()
             bindEditorToDoc(doc)
           }}

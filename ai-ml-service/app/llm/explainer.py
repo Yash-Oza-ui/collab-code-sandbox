@@ -61,6 +61,64 @@ def enforce_sentence_limit(text: str, max_sentences: int = 3) -> str:
     return trimmed
 
 
+def parse_crash_explanation_output(
+    text: str,
+    line_number: Optional[int] = None,
+    error_type: Optional[str] = None,
+) -> tuple[str, Optional[str]]:
+    """Parse raw LLM output into a 3-sentence plain prose explanation and a suggested fix (FR13.1, FR39.3, US-74).
+
+    Returns:
+        (explanation, suggested_fix)
+    """
+    raw_text = text.strip() if text else ""
+    if not raw_text:
+        return "", None
+
+    # Match fix header on raw text before newlines are collapsed
+    fix_match = re.search(
+        r"(?:^|\n|(?<=[.!?]))\s*(?:(?:Suggested|Possible|Recommended)\s+Fix|Fix):\s*",
+        raw_text,
+        re.IGNORECASE,
+    )
+
+    if fix_match:
+        raw_expl = raw_text[:fix_match.start()].strip()
+        raw_fix = raw_text[fix_match.end():].strip()
+
+        # Remove "Explanation:" or "Cause:" prefix if present
+        raw_expl = re.sub(r"^(?:Explanation|Cause):\s*", "", raw_expl, flags=re.IGNORECASE).strip()
+
+        explanation = enforce_sentence_limit(raw_expl, max_sentences=3)
+        suggested_fix = clean_markdown(raw_fix) if raw_fix else None
+        return explanation, suggested_fix
+
+    # If no explicit fix header:
+    # Check if text starts with "Explanation:" or "Cause:"
+    raw_expl = re.sub(r"^(?:Explanation|Cause):\s*", "", raw_text, flags=re.IGNORECASE).strip()
+    explanation = enforce_sentence_limit(raw_expl, max_sentences=3)
+
+    err_lower = (error_type or "").lower()
+    if any(k in err_lower for k in ("overflow", "underflow", "shift", "zero", "divide", "float")):
+        suggested_fix = (
+            f"Inspect line {line_number} to prevent undefined arithmetic or operations."
+            if line_number
+            else "Verify operand ranges and valid mathematical values."
+        )
+    elif any(k in err_lower for k in ("buffer", "heap", "stack", "global", "bounds", "address")):
+        suggested_fix = (
+            f"Add boundary check before line {line_number}."
+            if line_number
+            else "Verify buffer bounds and pointer validity."
+        )
+    elif line_number:
+        suggested_fix = f"Inspect and fix the faulty statement at line {line_number}."
+    else:
+        suggested_fix = "Verify pointer validity and operational constraints."
+
+    return explanation, suggested_fix
+
+
 async def call_llm_api(
     prompt: str,
     consent: Optional[bool] = None,

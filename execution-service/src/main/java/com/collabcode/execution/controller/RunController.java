@@ -25,8 +25,11 @@ import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 
 /**
  * Run endpoint – T-17 V2.8 to V2.12 (Decisions 8 and 9, T-19) & US-11 (FR16).
@@ -56,6 +59,7 @@ public class RunController {
     private final PermissionLookupService permissionLookupService;
     private final SavedVersionReader savedVersionReader;
     private final ExecutionLimitsProperties limitsProperties;
+    private final com.collabcode.execution.analysis.AnalysisService analysisService;
 
     @org.springframework.beans.factory.annotation.Autowired
     public RunController(
@@ -64,13 +68,25 @@ public class RunController {
             RunQueueGate runQueueGate,
             PermissionLookupService permissionLookupService,
             SavedVersionReader savedVersionReader,
-            ExecutionLimitsProperties limitsProperties) {
+            ExecutionLimitsProperties limitsProperties,
+            @org.springframework.beans.factory.annotation.Autowired(required = false) com.collabcode.execution.analysis.AnalysisService analysisService) {
         this.codeRunner = codeRunner;
         this.broadcastService = broadcastService;
         this.runQueueGate = runQueueGate;
         this.permissionLookupService = permissionLookupService;
         this.savedVersionReader = savedVersionReader;
         this.limitsProperties = limitsProperties;
+        this.analysisService = analysisService;
+    }
+
+    public RunController(
+            CodeRunner codeRunner,
+            RoomBroadcastService broadcastService,
+            RunQueueGate runQueueGate,
+            PermissionLookupService permissionLookupService,
+            SavedVersionReader savedVersionReader,
+            ExecutionLimitsProperties limitsProperties) {
+        this(codeRunner, broadcastService, runQueueGate, permissionLookupService, savedVersionReader, limitsProperties, null);
     }
 
     @PostMapping("/runs")
@@ -193,7 +209,58 @@ public class RunController {
         // --- Broadcast to room or targeted session through sync-service (FR4.5, V2.10) ---
         broadcastService.broadcast(req.getRoom_id(), req.getSession_id(), response);
 
+        // --- Asynchronous AI analysis follow-up (NFR9, T-18 Decision 4 & 6) ---
+        if (analysisService != null && req.getTask() != null && !req.getTask().isBlank()) {
+            triggerAsyncAnalysis(req, runSpec, response, lookup);
+        }
+
         return ResponseEntity.ok(response);
+    }
+
+    private void triggerAsyncAnalysis(
+            RunRequest req,
+            RunSpec runSpec,
+            RunResponse response,
+            PermissionLookupResult lookup) {
+        try {
+            String primaryCode = "";
+            if (runSpec != null && runSpec.getFiles() != null && !runSpec.getFiles().isEmpty()) {
+                primaryCode = runSpec.getFiles().get(0).getContent();
+            }
+
+            Map<String, Object> taskPayload = new LinkedHashMap<>();
+            String taskLower = req.getTask().toLowerCase();
+
+            if ("crash_explanation".equals(taskLower) || "crash-explanation".equals(taskLower)) {
+                taskPayload.put("sanitizer_output", response.getStderr() != null ? response.getStderr() : "");
+                taskPayload.put("code_snippet", primaryCode);
+            } else if ("slowdown".equals(taskLower)) {
+                taskPayload.put("input_hash", response.getInputHash() != null ? response.getInputHash() : "");
+                Map<String, Object> currentRun = new LinkedHashMap<>();
+                currentRun.put("execution_time_ms", response.getExecution_time_ms());
+                currentRun.put("peak_memory_mb", response.getPeak_memory_mb());
+                currentRun.put("code", primaryCode);
+                taskPayload.put("current_run", currentRun);
+            } else {
+                taskPayload.put("code", primaryCode);
+            }
+
+            String analysisId = UUID.randomUUID().toString();
+            analysisService.performAnalysisAsync(
+                    req.getRequest_id(),
+                    analysisId,
+                    req.getRoom_id(),
+                    req.getSession_id(),
+                    response.getVisibility(),
+                    taskLower,
+                    req.getLanguage().toLowerCase(),
+                    req.getConsent() != null ? req.getConsent() : false,
+                    lookup.isAi_enabled(),
+                    taskPayload
+            );
+        } catch (Exception e) {
+            // Must never fail or delay run result (NFR9)
+        }
     }
 
     private void validateSourceStructure(String requestId, String language, RunSource source) {

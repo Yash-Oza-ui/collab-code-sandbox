@@ -23,6 +23,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -395,5 +396,114 @@ class ModuleControllerUnitTest {
                         .header("X-Session-Id", GUEST_SESSION))
                 .andExpect(status().isForbidden())
                 .andExpect(jsonPath("$.error.code").value("NOT_OWNER"));
+    }
+
+    @Test
+    @DisplayName("Owner grants write access to participant (FR22.1)")
+    void grantWriteAccess_asOwner_addsWriterAndBroadcasts() throws Exception {
+        Member host = roomService.findMemberBySession(OPEN_ROOM_ID, HOST_SESSION);
+        Member guest = roomService.findMemberBySession(OPEN_ROOM_ID, GUEST_SESSION);
+        ModuleRecord mod = moduleService.createApprovedModule(OPEN_ROOM_ID, host, "shared.py");
+
+        mvc.perform(post("/v1/rooms/" + OPEN_ROOM_ID + "/modules/" + mod.moduleId() + "/writers")
+                        .header("X-Session-Id", HOST_SESSION)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"member_id\":\"" + guest.getMemberId() + "\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.module_id").value(mod.moduleId()))
+                .andExpect(jsonPath("$.writers[0]").value(guest.getMemberId()));
+
+        assertThat(broadcasts).isNotEmpty();
+        Map<String, Object> last = broadcasts.get(broadcasts.size() - 1);
+        assertThat(last.get("type")).isEqualTo("module-updated");
+        assertThat((Iterable<?>) last.get("writers")).asList().contains(guest.getMemberId());
+    }
+
+    @Test
+    @DisplayName("Host with token grants write access to Host on participant-owned module (FR22.1)")
+    void grantWriteAccess_asHost_addsWriter() throws Exception {
+        Member guest = roomService.findMemberBySession(OPEN_ROOM_ID, GUEST_SESSION);
+        Member host = roomService.findMemberBySession(OPEN_ROOM_ID, HOST_SESSION);
+        ModuleRecord mod = moduleService.createModule(OPEN_ROOM_ID, guest.getMemberId(), "guest.py", false);
+
+        mvc.perform(post("/v1/rooms/" + OPEN_ROOM_ID + "/modules/" + mod.moduleId() + "/writers")
+                        .header("X-Session-Id", HOST_SESSION)
+                        .header("X-Owner-Token", OWNER_TOKEN)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"member_id\":\"" + host.getMemberId() + "\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.writers[0]").value(host.getMemberId()));
+    }
+
+    @Test
+    @DisplayName("Non-owner non-Host cannot grant write access (403 NOT_MODULE_OWNER)")
+    void grantWriteAccess_asNonOwnerNonHost_returns403() throws Exception {
+        Member host = roomService.findMemberBySession(OPEN_ROOM_ID, HOST_SESSION);
+        Member guest = roomService.findMemberBySession(OPEN_ROOM_ID, GUEST_SESSION);
+        ModuleRecord mod = moduleService.createApprovedModule(OPEN_ROOM_ID, host, "host-locked.py");
+
+        mvc.perform(post("/v1/rooms/" + OPEN_ROOM_ID + "/modules/" + mod.moduleId() + "/writers")
+                        .header("X-Session-Id", GUEST_SESSION)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"member_id\":\"" + guest.getMemberId() + "\"}"))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.error.code").value("NOT_MODULE_OWNER"));
+    }
+
+    @Test
+    @DisplayName("Host without token cannot grant write access on participant module (403 NOT_OWNER)")
+    void grantWriteAccess_asHostWithoutToken_returns403() throws Exception {
+        Member guest = roomService.findMemberBySession(OPEN_ROOM_ID, GUEST_SESSION);
+        Member host = roomService.findMemberBySession(OPEN_ROOM_ID, HOST_SESSION);
+        ModuleRecord mod = moduleService.createModule(OPEN_ROOM_ID, guest.getMemberId(), "guest-mod.py", false);
+
+        mvc.perform(post("/v1/rooms/" + OPEN_ROOM_ID + "/modules/" + mod.moduleId() + "/writers")
+                        .header("X-Session-Id", HOST_SESSION)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"member_id\":\"" + host.getMemberId() + "\"}"))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.error.code").value("NOT_OWNER"));
+    }
+
+    @Test
+    @DisplayName("Grant write access in Pair mode returns 422 INVALID_REQUEST")
+    void grantWriteAccess_pairMode_returns422() throws Exception {
+        mvc.perform(post("/v1/rooms/" + PAIR_ROOM_ID + "/modules/mod_test/writers")
+                        .header("X-Session-Id", HOST_SESSION)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"member_id\":\"m_any\"}"))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.error.code").value("INVALID_REQUEST"));
+    }
+
+    @Test
+    @DisplayName("Owner revokes write access from participant (FR22.1)")
+    void revokeWriteAccess_asOwner_removesWriterAndBroadcasts() throws Exception {
+        Member host = roomService.findMemberBySession(OPEN_ROOM_ID, HOST_SESSION);
+        Member guest = roomService.findMemberBySession(OPEN_ROOM_ID, GUEST_SESSION);
+        ModuleRecord mod = moduleService.createApprovedModule(OPEN_ROOM_ID, host, "shared2.py");
+        mod.addWriter(guest.getMemberId());
+
+        mvc.perform(delete("/v1/rooms/" + OPEN_ROOM_ID + "/modules/" + mod.moduleId() + "/writers/" + guest.getMemberId())
+                        .header("X-Session-Id", HOST_SESSION))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.writers").isEmpty());
+
+        assertThat(broadcasts).isNotEmpty();
+        Map<String, Object> last = broadcasts.get(broadcasts.size() - 1);
+        assertThat(last.get("type")).isEqualTo("module-updated");
+        assertThat((List<?>) last.get("writers")).isEmpty();
+    }
+
+    @Test
+    @DisplayName("Cannot revoke write access from module owner (422 INVALID_REQUEST)")
+    void revokeWriteAccess_fromOwner_returns422() throws Exception {
+        Member host = roomService.findMemberBySession(OPEN_ROOM_ID, HOST_SESSION);
+        ModuleRecord mod = moduleService.createApprovedModule(OPEN_ROOM_ID, host, "owner-cannot-lose.py");
+
+        mvc.perform(delete("/v1/rooms/" + OPEN_ROOM_ID + "/modules/" + mod.moduleId() + "/writers/" + host.getMemberId())
+                        .header("X-Session-Id", HOST_SESSION))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.error.code").value("INVALID_REQUEST"));
     }
 }

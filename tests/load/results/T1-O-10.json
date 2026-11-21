@@ -1,0 +1,39 @@
+{
+  "kind": "benchmark",
+  "variant": "T1-O",
+  "users": 10,
+  "typists": 5,
+  "edits_per_typist": 50,
+  "typing_interval_ms": 200,
+  "seed_lines": 1000,
+  "edit_check": "enabled (NFR13) — verified against the server",
+  "edit_check_mode": "on",
+  "latency_ms": {
+    "samples": 1250,
+    "p50_ms": 5.49,
+    "p95_ms": 9.73,
+    "max_ms": 13.42
+  },
+  "nfr1_target_p95_ms": 200,
+  "nfr1_met": true,
+  "room_full_check": {
+    "status": "PENDING_US-63",
+    "refused": false,
+    "note": "People limit not enforced in main yet (US-63). Extra join was accepted; once US-63 lands this records a ROOM_FULL refusal."
+  },
+  "limits_in_force": {
+    "people_limit": "US-63 (not enforced in main)",
+    "module_limit": "US-63",
+    "module_size_limit": "1 MiB document frame cap (DocumentHandler); per-module content limit is US-63"
+  },
+  "workload_note": "Test set-up T1: ~5 chars/sec per typist, ~1000-line document (T1-O: 5 modules x ~200 lines). Every typist is measured at the receiving users.",
+  "machine": {
+    "hostname": "LAPTOP-OKMMDS1K",
+    "platform": "Windows_NT 10.0.26200",
+    "arch": "x64",
+    "cpus": 12,
+    "node": "v24.19.0"
+  },
+  "ran_at": "2026-11-20T17:16:04.104Z",
+  "disclaimer": "Development-machine run (CR03). Final-host numbers are US-31: re-run with --url pointing at the deployed sync-service."
+}

@@ -154,6 +154,27 @@ public class RoomService {
     }
 
     /**
+     * Give or take back edit access for a participant in Pair mode (US-36, V2.21; FR19.1).
+     * Returns the updated member, or null if the room or member is unknown.
+     * The caller has already checked that the room is in Pair mode and the target is a participant.
+     *
+     * <p>This is the only place edit access changes for an existing member, so the
+     * audit log of US-58 (FR34) records the change event from here.
+     */
+    public synchronized Member setEditAccess(String roomId, String memberId, boolean canEdit) {
+        Room room = store.get(roomId);
+        if (room == null) {
+            return null;
+        }
+        Member member = room.getMembers().get(memberId);
+        if (member == null) {
+            return null;
+        }
+        member.setCanEdit(canEdit);
+        return member;
+    }
+
+    /**
      * Switch Host-only running on or off for the room (US-60, V2.20; FR41.3).
      * Returns the room, or null if it is unknown. See {@link #setMemberRunAllowed}
      * for the audit (US-58) note.

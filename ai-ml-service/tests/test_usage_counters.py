@@ -661,3 +661,56 @@ def test_usage_tracker_sources_budget_and_cost_from_settings():
         assert usage["monthly_spend_usd"] == 20.0
         assert usage["alert_80_percent_triggered"] is True
         assert usage["cost_cap_reached"] is False
+
+
+def test_fallback_counter_tracks_all_error_codes_exactly_once():
+    """Verify fallback activations for all US-78 error codes increment exactly once (US-78, US-75)."""
+    room_id = "room-fallback-codes"
+    error_codes = [
+        "CONSENT_MISSING",
+        "AI_DISABLED",
+        "COST_CAP_REACHED",
+        "ROOM_RATE_LIMITED",
+        "RATE_LIMITED_PROVIDER",
+        "PROVIDER_ERROR",
+        "PROVIDER_TIMEOUT",
+    ]
+
+    for idx, code in enumerate(error_codes, start=1):
+        record_fallback(room_id)
+        room_usage = get_room_usage(room_id)
+        total_usage = get_total_usage()
+        assert room_usage["fallback_activations"] == idx
+        assert total_usage["total_fallback_activations"] == idx
+
+
+def test_slowdown_fallback_does_not_double_count():
+    """Verify that a slowdown regression AI explanation failure increments fallback exactly once (US-78)."""
+    room_id = "room-slowdown-dedup"
+
+    payload = {
+        "request_id": "req-slow-1",
+        "room_id": room_id,
+        "analysis_id": "ana-slow-1",
+        "request_type": "slowdown",
+        "language": "python",
+        "consent": False,
+        "ai_enabled": True,
+        "input_hash": "a" * 64,
+        "current_run": {
+            "execution_time_ms": 100.0,
+            "peak_memory_mb": 10.0,
+            "code": "print(1)",
+        },
+    }
+
+    resp = client.post("/v1/analyses/slowdown", json=payload)
+    assert resp.status_code == 200
+    assert resp.json()["ai_step"]["status"] == "skipped"
+    assert resp.json()["ai_step"]["error_code"] == "CONSENT_MISSING"
+
+    room_usage = get_room_usage(room_id)
+    assert room_usage["fallback_activations"] == 1
+    total = get_total_usage()
+    assert total["total_fallback_activations"] == 1
+

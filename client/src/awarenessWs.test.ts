@@ -1954,6 +1954,53 @@ describe('T-20 WebSocket connection and multi-client awareness synchronization',
       docB.destroy()
     }
   })
+
+  it('broadcasts analysis-result frames to registered onAnalysisResult callbacks (US-78)', async () => {
+    const relay = new TestRelay()
+    const doc = new Y.Doc()
+    const received: string[] = []
+
+    const conn = connectAwarenessWs({
+      roomId: 'test-analysis-room',
+      displayName: 'Alice',
+      doc,
+      awareness: createAwareness(doc),
+      syncWsUrl: 'ws://localhost:8081/ws/rooms',
+      sessionId: 'sess-alice',
+      WebSocketClass: function (url: string) {
+        return relay.createClient(url)
+      } as unknown as typeof WebSocket,
+      onAnalysisResult: (msg) => {
+        received.push(msg.message)
+      },
+    })
+
+    try {
+      await new Promise((r) => setTimeout(r, 40))
+
+      const frame = JSON.stringify({
+        type: 'analysis-result',
+        request_id: '0b9d2f3e-7a41-4c58-9e1b-5d3c8a6f2e10',
+        analysis_id: 'an-789',
+        room_id: 'test-analysis-room',
+        task: 'complexity',
+        status: 'fallback',
+        ai_step: { status: 'skipped', error_code: 'CONSENT_MISSING' },
+        message: 'AI analysis is unavailable because AI consent is turned off.',
+      })
+
+      for (const [client, meta] of relay.controlClients.entries()) {
+        if (meta.roomId === 'test-analysis-room') client.receiveText(frame)
+      }
+
+      await new Promise((r) => setTimeout(r, 10))
+
+      expect(received).toEqual(['AI analysis is unavailable because AI consent is turned off.'])
+    } finally {
+      conn.destroy()
+      doc.destroy()
+    }
+  })
 })
 
 
