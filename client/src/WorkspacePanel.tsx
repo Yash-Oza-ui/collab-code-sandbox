@@ -15,16 +15,19 @@ export interface WorkspacePanelProps {
   onRequestModule?: (name: string) => Promise<void> | void
   onApproveModule?: (moduleId: string, ownerMemberId?: string) => Promise<void> | void
   onDeclineModule?: (moduleId: string) => Promise<void> | void
+  onToggleRunnable?: (moduleId: string, runnable: boolean) => Promise<void> | void
+  onSetEntry?: (moduleId: string) => Promise<void> | void
   onGrantWriteAccess?: (moduleId: string, memberId: string) => Promise<void> | void
   onRevokeWriteAccess?: (moduleId: string, memberId: string) => Promise<void> | void
   creationError?: string | null
+  actionError?: string | null
   isCreating?: boolean
   roster?: Array<{ member_id: string; display_name: string; role: string }>
   myMemberId?: string | null
 }
 
 export default function WorkspacePanel({
-  roomId: _roomId,
+  roomId,
   isHost,
   isObserver = false,
   language,
@@ -35,9 +38,12 @@ export default function WorkspacePanel({
   onRequestModule,
   onApproveModule,
   onDeclineModule,
+  onToggleRunnable,
+  onSetEntry,
   onGrantWriteAccess,
   onRevokeWriteAccess,
   creationError,
+  actionError,
   isCreating = false,
   roster = [],
   myMemberId,
@@ -80,18 +86,33 @@ export default function WorkspacePanel({
   }
 
   const pendingModules = modules.filter((m) => m.pending)
+  const approvedModules = modules.filter((m) => !m.pending)
+  const entryModule = approvedModules.find((m) => m.is_entry)
 
   return (
     <section
       className="room-workspace-panel"
       aria-label="Workspace modules"
       data-testid="workspace-panel"
+      data-room-id={roomId}
     >
       <div className="workspace-header">
         <h3 data-testid="workspace-title">Workspace ({modules.length})</h3>
         {language && (
           <span className="workspace-language-badge" data-testid="workspace-language">
             {language}
+          </span>
+        )}
+      </div>
+
+      <div className="workspace-entry-status" data-testid="workspace-entry-status">
+        {entryModule ? (
+          <span className="entry-file-indicator" data-testid="entry-file-indicator">
+            Entry file: <strong>{entryModule.name}</strong>
+          </span>
+        ) : (
+          <span className="no-entry-file-message" data-testid="no-entry-file-message">
+            No entry file set
           </span>
         )}
       </div>
@@ -105,43 +126,79 @@ export default function WorkspacePanel({
           {modules.map((m) => {
             const isActive = m.module_id === activeModuleId
             const ownerName = getMemberDisplayName(m.owner_member_id)
+            const isOwner = Boolean(myMemberId && m.owner_member_id === myMemberId)
+            const isRunnable = m.runnable !== false
+
             return (
               <li
                 key={m.module_id}
                 data-testid={`module-${m.module_id}`}
                 className={`workspace-module-item ${isActive ? 'active' : ''}`}
               >
-                <button
-                  type="button"
-                  data-testid={`select-module-${m.module_id}`}
-                  className="module-select-button"
-                  onClick={() => onSelectModule(m.module_id)}
-                  aria-current={isActive ? 'true' : undefined}
-                >
-                  <span className="module-name">{m.name}</span>
-                  {m.is_entry && (
+                <div className="module-item-header">
+                  <button
+                    type="button"
+                    data-testid={`select-module-${m.module_id}`}
+                    className="module-select-button"
+                    onClick={() => onSelectModule(m.module_id)}
+                    aria-current={isActive ? 'true' : undefined}
+                  >
+                    <span className="module-name">{m.name}</span>
                     <span
-                      className="module-badge entry-badge"
-                      data-testid={`entry-badge-${m.module_id}`}
+                      className={`module-badge ${isRunnable ? 'runnable-badge' : 'non-runnable-badge'}`}
+                      data-testid={`runnable-badge-${m.module_id}`}
                     >
-                      entry
+                      {isRunnable ? 'runnable' : 'non-runnable'}
                     </span>
-                  )}
-                  {m.pending && (
-                    <span
-                      className="module-badge pending-badge"
-                      data-testid={`pending-badge-${m.module_id}`}
-                    >
-                      pending
-                    </span>
-                  )}
-                </button>
-                <span
-                  className="module-owner-label"
-                  data-testid={`owner-label-${m.module_id}`}
-                >
-                  Owner: {ownerName}
-                </span>
+                    {m.is_entry && (
+                      <span
+                        className="module-badge entry-badge"
+                        data-testid={`entry-badge-${m.module_id}`}
+                      >
+                        entry
+                      </span>
+                    )}
+                    {m.pending && (
+                      <span
+                        className="module-badge pending-badge"
+                        data-testid={`pending-badge-${m.module_id}`}
+                      >
+                        pending
+                      </span>
+                    )}
+                  </button>
+                  <span
+                    className="module-owner-label"
+                    data-testid={`owner-label-${m.module_id}`}
+                  >
+                    Owner: {ownerName}
+                  </span>
+                </div>
+
+                {!m.pending && (
+                  <div className="module-controls" data-testid={`module-controls-${m.module_id}`}>
+                    {isOwner && onToggleRunnable && (
+                      <button
+                        type="button"
+                        className="module-toggle-runnable-btn"
+                        data-testid={`toggle-runnable-${m.module_id}`}
+                        onClick={() => void onToggleRunnable(m.module_id, !isRunnable)}
+                      >
+                        {isRunnable ? 'Mark non-runnable' : 'Mark runnable'}
+                      </button>
+                    )}
+                    {isHost && onSetEntry && !m.is_entry && (
+                      <button
+                        type="button"
+                        className="module-set-entry-btn"
+                        data-testid={`set-entry-${m.module_id}`}
+                        onClick={() => void onSetEntry(m.module_id)}
+                      >
+                        Set as entry
+                      </button>
+                    )}
+                  </div>
+                )}
 
                 {/* Write Access Control (US-43 / FR22.1) */}
                 {!m.pending && (isHost || (myMemberId && m.owner_member_id === myMemberId)) && (
@@ -165,8 +222,8 @@ export default function WorkspacePanel({
                         <span className="writers-dropdown-title">Manage write access:</span>
                         <ul className="writers-participants-list" data-testid={`writers-list-${m.module_id}`}>
                           {roster.map((p) => {
-                            const isOwner = p.member_id === m.owner_member_id
-                            const isWriter = isOwner || (m.writers || []).includes(p.member_id)
+                            const isOwnerMember = p.member_id === m.owner_member_id
+                            const isWriter = isOwnerMember || (m.writers || []).includes(p.member_id)
                             return (
                               <li
                                 key={p.member_id}
@@ -181,9 +238,9 @@ export default function WorkspacePanel({
                                     data-testid={`writer-toggle-${m.module_id}-${p.member_id}`}
                                     aria-label={`Give write access to ${p.display_name} for ${m.name}`}
                                     checked={isWriter}
-                                    disabled={isOwner}
+                                    disabled={isOwnerMember}
                                     onChange={(e) => {
-                                      if (isOwner) return
+                                      if (isOwnerMember) return
                                       if (e.target.checked) {
                                         void onGrantWriteAccess?.(m.module_id, p.member_id)
                                       } else {
@@ -192,7 +249,7 @@ export default function WorkspacePanel({
                                     }}
                                   />
                                   <span className="writer-display-name">{p.display_name}</span>
-                                  {isOwner && <span className="writer-owner-tag">(Owner)</span>}
+                                  {isOwnerMember && <span className="writer-owner-tag">(Owner)</span>}
                                 </label>
                               </li>
                             )
@@ -369,9 +426,9 @@ export default function WorkspacePanel({
         </p>
       )}
 
-      {creationError && (
+      {(actionError || creationError) && (
         <p role="alert" data-testid="workspace-error" className="workspace-error-message">
-          {creationError}
+          {actionError || creationError}
         </p>
       )}
     </section>
