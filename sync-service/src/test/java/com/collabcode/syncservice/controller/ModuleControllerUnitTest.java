@@ -25,6 +25,7 @@ import java.util.Map;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -39,6 +40,8 @@ class ModuleControllerUnitTest {
     private RoomRegistry roomRegistry;
     private RoomService roomService;
     private ModuleService moduleService;
+    private Member host;
+    private Member guest;
     private final List<Map<String, Object>> broadcasts = new ArrayList<>();
 
     private static final String OPEN_ROOM_ID = "openRoom1234567890123";
@@ -67,6 +70,8 @@ class ModuleControllerUnitTest {
         roomService.join(OPEN_ROOM_ID, HOST_SESSION, "Host", OWNER_TOKEN);
         roomService.join(OPEN_ROOM_ID, GUEST_SESSION, "Guest", null);
         roomService.join(OPEN_ROOM_ID, OBSERVER_SESSION, "Observer", null);
+        host = roomService.findMemberBySession(OPEN_ROOM_ID, HOST_SESSION);
+        guest = roomService.findMemberBySession(OPEN_ROOM_ID, GUEST_SESSION);
         com.collabcode.syncservice.room.Member obs = roomService.findMemberBySession(OPEN_ROOM_ID, OBSERVER_SESSION);
         obs.setRole(com.collabcode.syncservice.room.Role.OBSERVER);
 
@@ -505,5 +510,169 @@ class ModuleControllerUnitTest {
                         .header("X-Session-Id", HOST_SESSION))
                 .andExpect(status().isUnprocessableEntity())
                 .andExpect(jsonPath("$.error.code").value("INVALID_REQUEST"));
+    }
+
+    @Test
+    @DisplayName("Module owner can mark and unmark runnable (US-46, FR20.2)")
+    void patch_ownerCanToggleRunnable() throws Exception {
+        ModuleRecord mod = moduleService.createApprovedModule(OPEN_ROOM_ID, guest, "script.py");
+        broadcasts.clear();
+
+        mvc.perform(patch("/v1/rooms/" + OPEN_ROOM_ID + "/modules/" + mod.moduleId())
+                        .header("X-Session-Id", GUEST_SESSION)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"runnable\": false}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.module_id").value(mod.moduleId()))
+                .andExpect(jsonPath("$.runnable").value(false));
+
+        assertThat(broadcasts).hasSize(1);
+        assertThat(broadcasts.get(0).get("type")).isEqualTo("module-updated");
+        assertThat(broadcasts.get(0).get("runnable")).isEqualTo(false);
+
+        // Unmark back to true
+        broadcasts.clear();
+        mvc.perform(patch("/v1/rooms/" + OPEN_ROOM_ID + "/modules/" + mod.moduleId())
+                        .header("X-Session-Id", GUEST_SESSION)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"runnable\": true}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.runnable").value(true));
+
+        assertThat(broadcasts).hasSize(1);
+        assertThat(broadcasts.get(0).get("runnable")).isEqualTo(true);
+    }
+
+    @Test
+    @DisplayName("Non-owner marking runnable returns 403 NOT_MODULE_OWNER (US-46, FR20.2)")
+    void patch_nonOwnerSettingRunnable_returns403() throws Exception {
+        ModuleRecord mod = moduleService.createApprovedModule(OPEN_ROOM_ID, guest, "script.py");
+
+        mvc.perform(patch("/v1/rooms/" + OPEN_ROOM_ID + "/modules/" + mod.moduleId())
+                        .header("X-Session-Id", HOST_SESSION) // Host is not the module owner
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"runnable\": false}"))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.error.code").value("NOT_MODULE_OWNER"));
+    }
+
+    @Test
+    @DisplayName("Host can set entry file and replacing it updates both modules (US-46, FR20.3)")
+    void patch_hostCanSetAndReplaceEntryFile() throws Exception {
+        ModuleRecord m1 = moduleService.createApprovedModule(OPEN_ROOM_ID, host, "main.py");
+        ModuleRecord m2 = moduleService.createApprovedModule(OPEN_ROOM_ID, guest, "app.py");
+        broadcasts.clear();
+
+        // Host sets m1 as entry file
+        mvc.perform(patch("/v1/rooms/" + OPEN_ROOM_ID + "/modules/" + m1.moduleId())
+                        .header("X-Session-Id", HOST_SESSION)
+                        .header("X-Owner-Token", OWNER_TOKEN)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"is_entry\": true}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.module_id").value(m1.moduleId()))
+                .andExpect(jsonPath("$.is_entry").value(true));
+
+        assertThat(broadcasts).hasSize(1);
+        assertThat(broadcasts.get(0).get("module_id")).isEqualTo(m1.moduleId());
+        assertThat(broadcasts.get(0).get("is_entry")).isEqualTo(true);
+
+        broadcasts.clear();
+        // Host sets m2 as entry file -> replaces m1
+        mvc.perform(patch("/v1/rooms/" + OPEN_ROOM_ID + "/modules/" + m2.moduleId())
+                        .header("X-Session-Id", HOST_SESSION)
+                        .header("X-Owner-Token", OWNER_TOKEN)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"is_entry\": true}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.module_id").value(m2.moduleId()))
+                .andExpect(jsonPath("$.is_entry").value(true));
+
+        // Both broadcasts sent (m1 replaced with is_entry=false, m2 updated with is_entry=true)
+        assertThat(broadcasts).hasSize(2);
+        assertThat(broadcasts.get(0).get("module_id")).isEqualTo(m1.moduleId());
+        assertThat(broadcasts.get(0).get("is_entry")).isEqualTo(false);
+        assertThat(broadcasts.get(1).get("module_id")).isEqualTo(m2.moduleId());
+        assertThat(broadcasts.get(1).get("is_entry")).isEqualTo(true);
+    }
+
+    @Test
+    @DisplayName("Non-Host setting entry file returns 403 NOT_OWNER (US-46, FR20.3)")
+    void patch_nonHostSettingEntry_returns403() throws Exception {
+        ModuleRecord mod = moduleService.createApprovedModule(OPEN_ROOM_ID, guest, "app.py");
+
+        mvc.perform(patch("/v1/rooms/" + OPEN_ROOM_ID + "/modules/" + mod.moduleId())
+                        .header("X-Session-Id", GUEST_SESSION)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"is_entry\": true}"))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.error.code").value("NOT_OWNER"));
+    }
+
+    @Test
+    @DisplayName("PATCH unknown module returns 404 MODULE_NOT_FOUND (US-46)")
+    void patch_unknownModule_returns404() throws Exception {
+        mvc.perform(patch("/v1/rooms/" + OPEN_ROOM_ID + "/modules/mod_nonexistent123")
+                        .header("X-Session-Id", HOST_SESSION)
+                        .header("X-Owner-Token", OWNER_TOKEN)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"is_entry\": true}"))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.error.code").value("MODULE_NOT_FOUND"));
+    }
+
+    @Test
+    @DisplayName("PATCH with zero or multiple fields returns 422 INVALID_REQUEST")
+    void patch_invalidFieldCount_returns422() throws Exception {
+        ModuleRecord mod = moduleService.createApprovedModule(OPEN_ROOM_ID, host, "main.py");
+
+        // Zero valid fields
+        mvc.perform(patch("/v1/rooms/" + OPEN_ROOM_ID + "/modules/" + mod.moduleId())
+                        .header("X-Session-Id", HOST_SESSION)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{}"))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.error.code").value("INVALID_REQUEST"));
+
+        // Multiple fields
+        mvc.perform(patch("/v1/rooms/" + OPEN_ROOM_ID + "/modules/" + mod.moduleId())
+                        .header("X-Session-Id", HOST_SESSION)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"runnable\": true, \"is_entry\": true}"))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.error.code").value("INVALID_REQUEST"));
+    }
+
+    @Test
+    @DisplayName("PATCH runnable on pending module returns 422 INVALID_REQUEST (US-46)")
+    void patch_setRunnableOnPendingModule_returns422() throws Exception {
+        ModuleRecord pending = moduleService.requestCreate(OPEN_ROOM_ID, guest, "pending_tool.py");
+        broadcasts.clear();
+
+        mvc.perform(patch("/v1/rooms/" + OPEN_ROOM_ID + "/modules/" + pending.moduleId())
+                        .header("X-Session-Id", GUEST_SESSION)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"runnable\": true}"))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.error.code").value("INVALID_REQUEST"));
+
+        assertThat(broadcasts).isEmpty();
+    }
+
+    @Test
+    @DisplayName("PATCH is_entry on pending module returns 422 INVALID_REQUEST (US-46)")
+    void patch_setEntryOnPendingModule_returns422() throws Exception {
+        ModuleRecord pending = moduleService.requestCreate(OPEN_ROOM_ID, guest, "pending_entry.py");
+        broadcasts.clear();
+
+        mvc.perform(patch("/v1/rooms/" + OPEN_ROOM_ID + "/modules/" + pending.moduleId())
+                        .header("X-Session-Id", HOST_SESSION)
+                        .header("X-Owner-Token", OWNER_TOKEN)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"is_entry\": true}"))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.error.code").value("INVALID_REQUEST"));
+
+        assertThat(broadcasts).isEmpty();
     }
 }

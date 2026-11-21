@@ -18,6 +18,8 @@ import {
   listPendingModules,
   requestModule,
   revokeWriteAccess,
+  setModuleEntry,
+  setModuleRunnable,
   validateModuleName,
   type WorkspaceModule,
 } from './workspaceApi'
@@ -1321,6 +1323,80 @@ export default function RoomPage(props: RoomPageProps = {}) {
     [roomId, wsOptions?.fetchFn, wsOptions?.syncWsUrl],
   )
 
+  const handleToggleRunnable = useCallback(
+    async (moduleId: string, runnable: boolean) => {
+      if (!roomId) return
+      setWorkspaceError(null)
+      const currentSessionId = sessionIdRef.current ?? wsOptions?.sessionId ?? getCollabSessionId()
+      const syncBase = wsOptions?.syncWsUrl
+        ? wsOptions.syncWsUrl.replace(/^ws/, 'http').replace(/\/ws\/rooms.*$/, '')
+        : undefined
+      const res = await setModuleRunnable(
+        {
+          roomId,
+          sessionId: currentSessionId,
+          baseUrl: syncBase,
+          fetchFn: wsOptions?.fetchFn,
+        },
+        moduleId,
+        runnable,
+      )
+      if (!res.ok) {
+        setWorkspaceError(res.error)
+      } else {
+        setWorkspaceModules((prev) => {
+          const idx = prev.findIndex((m) => m.module_id === moduleId)
+          if (idx >= 0) {
+            const copy = [...prev]
+            copy[idx] = res.data
+            return copy
+          }
+          return [...prev, res.data]
+        })
+      }
+    },
+    [roomId, wsOptions?.fetchFn, wsOptions?.syncWsUrl],
+  )
+
+  const handleSetEntry = useCallback(
+    async (moduleId: string) => {
+      if (!roomId) return
+      setWorkspaceError(null)
+      const token = readOwnerToken(roomId)
+      const currentSessionId = sessionIdRef.current ?? wsOptions?.sessionId ?? getCollabSessionId()
+      const syncBase = wsOptions?.syncWsUrl
+        ? wsOptions.syncWsUrl.replace(/^ws/, 'http').replace(/\/ws\/rooms.*$/, '')
+        : undefined
+      const res = await setModuleEntry(
+        {
+          roomId,
+          sessionId: currentSessionId,
+          ownerToken: token,
+          baseUrl: syncBase,
+          fetchFn: wsOptions?.fetchFn,
+        },
+        moduleId,
+        true,
+      )
+      if (!res.ok) {
+        setWorkspaceError(res.error)
+      } else {
+        setWorkspaceModules((prev) =>
+          prev.map((m) => {
+            if (m.module_id === moduleId) {
+              return res.data
+            }
+            if (m.is_entry) {
+              return { ...m, is_entry: false }
+            }
+            return m
+          }),
+        )
+      }
+    },
+    [roomId, wsOptions?.fetchFn, wsOptions?.syncWsUrl],
+  )
+
   // A run-result frame can carry a stale or untrusted display_name. Only the
   // server roster's member_id -> display_name mapping may label the runner.
   const runnerMember = runOutput?.runner?.member_id
@@ -1454,6 +1530,8 @@ export default function RoomPage(props: RoomPageProps = {}) {
           onRequestModule={handleRequestModule}
           onApproveModule={handleApproveModule}
           onDeclineModule={handleDeclineModule}
+          onToggleRunnable={handleToggleRunnable}
+          onSetEntry={handleSetEntry}
           onGrantWriteAccess={handleGrantWriteAccess}
           onRevokeWriteAccess={handleRevokeWriteAccess}
           creationError={workspaceError}

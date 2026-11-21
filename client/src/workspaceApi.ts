@@ -381,6 +381,152 @@ export async function listPendingModules(
 }
 
 /**
+ * Returns plain-English user-friendly error messages for module error codes (V2.12, US-46).
+ */
+export function friendlyWorkspaceErrorMessage(code?: string, fallbackMessage?: string): string {
+  if (code === 'NOT_MODULE_OWNER') {
+    return 'Only the module owner can change its runnable status.'
+  }
+  if (code === 'NOT_OWNER') {
+    return 'Only the room Host can designate the workspace entry file.'
+  }
+  if (code === 'MODULE_NOT_FOUND') {
+    return 'Module not found in this workspace.'
+  }
+  if (code === 'NAME_TAKEN') {
+    return 'A module with this name already exists in this workspace.'
+  }
+  return fallbackMessage || code || 'An unexpected error occurred.'
+}
+
+/**
+ * Marks or unmarks a module as runnable (US-46, FR20.2, V2.6).
+ * Callable only by the module owner.
+ */
+export async function setModuleRunnable(
+  ctx: WorkspaceApiContext,
+  moduleId: string,
+  runnable: boolean,
+): Promise<WorkspaceApiResult<WorkspaceModule>> {
+  const fetchFn = ctx.fetchFn ?? fetch
+  const base = (
+    ctx.baseUrl ??
+    config.syncWsUrl.replace(/^ws/, 'http').replace(/\/ws\/rooms.*$/, '')
+  ).replace(/\/$/, '')
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'X-Session-Id': ctx.sessionId,
+  }
+
+  try {
+    const res = await fetchFn(
+      `${base}/v1/rooms/${encodeURIComponent(ctx.roomId)}/modules/${encodeURIComponent(moduleId)}`,
+      {
+        method: 'PATCH',
+        headers,
+        body: JSON.stringify({ runnable }),
+      },
+    )
+
+    if (!res.ok) {
+      let code: string | undefined
+      let message: string | undefined
+      try {
+        const body = (await res.json()) as { error?: { code?: string; message?: string } }
+        code = body?.error?.code
+        message = body?.error?.message
+      } catch {
+        // non-json
+      }
+      return {
+        ok: false,
+        status: res.status,
+        code,
+        error: friendlyWorkspaceErrorMessage(
+          code,
+          message || `Failed to update runnable status (HTTP ${res.status}).`,
+        ),
+      }
+    }
+
+    const data = (await res.json()) as WorkspaceModule
+    return { ok: true, data }
+  } catch (err) {
+    return {
+      ok: false,
+      status: 0,
+      error: err instanceof Error ? err.message : 'Network error while updating runnable status.',
+    }
+  }
+}
+
+/**
+ * Designates or unsets a module as the workspace entry file (US-46, FR20.3, V2.6).
+ * Callable only by the room Host with a valid owner token.
+ */
+export async function setModuleEntry(
+  ctx: WorkspaceApiContext,
+  moduleId: string,
+  isEntry: boolean = true,
+): Promise<WorkspaceApiResult<WorkspaceModule>> {
+  const fetchFn = ctx.fetchFn ?? fetch
+  const base = (
+    ctx.baseUrl ??
+    config.syncWsUrl.replace(/^ws/, 'http').replace(/\/ws\/rooms.*$/, '')
+  ).replace(/\/$/, '')
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'X-Session-Id': ctx.sessionId,
+  }
+  if (ctx.ownerToken) {
+    headers['X-Owner-Token'] = ctx.ownerToken
+  }
+
+  try {
+    const res = await fetchFn(
+      `${base}/v1/rooms/${encodeURIComponent(ctx.roomId)}/modules/${encodeURIComponent(moduleId)}`,
+      {
+        method: 'PATCH',
+        headers,
+        body: JSON.stringify({ is_entry: isEntry }),
+      },
+    )
+
+    if (!res.ok) {
+      let code: string | undefined
+      let message: string | undefined
+      try {
+        const body = (await res.json()) as { error?: { code?: string; message?: string } }
+        code = body?.error?.code
+        message = body?.error?.message
+      } catch {
+        // non-json
+      }
+      return {
+        ok: false,
+        status: res.status,
+        code,
+        error: friendlyWorkspaceErrorMessage(
+          code,
+          message || `Failed to set entry file (HTTP ${res.status}).`,
+        ),
+      }
+    }
+
+    const data = (await res.json()) as WorkspaceModule
+    return { ok: true, data }
+  } catch (err) {
+    return {
+      ok: false,
+      status: 0,
+      error: err instanceof Error ? err.message : 'Network error while setting entry file.',
+    }
+  }
+}
+
+/**
  * Grants write access to a member for a module (US-43, FR22.1).
  */
 export async function grantWriteAccess(
