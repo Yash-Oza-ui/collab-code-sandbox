@@ -825,3 +825,36 @@ limits: `FAILING_INPUT_MAX_RUNS` (default 8; max 10),
 
 Run `pytest -k "failing_input or edge"` in `ai-ml-service/`. The unit tests
 mock Docker execution, so user code never runs on the host.
+
+
+## US-72: Deterministic failing-input minimisation (FR38.5)
+
+When US-70 finds a failure, minimisation tries largest-chunk-first deletions
+(lines, whitespace-delimited tokens, then characters), followed by conservative
+integer simplifications. A candidate is retained only when it is strictly
+shorter and preserves the original **kind** of failure: `wrong_output`,
+`crash`, or `timeout`. For wrong output, the candidate must still disagree
+with an authoritative reference solution. With a reference, its successful,
+untruncated execution is required for each candidate; invalid inputs that
+make the reference crash or time out are discarded. Without a reference,
+reductions can violate the program's input grammar; only crashes and timeouts
+can be established, and the response reports `reference_used: false`.
+
+Every candidate (and reference) runs in US-71's `test_batch` Docker path;
+no code runs in ai-ml-service. US-70's shared budget tracks run count and
+aggregate duration. A 429 leaves the best counterexample found and marks
+`budget_exhausted`. Configured `FAILING_INPUT_MINIMIZER_MAX_ROUNDS` and
+`FAILING_INPUT_MINIMIZER_MAX_BATCHES` stop work predictably; limits return
+`budget_exhausted` (partial result). Candidate order is deterministic. `original_size`,
+`minimized_size`, and `minimization_rounds` show progress. This is an
+AI-free operation and remains available when consent or the Host AI switch
+is off. No input text or program code is logged.
+
+**Save as Test Case storage contract (proposed, pending team confirmation):**
+store only `room_id`, `input`, `failure_type`, `language`, and optional
+`expected_output` in sync-service room state. The room owns this record;
+US-56 deletion must cascade to these records. The API must authenticate
+the active room member and enforce run visibility; a private Open-mode run
+cannot be shared to other members until authorised under US-49. Confirm
+this with Digvijay (contract), Femina (room deletion), and Het/Niranjan
+(client) before enabling the Save action.

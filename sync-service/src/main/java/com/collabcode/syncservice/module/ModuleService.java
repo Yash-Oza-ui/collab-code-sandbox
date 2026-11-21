@@ -355,6 +355,72 @@ public class ModuleService {
         return modules == null ? null : modules.get(moduleId);
     }
 
+    /** Result of updating entry file designation. */
+    public record EntryChangeResult(ModuleRecord updated, ModuleRecord replaced) {}
+
+    /**
+     * Mark or unmark a module as runnable (FR20.2, V2.6).
+     * Callable only by the module owner.
+     */
+    public synchronized ModuleRecord setRunnable(String roomId, String moduleId, Member caller, boolean runnable) {
+        requireOpenRoom(roomId);
+        if (caller == null) {
+            throw new IllegalArgumentException("SESSION_NOT_FOUND");
+        }
+        ModuleRecord module = find(roomId, moduleId);
+        if (module == null) {
+            throw new IllegalStateException("MODULE_NOT_FOUND");
+        }
+        if (module.pending()) {
+            throw new IllegalStateException("MODULE_PENDING");
+        }
+        if (!caller.getMemberId().equals(module.ownerMemberId())) {
+            throw new SecurityException("NOT_MODULE_OWNER");
+        }
+        module.setRunnable(runnable);
+        return module;
+    }
+
+    /**
+     * Designate or un-designate a module as the workspace entry file (FR20.3, V2.6).
+     * Callable only by the room Host with a valid owner token.
+     * Setting a new entry file replaces any previously designated entry file.
+     */
+    public synchronized EntryChangeResult setEntry(String roomId, String moduleId, Member caller, String ownerToken, boolean isEntry) {
+        Room room = requireOpenRoom(roomId);
+        if (caller == null) {
+            throw new IllegalArgumentException("SESSION_NOT_FOUND");
+        }
+        if (caller.getRole() != Role.HOST) {
+            throw new SecurityException("NOT_OWNER");
+        }
+        if (!OwnerTokens.matches(ownerToken, room.getOwnerTokenHash())) {
+            throw new SecurityException("NOT_OWNER");
+        }
+        ModuleRecord module = find(roomId, moduleId);
+        if (module == null) {
+            throw new IllegalStateException("MODULE_NOT_FOUND");
+        }
+        if (module.pending()) {
+            throw new IllegalStateException("MODULE_PENDING");
+        }
+
+        ModuleRecord replaced = null;
+        if (isEntry) {
+            Map<String, ModuleRecord> modules = byRoom.get(roomId);
+            if (modules != null) {
+                for (ModuleRecord other : modules.values()) {
+                    if (other.isEntry() && !other.moduleId().equals(moduleId)) {
+                        other.setEntry(false);
+                        replaced = other;
+                    }
+                }
+            }
+        }
+        module.setEntry(isEntry);
+        return new EntryChangeResult(module, replaced);
+    }
+
     private Room requireOpenRoom(String roomId) {
         Room room = rooms.get(roomId);
         if (room == null || room.isClosed()) {
