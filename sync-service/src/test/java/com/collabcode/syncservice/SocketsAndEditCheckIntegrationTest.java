@@ -1140,6 +1140,243 @@ class SocketsAndEditCheckIntegrationTest {
         return res.statusCode();
     }
 
+    private int postApproveEditRequest(String roomId, String memberId, String sessionId, String ownerToken) throws Exception {
+        java.net.http.HttpClient client = java.net.http.HttpClient.newHttpClient();
+        java.net.http.HttpRequest.Builder rb = java.net.http.HttpRequest.newBuilder()
+                .uri(java.net.URI.create("http://localhost:" + port + "/v1/rooms/" + roomId + "/edit-requests/" + memberId + "/approve"))
+                .POST(java.net.http.HttpRequest.BodyPublishers.noBody());
+        if (sessionId != null) {
+            rb.header("X-Session-Id", sessionId);
+        }
+        if (ownerToken != null) {
+            rb.header("X-Owner-Token", ownerToken);
+        }
+        return client.send(rb.build(), java.net.http.HttpResponse.BodyHandlers.discarding()).statusCode();
+    }
+
+    private int postDeclineEditRequest(String roomId, String memberId, String sessionId, String ownerToken) throws Exception {
+        java.net.http.HttpClient client = java.net.http.HttpClient.newHttpClient();
+        java.net.http.HttpRequest.Builder rb = java.net.http.HttpRequest.newBuilder()
+                .uri(java.net.URI.create("http://localhost:" + port + "/v1/rooms/" + roomId + "/edit-requests/" + memberId + "/decline"))
+                .POST(java.net.http.HttpRequest.BodyPublishers.noBody());
+        if (sessionId != null) {
+            rb.header("X-Session-Id", sessionId);
+        }
+        if (ownerToken != null) {
+            rb.header("X-Owner-Token", ownerToken);
+        }
+        return client.send(rb.build(), java.net.http.HttpResponse.BodyHandlers.discarding()).statusCode();
+    }
+
+    // -----------------------------------------------------------------------
+    // US-38: Request edit access in Pair mode (FR19.3, V2.22)
+    // -----------------------------------------------------------------------
+
+    @Test
+    void editRequest_fullFlow_requestApproveAndImmediateEdit() throws Exception {
+        Map<String, Object> room = createRoom("pair", "teach_interview", null);
+        String roomId = (String) room.get("room_id");
+        String ownerToken = (String) room.get("owner_token");
+
+        try (WsClient ctrlA = connectControl(roomId, SESSION_A);
+             WsClient ctrlB = connectControl(roomId, SESSION_B)) {
+
+            sendJoin(ctrlA, "Alice", ownerToken);
+            sendJoin(ctrlB, "Bob", null);
+            drainText(ctrlA, 2);
+            drainText(ctrlB, 2);
+
+            Member bob = roomService.findMemberBySession(roomId, SESSION_B);
+            assertThat(bob).isNotNull();
+            assertThat(bob.isCanEdit()).isFalse();
+
+            try (WsClient docA = connectDoc(roomId, "main", SESSION_A);
+                 WsClient docB = connectDoc(roomId, "main", SESSION_B)) {
+
+                // 1. Bob's edit is rejected before requesting/approval
+                byte[] forbiddenFrame = {0x00, 0x02, 0x11, 0x22};
+                docB.sendBinary(forbiddenFrame);
+                String rejected = pollControlMessage(ctrlB, "edit-rejected", 3, TimeUnit.SECONDS);
+                assertThat(rejected).contains("\"reason\":\"no_edit_access\"");
+
+                // 2. Bob requests edit access on control socket
+                ctrlB.sendText("{\"type\":\"request-edit-access\"}");
+
+                // Host receives edit-access-requested
+                String requested = pollControlMessage(ctrlA, "edit-access-requested", 3, TimeUnit.SECONDS);
+                assertThat(requested)
+                        .contains("\"type\":\"edit-access-requested\"")
+                        .contains("\"member_id\":\"" + bob.getMemberId() + "\"")
+                        .contains("\"display_name\":\"Bob\"")
+                        .contains("\"requested_at\":");
+
+                // 3. Duplicate request from Bob is a no-op (Host receives nothing)
+                ctrlB.sendText("{\"type\":\"request-edit-access\"}");
+                String dup = pollControlMessage(ctrlA, "edit-access-requested", 500, TimeUnit.MILLISECONDS);
+                assertThat(dup).isNull();
+
+                // 4. Host approves request via REST
+                assertThat(postApproveEditRequest(roomId, bob.getMemberId(), SESSION_A, ownerToken))
+                        .isEqualTo(200);
+
+                // Updated roster broadcast
+                String rosterB = pollControlMessage(ctrlB, "roster", 3, TimeUnit.SECONDS);
+                assertThat(rosterB).isNotNull().contains("\"can_edit\":true");
+
+                // Bob receives edit-access-responded (approved: true)
+                String responded = pollControlMessage(ctrlB, "edit-access-responded", 3, TimeUnit.SECONDS);
+                assertThat(responded)
+                        .isNotNull()
+                        .contains("\"type\":\"edit-access-responded\"")
+                        .contains("\"approved\":true");
+
+                // 5. Very next edit goes through immediately to Alice
+                byte[] permittedFrame = {0x00, 0x02, 0x33, 0x44};
+                docB.sendBinary(permittedFrame);
+                assertThat(docA.pollBinary(3, TimeUnit.SECONDS)).isEqualTo(permittedFrame);
+            }
+        }
+    }
+
+    @Test
+    void editRequest_declineFlow_leavesAccessUnchanged() throws Exception {
+        Map<String, Object> room = createRoom("pair", "teach_interview", null);
+        String roomId = (String) room.get("room_id");
+        String ownerToken = (String) room.get("owner_token");
+
+        try (WsClient ctrlA = connectControl(roomId, SESSION_A);
+             WsClient ctrlB = connectControl(roomId, SESSION_B)) {
+
+            sendJoin(ctrlA, "Alice", ownerToken);
+            sendJoin(ctrlB, "Bob", null);
+            drainText(ctrlA, 2);
+            drainText(ctrlB, 2);
+
+            Member bob = roomService.findMemberBySession(roomId, SESSION_B);
+            assertThat(bob).isNotNull();
+
+            // Bob requests edit access
+            ctrlB.sendText("{\"type\":\"request-edit-access\"}");
+            String requested = pollControlMessage(ctrlA, "edit-access-requested", 3, TimeUnit.SECONDS);
+            assertThat(requested).isNotNull();
+
+            // Host declines request via REST
+            assertThat(postDeclineEditRequest(roomId, bob.getMemberId(), SESSION_A, ownerToken))
+                    .isEqualTo(200);
+
+            // Bob receives edit-access-responded (approved: false)
+            String responded = pollControlMessage(ctrlB, "edit-access-responded", 3, TimeUnit.SECONDS);
+            assertThat(responded)
+                    .contains("\"type\":\"edit-access-responded\"")
+                    .contains("\"approved\":false");
+
+            try (WsClient docA = connectDoc(roomId, "main", SESSION_A);
+                 WsClient docB = connectDoc(roomId, "main", SESSION_B)) {
+                // Bob's edit remains rejected
+                byte[] forbiddenFrame = {0x00, 0x02, 0x77, (byte) 0x88};
+                docB.sendBinary(forbiddenFrame);
+                String rejected = pollControlMessage(ctrlB, "edit-rejected", 3, TimeUnit.SECONDS);
+                assertThat(rejected).contains("\"reason\":\"no_edit_access\"");
+            }
+        }
+    }
+
+    @Test
+    void editRequest_invalidRejections() throws Exception {
+        // 1. Host cannot request edit access (already has it)
+        Map<String, Object> pairRoom = createRoom("pair", "teach_interview", null);
+        String pairRoomId = (String) pairRoom.get("room_id");
+        String ownerToken = (String) pairRoom.get("owner_token");
+
+        try (WsClient ctrlHost = connectControl(pairRoomId, SESSION_A)) {
+            sendJoin(ctrlHost, "Alice", ownerToken);
+            drainText(ctrlHost, 2);
+
+            ctrlHost.sendText("{\"type\":\"request-edit-access\"}");
+            String errHost = pollControlMessage(ctrlHost, "error", 3, TimeUnit.SECONDS);
+            assertThat(errHost)
+                    .contains("\"code\":\"INVALID_REQUEST\"")
+                    .contains("You already have edit access.");
+        }
+
+        // 2. Observer cannot request edit access
+        try (WsClient ctrlHost = connectControl(pairRoomId, SESSION_A);
+             WsClient ctrlObs = connectControl(pairRoomId, SESSION_B)) {
+            sendJoin(ctrlHost, "Alice", ownerToken);
+            sendJoin(ctrlObs, "Bob", null);
+            drainText(ctrlHost, 2);
+            drainText(ctrlObs, 2);
+
+            Member bob = roomService.findMemberBySession(pairRoomId, SESSION_B);
+            roomService.changeRole(pairRoomId, bob.getMemberId(), Role.OBSERVER);
+
+            ctrlObs.sendText("{\"type\":\"request-edit-access\"}");
+            String errObs = pollControlMessage(ctrlObs, "error", 3, TimeUnit.SECONDS);
+            assertThat(errObs)
+                    .contains("\"code\":\"INVALID_REQUEST\"")
+                    .contains("Observers cannot request edit access");
+        }
+
+        // 3. Open mode room refuses edit access request
+        Map<String, Object> openRoom = createRoom("open", null, "python");
+        String openRoomId = (String) openRoom.get("room_id");
+        try (WsClient ctrlUser = connectControl(openRoomId, SESSION_C)) {
+            sendJoin(ctrlUser, "Charlie", null);
+            drainText(ctrlUser, 2);
+
+            ctrlUser.sendText("{\"type\":\"request-edit-access\"}");
+            String errOpen = pollControlMessage(ctrlUser, "error", 3, TimeUnit.SECONDS);
+            assertThat(errOpen)
+                    .contains("\"code\":\"INVALID_REQUEST\"")
+                    .contains("Edit-access requests apply only in Pair mode");
+        }
+    }
+
+    @Test
+    void editRequest_automaticClearing_onDepartureAndGrant() throws Exception {
+        Map<String, Object> room = createRoom("pair", "teach_interview", null);
+        String roomId = (String) room.get("room_id");
+        String ownerToken = (String) room.get("owner_token");
+
+        try (WsClient ctrlA = connectControl(roomId, SESSION_A)) {
+            sendJoin(ctrlA, "Alice", ownerToken);
+            drainText(ctrlA, 2);
+
+            // 1. Departure clears request (reason: left)
+            try (WsClient ctrlB = connectControl(roomId, SESSION_B)) {
+                sendJoin(ctrlB, "Bob", null);
+                drainText(ctrlB, 2);
+
+                ctrlB.sendText("{\"type\":\"request-edit-access\"}");
+                String requested = pollControlMessage(ctrlA, "edit-access-requested", 3, TimeUnit.SECONDS);
+                assertThat(requested).isNotNull();
+            } // ctrlB closes here
+
+            String cleared = pollControlMessage(ctrlA, "edit-access-request-cleared", 3, TimeUnit.SECONDS);
+            assertThat(cleared)
+                    .contains("\"type\":\"edit-access-request-cleared\"")
+                    .contains("\"reason\":\"left\"");
+
+            // 2. Direct grant clears request (reason: granted)
+            try (WsClient ctrlC = connectControl(roomId, SESSION_C)) {
+                sendJoin(ctrlC, "Charlie", null);
+                drainText(ctrlC, 2);
+
+                ctrlC.sendText("{\"type\":\"request-edit-access\"}");
+                String requestedC = pollControlMessage(ctrlA, "edit-access-requested", 3, TimeUnit.SECONDS);
+                assertThat(requestedC).isNotNull();
+
+                Member charlie = roomService.findMemberBySession(roomId, SESSION_C);
+                patchEditAccess(roomId, charlie.getMemberId(), SESSION_A, ownerToken, true);
+
+                String clearedGranted = pollControlMessage(ctrlA, "edit-access-request-cleared", 3, TimeUnit.SECONDS);
+                assertThat(clearedGranted)
+                        .contains("\"type\":\"edit-access-request-cleared\"")
+                        .contains("\"reason\":\"granted\"");
+            }
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Inner helpers
     // -----------------------------------------------------------------------

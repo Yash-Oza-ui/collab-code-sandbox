@@ -121,6 +121,7 @@ public class MemberController {
             // Removed between the lookup and the change.
             return error(HttpStatus.NOT_FOUND, "MEMBER_NOT_FOUND", "Member not found in this room.");
         }
+        controlHandler.clearAndNotifyEditRequest(roomId, memberId, "role_changed");
         controlHandler.broadcastRoster(roomId);
         // The updated role is now part of the server-authoritative roster.
         // Broadcast it to all connected control sockets (V2.17 rule 4).
@@ -182,6 +183,10 @@ public class MemberController {
         Member updated = roomService.setEditAccess(roomId, memberId, canEdit);
         if (updated == null) {
             return error(HttpStatus.NOT_FOUND, "MEMBER_NOT_FOUND", "Member not found in this room.");
+        }
+
+        if (canEdit) {
+            controlHandler.clearAndNotifyEditRequest(roomId, memberId, "granted");
         }
 
         if (changed) {
