@@ -19,6 +19,7 @@ import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BooleanSupplier;
 
 /**
  * Asynchronous AI analysis execution and fallback management service (US-78, NFR9, CR08, T-18).
@@ -90,6 +91,34 @@ public class AnalysisService {
                 ),
                 executorService
         );
+    }
+
+    /**
+     * US-59: evaluate room AI permission on this service's executor, not on the
+     * /v1/runs request thread. A failed lookup disables paid AI, never the
+     * deterministic analysis. Caller consent is still enforced separately.
+     */
+    public CompletableFuture<AnalysisResultMessage> performAnalysisWithFreshSwitchAsync(
+            String requestId,
+            String analysisId,
+            String roomId,
+            String sessionId,
+            String visibility,
+            String task,
+            String language,
+            Boolean consent,
+            BooleanSupplier aiEnabledSupplier,
+            Map<String, Object> payload) {
+        return CompletableFuture.supplyAsync(() -> {
+            boolean enabled = false;
+            try {
+                enabled = aiEnabledSupplier != null && aiEnabledSupplier.getAsBoolean();
+            } catch (Exception ignored) {
+                // Network/lookup failures are fail closed for external AI.
+            }
+            return performAnalysis(requestId, analysisId, roomId, sessionId,
+                    visibility, task, language, consent, enabled, payload);
+        }, executorService);
     }
 
     /**

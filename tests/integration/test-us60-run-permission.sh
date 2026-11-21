@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Integration test for US-60 / Issue #130 and US-59 / Issue #218: control who can run (FR41.1 to FR41.4, V2.20).
+# Integration test for US-60 / Issue #130: control who can run (FR41.1 to FR41.4, V2.20).
 #
 # Over real HTTP + WebSocket against sync-service, verifies: Run taken away from a
 # participant and given back, Host-only running on and off, the roster that follows,
@@ -59,7 +59,7 @@ if [ "${EXECUTION_SPRING_PROFILES-stub-permissions}" != "stub-permissions" ]; th
 fi
 
 if "$NODE" client/tests/integration/us60-run-permission.mjs; then
-  pass "sync-service" "US-60 run permission and US-59 AI switch: live two-client / NOT_OWNER / lookup"
+  pass "sync-service" "US-60 run permission: take away / give back / Host-only / roster / NOT_OWNER / lookup"
 else
   fail "sync-service" "US-60 run-permission integration checks failed"
   exit 1

@@ -211,7 +211,7 @@ public class RunController {
 
         // --- Asynchronous AI analysis follow-up (NFR9, T-18 Decision 4 & 6) ---
         if (analysisService != null && req.getTask() != null && !req.getTask().isBlank()) {
-            triggerAsyncAnalysis(req, runSpec, response);
+            triggerAsyncAnalysis(req, runSpec, response, lookup);
         }
 
         return ResponseEntity.ok(response);
@@ -220,7 +220,8 @@ public class RunController {
     private void triggerAsyncAnalysis(
             RunRequest req,
             RunSpec runSpec,
-            RunResponse response) {
+            RunResponse response,
+            PermissionLookupResult lookup) {
         try {
             String primaryCode = "";
             if (runSpec != null && runSpec.getFiles() != null && !runSpec.getFiles().isEmpty()) {
@@ -244,20 +245,13 @@ public class RunController {
                 taskPayload.put("code", primaryCode);
             }
 
-            // The permission lookup at run acceptance may be stale after a long
-            // sandbox execution. Re-read before dispatching analysis (FR35.3).
-            // An unavailable or incomplete lookup must never authorize paid AI.
-            boolean aiEnabledNow = false;
-            try {
-                PermissionLookupResult current = permissionLookupService.lookup(
-                        req.getRoom_id(), req.getSession_id());
-                aiEnabledNow = current != null && current.isAi_enabled();
-            } catch (Exception ignored) {
-                // Fail closed for AI; the run result was already delivered.
-            }
-
+            // Do not perform a remote permission lookup on this request thread:
+            // US-59 (FR35.3) and NFR9 require the run response to be immediate.
+            // The supplier is evaluated on AnalysisService's executor immediately
+            // before its outgoing AI/ML call, after the sandbox run completes.
+            String originalMemberId = lookup.getMember_id();
             String analysisId = UUID.randomUUID().toString();
-            analysisService.performAnalysisAsync(
+            analysisService.performAnalysisWithFreshSwitchAsync(
                     req.getRequest_id(),
                     analysisId,
                     req.getRoom_id(),
@@ -266,7 +260,19 @@ public class RunController {
                     taskLower,
                     req.getLanguage().toLowerCase(),
                     req.getConsent() != null ? req.getConsent() : false,
-                    aiEnabledNow,
+                    () -> {
+                        try {
+                            PermissionLookupResult current = permissionLookupService.lookup(
+                                    req.getRoom_id(), req.getSession_id());
+                            return current != null
+                                    && originalMemberId != null
+                                    && originalMemberId.equals(current.getMember_id())
+                                    && current.isAi_enabled();
+                        } catch (Exception ignored) {
+                            // Permission lookup unavailable: fail closed for AI only.
+                            return false;
+                        }
+                    },
                     taskPayload
             );
         } catch (Exception e) {

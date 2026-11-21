@@ -109,43 +109,95 @@ class RunControllerT19Test {
     }
 
 
-    // US-59 FR35.3: the Host can disable AI during a sandbox run.
+    // US-59: the analysis service receives a lazy, fail-closed permission
+    // supplier; it must never be evaluated before the run HTTP response.
     @Test
-    void aiSwitchOffDuringExecutionIsRecheckedBeforeAnalysisDispatch() throws Exception {
+    void aiSwitchOffDuringExecutionIsRecheckedOnWorker() throws Exception {
         var accepted = new PermissionLookupResult(
                 "m_us59", "Ada", "participant", "pair", null, true, null, true);
         var disabled = new PermissionLookupResult(
                 "m_us59", "Ada", "participant", "pair", null, true, null, false);
         doReturn(accepted, disabled).when(permissionLookupService).lookup(ROOM_ID, SESSION_ID);
 
-        String body = """
-                {
-                  "request_id": "%s",
-                  "room_id": "%s",
-                  "session_id": "%s",
-                  "language": "python",
-                  "task": "complexity",
-                  "consent": true,
-                  "source": {"kind":"inline","files":[{"name":"main.py","content":"print(1)"}],"entry":"main.py"}
-                }
-                """.formatted(REQUEST_ID, ROOM_ID, SESSION_ID);
-
-        mockMvc.perform(post("/v1/runs").contentType(MediaType.APPLICATION_JSON).content(body))
+        mockMvc.perform(post("/v1/runs").contentType(MediaType.APPLICATION_JSON)
+                        .content(us59RunBody()))
                 .andExpect(status().isOk());
-        verify(permissionLookupService, times(2)).lookup(ROOM_ID, SESSION_ID);
-        verify(analysisService).performAnalysisAsync(
+        verify(permissionLookupService, times(1)).lookup(ROOM_ID, SESSION_ID);
+
+        var supplier = org.mockito.ArgumentCaptor.forClass(java.util.function.BooleanSupplier.class);
+        verify(analysisService).performAnalysisWithFreshSwitchAsync(
                 eq(REQUEST_ID), anyString(), eq(ROOM_ID), eq(SESSION_ID), anyString(),
-                eq("complexity"), eq("python"), eq(true), eq(false), anyMap());
+                eq("complexity"), eq("python"), eq(true), supplier.capture(), anyMap());
+        assertThat(supplier.getValue().getAsBoolean()).isFalse();
+        verify(permissionLookupService, times(2)).lookup(ROOM_ID, SESSION_ID);
     }
 
     @Test
-    void aiLookupFailureAfterRunDeliversResultAndDisablesExternalAi() throws Exception {
+    void aiLookupFailureAfterRunDisablesExternalAiWithoutFailingRun() throws Exception {
         var accepted = new PermissionLookupResult(
                 "m_us59", "Ada", "participant", "pair", null, true, null, true);
-        doReturn(accepted).doThrow(new com.collabcode.execution.exception.RoomServiceUnavailableException(
-                REQUEST_ID)).when(permissionLookupService).lookup(ROOM_ID, SESSION_ID);
+        doReturn(accepted).doThrow(
+                new com.collabcode.execution.exception.RoomServiceUnavailableException(REQUEST_ID))
+                .when(permissionLookupService).lookup(ROOM_ID, SESSION_ID);
 
-        String body = """
+        mockMvc.perform(post("/v1/runs").contentType(MediaType.APPLICATION_JSON)
+                        .content(us59RunBody()))
+                .andExpect(status().isOk());
+
+        var supplier = org.mockito.ArgumentCaptor.forClass(java.util.function.BooleanSupplier.class);
+        verify(analysisService).performAnalysisWithFreshSwitchAsync(
+                eq(REQUEST_ID), anyString(), eq(ROOM_ID), eq(SESSION_ID), anyString(),
+                eq("complexity"), eq("python"), eq(true), supplier.capture(), anyMap());
+        assertThat(supplier.getValue().getAsBoolean()).isFalse();
+    }
+
+    @Test
+    void slowAiPermissionLookupDoesNotHoldTheRunHttpResponse() throws Exception {
+        var accepted = new PermissionLookupResult(
+                "m_us59", "Ada", "participant", "pair", null, true, null, true);
+        var lookupStarted = new java.util.concurrent.CountDownLatch(1);
+        var releaseLookup = new java.util.concurrent.CountDownLatch(1);
+        doReturn(accepted).doAnswer(invocation -> {
+            lookupStarted.countDown();
+            if (!releaseLookup.await(3, java.util.concurrent.TimeUnit.SECONDS)) {
+                throw new com.collabcode.execution.exception.RoomServiceUnavailableException(REQUEST_ID);
+            }
+            return new PermissionLookupResult(
+                    "m_us59", "Ada", "participant", "pair", null, true, null, false);
+        }).when(permissionLookupService).lookup(ROOM_ID, SESSION_ID);
+
+        try {
+            // A slow second lookup would block this HTTP call if evaluated in
+            // RunController. The analysis worker owns the supplier instead.
+            org.junit.jupiter.api.Assertions.assertTimeoutPreemptively(
+                    java.time.Duration.ofSeconds(2),
+                    () -> mockMvc.perform(post("/v1/runs")
+                                    .contentType(MediaType.APPLICATION_JSON).content(us59RunBody()))
+                            .andExpect(status().isOk()));
+            verify(permissionLookupService, times(1)).lookup(ROOM_ID, SESSION_ID);
+
+            var supplier = org.mockito.ArgumentCaptor.forClass(java.util.function.BooleanSupplier.class);
+            verify(analysisService).performAnalysisWithFreshSwitchAsync(
+                    eq(REQUEST_ID), anyString(), eq(ROOM_ID), eq(SESSION_ID), anyString(),
+                    eq("complexity"), eq("python"), eq(true), supplier.capture(), anyMap());
+
+            var executor = java.util.concurrent.Executors.newSingleThreadExecutor();
+            try {
+                var result = executor.submit(() -> supplier.getValue().getAsBoolean());
+                assertThat(lookupStarted.await(1, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+                releaseLookup.countDown();
+                assertThat(result.get(2, java.util.concurrent.TimeUnit.SECONDS)).isFalse();
+            } finally {
+                releaseLookup.countDown();
+                executor.shutdownNow();
+            }
+        } finally {
+            releaseLookup.countDown();
+        }
+    }
+
+    private static String us59RunBody() {
+        return """
                 {
                   "request_id": "%s",
                   "room_id": "%s",
@@ -156,12 +208,6 @@ class RunControllerT19Test {
                   "source": {"kind":"inline","files":[{"name":"main.py","content":"print(1)"}],"entry":"main.py"}
                 }
                 """.formatted(REQUEST_ID, ROOM_ID, SESSION_ID);
-
-        mockMvc.perform(post("/v1/runs").contentType(MediaType.APPLICATION_JSON).content(body))
-                .andExpect(status().isOk());
-        verify(analysisService).performAnalysisAsync(
-                eq(REQUEST_ID), anyString(), eq(ROOM_ID), eq(SESSION_ID), anyString(),
-                eq("complexity"), eq("python"), eq(true), eq(false), anyMap());
     }
 
     // ------------------------------------------------------------------ 1. inline success

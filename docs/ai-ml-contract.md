@@ -2111,12 +2111,14 @@ not override this authoritative value. ai-ml-service checks `consent` and
 AI-free analyses continue and `ai_step` is skipped with `CONSENT_MISSING` or
 `AI_DISABLED`. US-78 supplies the safe fallback message.
 
-**In-flight policy (proposed):** execution-service re-reads `ai_enabled`
-from the authenticated sync-service lookup **after the sandbox run and immediately
-before dispatching the asynchronous analysis**. If the Host switched AI off
-during the sandbox run, the subsequent analysis receives `false` and all
-external AI steps are skipped; an unavailable/invalid lookup also fails closed.
-The next run/analysis always fetches the latest state without a page reload.
+**In-flight policy (proposed):** execution-service schedules a lazy AI permission
+supplier after code execution; `AnalysisService` evaluates the supplier **on
+its executor**, immediately before issuing the outgoing AI/ML request. The
+`POST /v1/runs` response never waits for the second sync-service lookup
+(NFR9). If the Host switched AI off during the sandbox run, the subsequent
+analysis receives `false` and external AI steps are skipped; an unavailable,
+revoked, or mismatched room-session lookup fails closed. The next run/analysis
+always fetches fresh state without a page reload.
 External calls which had already started before the Host's switch-off cannot
 be cancelled by this mechanism; that stronger requirement needs coordinated
 in-flight cancellation across services. Digvijay and Yash must confirm the

@@ -386,7 +386,8 @@ describe('US-59 Host toggle behavior', () => {
   }
 
   it('shows the Host switch, sends the authorized PATCH, and updates from server state', async () => {
-    const api = vi.fn(async (url: string, _init?: RequestInit) => {
+    const api = vi.fn(async (...args: [string, RequestInit?]) => {
+      const [url] = args
       if (url.includes('/members/blocked')) {
         return { ok: true, status: 200, json: async () => ({ blocked: [] }) } as Response
       }

@@ -52,6 +52,50 @@ class AnalysisServiceTest {
     }
 
 
+    @Test
+    void freshSwitchSupplierRunsOnExecutorBeforeAiRequest() throws Exception {
+        var requestStarted = new java.util.concurrent.CountDownLatch(1);
+        var release = new java.util.concurrent.CountDownLatch(1);
+        var completed = new java.util.concurrent.atomic.AtomicBoolean(false);
+        var value = new java.util.concurrent.atomic.AtomicBoolean(true);
+        @SuppressWarnings("unchecked")
+        HttpResponse<String> response = mock(HttpResponse.class);
+        when(response.statusCode()).thenReturn(200);
+        when(response.body()).thenReturn("""
+                {"request_id":"req-switch","analysis_id":"an-switch",
+                 "ai_step":{"status":"skipped","error_code":"AI_DISABLED"}}
+                """);
+        when(httpClient.send(any(HttpRequest.class), any(HttpResponse.BodyHandler.class)))
+                .thenReturn(response);
+
+        var supplied = analysisService.performAnalysisWithFreshSwitchAsync(
+                "req-switch", "an-switch", "room-switch", "session-switch",
+                "room", "complexity", "python", true,
+                () -> {
+                    requestStarted.countDown();
+                    try {
+                        if (!release.await(3, java.util.concurrent.TimeUnit.SECONDS)) return false;
+                    } catch (InterruptedException ex) {
+                        Thread.currentThread().interrupt();
+                        return false;
+                    }
+                    return value.get();
+                },
+                Collections.emptyMap());
+        try {
+            assertThat(requestStarted.await(1, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+            assertThat(supplied.isDone()).isFalse();
+            value.set(false);
+            release.countDown();
+            assertThat(supplied.get(3, java.util.concurrent.TimeUnit.SECONDS)
+                    .getAi_step().getError_code()).isEqualTo("AI_DISABLED");
+            verify(httpClient).send(any(HttpRequest.class), any(HttpResponse.BodyHandler.class));
+        } finally {
+            release.countDown();
+        }
+    }
+
+
     private AnalysisProperties properties;
     private RoomBroadcastService broadcastService;
     private ObjectMapper objectMapper;
