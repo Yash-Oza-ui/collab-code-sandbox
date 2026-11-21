@@ -536,9 +536,15 @@ public class ModuleController {
             if ("MODULE_NOT_FOUND".equals(e.getMessage())) {
                 return moduleError(HttpStatus.NOT_FOUND, "MODULE_NOT_FOUND", "Module not found.");
             }
+            if ("MODULE_PENDING".equals(e.getMessage())) {
+                return moduleError(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_REQUEST", "Pending modules cannot be modified.");
+            }
             return moduleError(HttpStatus.CONFLICT, e.getMessage(), e.getMessage());
         } catch (IllegalArgumentException e) {
             String msg = e.getMessage();
+            if ("MODULE_PENDING".equals(msg)) {
+                return moduleError(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_REQUEST", "Pending modules cannot be modified.");
+            }
             HttpStatus status = ("SESSION_NOT_FOUND".equals(msg) || "ROOM_NOT_FOUND".equals(msg))
                     ? HttpStatus.NOT_FOUND : HttpStatus.UNPROCESSABLE_ENTITY;
             return moduleError(status, msg, msg);

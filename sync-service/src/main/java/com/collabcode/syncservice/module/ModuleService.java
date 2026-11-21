@@ -366,6 +366,9 @@ public class ModuleService {
         if (module == null) {
             throw new IllegalStateException("MODULE_NOT_FOUND");
         }
+        if (module.pending()) {
+            throw new IllegalStateException("MODULE_PENDING");
+        }
         if (!caller.getMemberId().equals(module.ownerMemberId())) {
             throw new SecurityException("NOT_MODULE_OWNER");
         }
@@ -392,6 +395,9 @@ public class ModuleService {
         ModuleRecord module = find(roomId, moduleId);
         if (module == null) {
             throw new IllegalStateException("MODULE_NOT_FOUND");
+        }
+        if (module.pending()) {
+            throw new IllegalStateException("MODULE_PENDING");
         }
 
         ModuleRecord replaced = null;

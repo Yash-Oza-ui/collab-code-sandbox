@@ -468,4 +468,26 @@ class ModuleServiceTest {
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessage("MODULE_NOT_FOUND");
     }
+
+    @Test
+    @DisplayName("Setting runnable on pending module throws MODULE_PENDING (US-46)")
+    void setRunnable_pendingModuleThrows() {
+        ModuleRecord pending = moduleService.requestCreate(OPEN_ROOM_ID, participant, "pending_tool.py");
+        assertThat(pending.pending()).isTrue();
+
+        assertThatThrownBy(() -> moduleService.setRunnable(OPEN_ROOM_ID, pending.moduleId(), participant, true))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("MODULE_PENDING");
+    }
+
+    @Test
+    @DisplayName("Setting entry file on pending module throws MODULE_PENDING (US-46)")
+    void setEntry_pendingModuleThrows() {
+        ModuleRecord pending = moduleService.requestCreate(OPEN_ROOM_ID, participant, "pending_entry.py");
+        assertThat(pending.pending()).isTrue();
+
+        assertThatThrownBy(() -> moduleService.setEntry(OPEN_ROOM_ID, pending.moduleId(), host, OWNER_TOKEN, true))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("MODULE_PENDING");
+    }
 }

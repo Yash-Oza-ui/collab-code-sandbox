@@ -642,4 +642,37 @@ class ModuleControllerUnitTest {
                 .andExpect(status().isUnprocessableEntity())
                 .andExpect(jsonPath("$.error.code").value("INVALID_REQUEST"));
     }
+
+    @Test
+    @DisplayName("PATCH runnable on pending module returns 422 INVALID_REQUEST (US-46)")
+    void patch_setRunnableOnPendingModule_returns422() throws Exception {
+        ModuleRecord pending = moduleService.requestCreate(OPEN_ROOM_ID, guest, "pending_tool.py");
+        broadcasts.clear();
+
+        mvc.perform(patch("/v1/rooms/" + OPEN_ROOM_ID + "/modules/" + pending.moduleId())
+                        .header("X-Session-Id", GUEST_SESSION)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"runnable\": true}"))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.error.code").value("INVALID_REQUEST"));
+
+        assertThat(broadcasts).isEmpty();
+    }
+
+    @Test
+    @DisplayName("PATCH is_entry on pending module returns 422 INVALID_REQUEST (US-46)")
+    void patch_setEntryOnPendingModule_returns422() throws Exception {
+        ModuleRecord pending = moduleService.requestCreate(OPEN_ROOM_ID, guest, "pending_entry.py");
+        broadcasts.clear();
+
+        mvc.perform(patch("/v1/rooms/" + OPEN_ROOM_ID + "/modules/" + pending.moduleId())
+                        .header("X-Session-Id", HOST_SESSION)
+                        .header("X-Owner-Token", OWNER_TOKEN)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"is_entry\": true}"))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.error.code").value("INVALID_REQUEST"));
+
+        assertThat(broadcasts).isEmpty();
+    }
 }
