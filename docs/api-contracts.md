@@ -1984,3 +1984,39 @@ with common envelope code RUNNER_UNAVAILABLE, request_id null, message
 'Sandbox runner is unavailable. Check Docker and the runtime image.', and
 retry_after_seconds null. This must not be confused with failed user code,
 which remains an HTTP 200 run result. Do not retry automatically.
+
+
+## US-59 — Proposed Host AI switch contract (FR35, T-17 decision 11)
+
+**Status: Proposed, pending confirmation by Digvijay (contract) and Femina (sync-service).**
+The same room-owned `ai_enabled` boolean is used throughout. No separate client or analysis flag source exists.
+
+`PATCH /v1/rooms/{room_id}/ai-switch` requires `X-Session-Id` (joined UUID v4)
+and `X-Owner-Token` (current Host's token); only the Host may update it.
+A non-Host receives HTTP 403 `NOT_OWNER`. Malformed input receives 422 `INVALID_REQUEST`.
+
+Request:
+
+```json
+{"ai_enabled": false}
+```
+
+Response (200):
+
+```json
+{"ai_enabled": false}
+```
+
+The server includes `"ai_enabled": false` in the `joined` message and in each
+`roster` message. After a successful toggle, the server sends this message
+to every joined room control socket (including the Host):
+
+```json
+{"type": "room-state", "ai_enabled": false}
+```
+
+`GET /internal/rooms/{room_id}/sessions/{session_id}` continues to return
+`ai_enabled`, read afresh for **every new analysis request**. In Teach/Interview
+rooms it starts `false`; in Debug Together and Open rooms it starts `true`.
+Switching does not change Run or editing permissions. On room deletion the flag
+is cleared with the room, and regeneration preserves its current value.

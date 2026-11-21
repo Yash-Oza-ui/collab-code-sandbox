@@ -245,8 +245,13 @@ public class RunController {
                 taskPayload.put("code", primaryCode);
             }
 
+            // Do not perform a remote permission lookup on this request thread:
+            // US-59 (FR35.3) and NFR9 require the run response to be immediate.
+            // The supplier is evaluated on AnalysisService's executor immediately
+            // before its outgoing AI/ML call, after the sandbox run completes.
+            String originalMemberId = lookup.getMember_id();
             String analysisId = UUID.randomUUID().toString();
-            analysisService.performAnalysisAsync(
+            analysisService.performAnalysisWithFreshSwitchAsync(
                     req.getRequest_id(),
                     analysisId,
                     req.getRoom_id(),
@@ -255,7 +260,19 @@ public class RunController {
                     taskLower,
                     req.getLanguage().toLowerCase(),
                     req.getConsent() != null ? req.getConsent() : false,
-                    lookup.isAi_enabled(),
+                    () -> {
+                        try {
+                            PermissionLookupResult current = permissionLookupService.lookup(
+                                    req.getRoom_id(), req.getSession_id());
+                            return current != null
+                                    && originalMemberId != null
+                                    && originalMemberId.equals(current.getMember_id())
+                                    && current.isAi_enabled();
+                        } catch (Exception ignored) {
+                            // Permission lookup unavailable: fail closed for AI only.
+                            return false;
+                        }
+                    },
                     taskPayload
             );
         } catch (Exception e) {
