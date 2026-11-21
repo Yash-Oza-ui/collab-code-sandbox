@@ -123,7 +123,17 @@ if command -v docker >/dev/null 2>&1; then
   before_containers=$(docker ps -a --filter "name=run-" --format '{{.Names}}' 2>/dev/null | wc -l || echo 0)
 fi
 
+# Capture a precise window of Docker create events for this single batch.
+# The ten inputs must run inside ONE runtime container (not ten containers).
+batch_events_since=""
+if command -v docker >/dev/null 2>&1; then
+  batch_events_since="$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)"
+fi
 b10_code="$(post_internal 40 "$AUTH_HDR" "$BATCH10_OUT" "" "$BATCH10_BODY")"
+batch_events_until=""
+if [ -n "$batch_events_since" ]; then
+  batch_events_until="$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)"
+fi
 check "batch-10-tests-status" "200" "$b10_code"
 
 if "$PYTHON_BIN" - "$BATCH10_OUT" "$REQ_BATCH10" <<'PY'
@@ -151,6 +161,40 @@ fi
 if command -v docker >/dev/null 2>&1; then
   after_containers=$(docker ps -a --filter "name=run-" --format '{{.Names}}' 2>/dev/null | wc -l || echo 0)
   check "batch-10-no-leftover-containers" "$before_containers" "$after_containers"
+
+  # Docker event history proves actual container starts, unlike before/after
+  # snapshots, which alone could miss a transient container.
+  if created_events="$(docker events --since "$batch_events_since" --until "$batch_events_until" \
+      --filter type=container --filter event=create \
+      --format '{{.Actor.Attributes.name}}' 2>/dev/null)"; then
+    # Empty grep result is valid input; count matching runtime containers only.
+    runtime_created="$(printf '%s\n' "$created_events" | grep -c '^run-' || true)"
+    check "batch-10-one-runtime-container-created" "1" "$runtime_created"
+    mkdir -p "$REPO_ROOT/tests/integration/results"
+    "$PYTHON_BIN" - "$REPO_ROOT/tests/integration/results/us71-container-count.json" \
+      "$runtime_created" "$before_containers" "$after_containers" "$REQ_BATCH10" <<'PY_EVIDENCE'
+import json
+import os
+import sys
+path, created, before, after, request_id = sys.argv[1:]
+with open(path, 'w', encoding='utf-8') as handle:
+    json.dump({
+        "case": "US-71 ten-test Docker batch",
+        "request_id": request_id,
+        "container_creates": int(created),
+        "containers_before": int(before),
+        "containers_after": int(after),
+        "no_leftover": before == after,
+        "status": "PASS" if created == "1" and before == after else "FAIL",
+        "commit": os.getenv("GITHUB_SHA", "local-unverified"),
+        "command": "bash tests/integration/test-us71-test-batch.sh",
+    }, handle, indent=2)
+    handle.write(chr(10))
+PY_EVIDENCE
+  else
+    fail "batch-10-one-runtime-container-created" "cannot read Docker event history"
+    failed=$((failed + 1))
+  fi
 fi
 
 # ── Step 4: Per-test timeout limit (NFR4.1) ──────────────────────────────────

@@ -95,6 +95,9 @@ def evaluate(base_url: str, scenario: Scenario, token: str, sha: str, max_runs: 
     seed=result.get("original_input")
     minimized=result.get("minimized_input")
     tests=result.get("tests_executed")
+    total_runs=result.get("aggregate_runs_executed")
+    batch_requests=result.get("aggregate_batch_requests")
+    reported_cap=result.get("aggregate_run_cap")
     rounds=result.get("minimization_rounds")
     batches=result.get("minimization_batches")
     failures=[]
@@ -108,7 +111,17 @@ def evaluate(base_url: str, scenario: Scenario, token: str, sha: str, max_runs: 
         if result.get("ai_step",{}).get("error_code") != scenario.gate:
             failures.append("AI gating mismatch")
         if not isinstance(tests,int) or not 0<=tests<=max_runs:
-            failures.append("test count exceeds configured cap")
+            failures.append("candidate tests outside configured cap")
+        if not isinstance(total_runs,int) or not isinstance(reported_cap,int):
+            failures.append("aggregate counter missing")
+        elif not 0 <= tests <= total_runs <= reported_cap or reported_cap != max_runs:
+            failures.append("reference/candidate/script/minimizer total exceeds configured cap")
+        if not isinstance(batch_requests,int) or batch_requests < 1:
+            failures.append("batch request count unavailable")
+        if headers.get("x-failing-input-aggregate-runs") != str(total_runs):
+            failures.append("aggregate count header mismatch")
+        if headers.get("x-failing-input-run-cap") != str(reported_cap):
+            failures.append("run cap header mismatch")
         if scenario.expected_kind:
             if not isinstance(minimized,str): failures.append("missing minimizer result")
             elif not isinstance(seed,str) or len(minimized)>len(seed):
@@ -133,7 +146,9 @@ def evaluate(base_url: str, scenario: Scenario, token: str, sha: str, max_runs: 
                     "minimization_status":result.get("minimization_status"),
                     "original_size":result.get("original_size"),
                     "minimized_size":result.get("minimized_size"),
-                    "tests_executed":tests,"minimization_rounds":rounds,
+                    "tests_executed":tests,"aggregate_runs_executed":total_runs,
+                    "aggregate_batch_requests":batch_requests,"aggregate_run_cap":reported_cap,
+                    "minimization_rounds":rounds,
                     "minimization_batches":batches,"reference_used":result.get("reference_used"),
                     "ai_error":result.get("ai_step",{}).get("error_code"),
                     "skipped_cases":headers.get("x-failing-input-skipped-cases",""),
@@ -168,6 +183,9 @@ def main() -> int:
         print("TASK3_EVAL_ROW "+json.dumps({
             "id":row["id"],"result":row["result"],
             "failure":info.get("failure"),"tests":info.get("tests_executed"),
+            "aggregate_runs":info.get("aggregate_runs_executed"),
+            "aggregate_batch_requests":info.get("aggregate_batch_requests"),
+            "aggregate_run_cap":info.get("aggregate_run_cap"),
             "rounds":info.get("minimization_rounds"),
             "batches":info.get("minimization_batches"),
             "original_size":info.get("original_size"),
@@ -190,13 +208,15 @@ def main() -> int:
     if args.report_out:
         lines=["# T-24b measured Task 3 results","",
                "Real Docker-backed test_batch; commit "+args.sha,"",
-               "| Scenario | Expected | Observed | Result | Tests | Batches | Sizes | SHA | Reproduce |",
-               "|---|---|---|---|---:|---:|---|---|---|"]
+               "| Scenario | Expected | Observed | Result | Candidate tests | Total runs / cap | Batch requests | Min. batches | Sizes | SHA | Reproduce |",
+               "|---|---|---|---|---:|---:|---:|---:|---|---|---|"]
         for row in rows:
             x=row.get("observed",{})
             lines.append("| "+row["id"]+" | "+str(row.get("expected",{}).get("failure"))+
                 " | "+str(x.get("failure"))+" / "+str(x.get("minimization_status"))+
                 " | "+row["result"]+" | "+str(x.get("tests_executed"))+
+                " | "+str(x.get("aggregate_runs_executed"))+"/"+str(x.get("aggregate_run_cap"))+
+                " | "+str(x.get("aggregate_batch_requests"))+
                 " | "+str(x.get("minimization_batches"))+
                 " | "+str(x.get("original_size"))+" to "+str(x.get("minimized_size"))+
                 " | "+args.sha[:10]+" | "+row["reproduce"]+" |")

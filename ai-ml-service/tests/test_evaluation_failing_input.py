@@ -81,10 +81,84 @@ def test_evaluation_failing_input_harness_never_executes_source(monkeypatch):
     monkeypatch.setattr("task3_evaluation.send",lambda *args:(
         200,dict(failure_found=False,failure_type=None,original_input=None,
                  minimized_input=None,tests_executed=2,reference_used=False,
+                 aggregate_runs_executed=2, aggregate_batch_requests=1, aggregate_run_cap=8,
                  minimization_batches=0,minimization_rounds=0,
                  ai_step={"error_code":"CONSENT_MISSING"}),
-        {"x-failing-input-skipped-cases":"maximum_bounds (not supplied)"}))
+        {"x-failing-input-skipped-cases":"maximum_bounds (not supplied)",
+         "x-failing-input-aggregate-runs":"2", "x-failing-input-run-cap":"8"}))
     row=evaluate("http://unused",SCENARIO_BY_KEY["correct_unreferenced"],"","sha",8)
     assert row["result"]=="PASS"
     assert row["commit"]=="sha"
     assert "--case correct_unreferenced" in row["reproduce"]
+
+def test_evaluation_failing_input_aggregate_reference_and_candidates(monkeypatch):
+    """Trusted reference and candidate processes must both count against the shared cap."""
+    class Response:
+        status_code = 200
+        def __init__(self, data):
+            self.data = data
+        def json(self):
+            return self.data
+
+    calls = []
+    class BatchClient:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *args):
+            return None
+        async def post(self, url, *, json, headers):
+            calls.append({"inputs": len(json["inputs"]), "reference": "expected_outputs" not in json})
+            rows = [dict(input=value, status="pass", stdout="0\\n", exit_code=0)
+                    for value in json["inputs"]]
+            return Response({"request_id": json["request_id"], "batch_results": rows})
+
+    monkeypatch.setenv("INTERNAL_API_TOKEN", "unit-only-token")
+    monkeypatch.setattr(target.httpx, "AsyncClient", lambda **_kw: BatchClient())
+    data = request_body(SCENARIO_BY_KEY["correct_reference"])
+    response = TestClient(app).post("/v1/analyses/failing-input", json=data,
+                                    headers={"X-Internal-Token": "unit-only-token"})
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["aggregate_runs_executed"] == sum(c["inputs"] for c in calls)
+    assert body["aggregate_runs_executed"] > body["tests_executed"]
+    assert body["aggregate_batch_requests"] == len(calls) == 2
+    assert body["aggregate_runs_executed"] <= body["aggregate_run_cap"]
+    assert int(response.headers["X-Failing-Input-Aggregate-Runs"]) == body["aggregate_runs_executed"]
+
+
+def test_evaluation_failing_input_mocked_ai_generated_finds_bug(monkeypatch):
+    """Only a mocked model and a fake Docker batch are used; no source runs on host."""
+    from types import SimpleNamespace
+
+    source = ("import sys\\ntokens=sys.stdin.read().split()\\n"
+              "if tokens == ['7', '7']: raise RuntimeError('synthetic')\\n"
+              "print('ok')\\n")
+    script = """print('["7 7"]')"""
+    seen = []
+
+    async def fake_batch(payload, budget, code, inputs, **kwargs):
+        stage = "script" if code == script else ("generated" if "7 7" in inputs else "edge")
+        seen.append(stage)
+        rows = []
+        for value in inputs:
+            crashed = stage == "generated" and value == "7 7"
+            rows.append(dict(input=value, status="crash" if crashed else "pass",
+                             exit_code=1 if crashed else 0,
+                             stdout='["7 7"]' if stage == "script" else "ok"))
+        budget.record(len(rows))
+        return rows, False
+
+    mocked_model = AsyncMock(return_value=SimpleNamespace(
+        answer=script, ai_step={"status": "ok", "error_code": None}))
+    monkeypatch.setattr(target, "sandbox_batch", fake_batch)
+    monkeypatch.setattr(target.chain, "answer", mocked_model)
+    data = request_body(SCENARIO_BY_KEY["correct_unreferenced"])
+    data.update(code=source, consent=True, ai_enabled=True)
+    response = TestClient(app).post("/v1/analyses/failing-input", json=data)
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result["failure_type"] == "crash"
+    assert result["original_input"] == "7 7"
+    assert seen[:3] == ["edge", "script", "generated"]
+    mocked_model.assert_awaited_once()
+    assert result["tests_executed"] >= 6
