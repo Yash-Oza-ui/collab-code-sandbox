@@ -145,6 +145,33 @@ async function main() {
   const runPolicy = (hostOnly, headers = hostHeaders) =>
     http('PATCH', `/v1/rooms/${roomId}/run-policy`, { headers, body: { host_only_run: hostOnly } })
 
+  // US-59 integration: two distinct browser-like joined WebSocket connections.
+  // Exercise default, NOT_OWNER, server authoritative lookup and live updates.
+  assert.equal(firstOfType(host, 'joined')()?.ai_enabled, true, 'Debug room AI defaults on')
+  assert.equal(firstOfType(ada, 'joined')()?.ai_enabled, true, 'Guest sees server AI on at join')
+  const aiSwitch = (enabled, headers = hostHeaders) =>
+    http('PATCH', `/v1/rooms/${roomId}/ai-switch`, { headers, body: { ai_enabled: enabled } })
+  const refusedAi = await aiSwitch(false, { 'X-Session-Id': adaSession })
+  assert.equal(refusedAi.status, 403, 'non-Host cannot toggle AI')
+  assert.equal(refusedAi.body.error.code, 'NOT_OWNER', 'AI switch refuses NOT_OWNER')
+  assert.equal((await aiSwitch(false)).status, 200, 'Host switches AI off')
+  await waitFor(() => host.messages.some((m) => m.type === 'room-state' && m.ai_enabled === false),
+    'Host receives AI-off state')
+  await waitFor(() => ada.messages.some((m) => m.type === 'room-state' && m.ai_enabled === false),
+    'Guest receives AI-off state without rejoining')
+  if (internalToken) {
+    assert.equal((await lookup(roomId, adaSession)).ai_enabled, false, 'fresh lookup sees AI off')
+  }
+  assert.equal((await aiSwitch(true)).status, 200, 'Host switches AI back on')
+  await waitFor(() => host.messages.some((m) => m.type === 'room-state' && m.ai_enabled === true),
+    'Host receives AI-on state')
+  await waitFor(() => ada.messages.some((m) => m.type === 'room-state' && m.ai_enabled === true),
+    'Guest receives AI-on state without rejoining')
+  if (internalToken) {
+    assert.equal((await lookup(roomId, adaSession)).ai_enabled, true, 'fresh lookup sees AI on')
+  }
+  console.log('US-59 integration: Host-only AI switch, two WebSockets and fresh lookup PASS')
+
   // 0. By default everyone can run (FR41.1).
   if (internalToken) {
     assert.equal((await lookup(roomId, adaSession)).can_run, true, 'ada can run by default')

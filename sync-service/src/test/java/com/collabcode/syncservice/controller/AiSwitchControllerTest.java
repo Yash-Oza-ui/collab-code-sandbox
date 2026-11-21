@@ -90,8 +90,13 @@ class AiSwitchControllerTest {
         assertThat(lookup(teach)).isFalse();
         assertThat(teach.withNewId(RoomIds.generate()).isAiEnabled()).isFalse();
 
-        assertThat(switchAi(debug, GUEST, null, "{\"ai_enabled\":false}").statusCode())
-                .isNotEqualTo(200);
+        roomService.join(debug.getRoomId(), HOST, "Debug Host", "host-secret");
+        roomService.join(debug.getRoomId(), GUEST, "Debug Guest", null);
+        var debugDenied = switchAi(debug, GUEST, null, "{\"ai_enabled\":false}");
+        assertThat(debugDenied.statusCode()).isEqualTo(403);
+        assertThat(mapper.readTree(debugDenied.body()).get("error").get("code").asText())
+                .isEqualTo("NOT_OWNER");
+        assertThat(debug.isAiEnabled()).isTrue();
         assertThat(open.isAiEnabled()).isTrue();
     }
 

@@ -2111,10 +2111,13 @@ not override this authoritative value. ai-ml-service checks `consent` and
 AI-free analyses continue and `ai_step` is skipped with `CONSENT_MISSING` or
 `AI_DISABLED`. US-78 supplies the safe fallback message.
 
-**In-flight policy:** once an analysis request has been accepted, it retains the
-switch snapshot checked at acceptance. A later Host switch affects the very next
-analysis request without page reload; an analysis already admitted with AI on
-may complete under its accepted snapshot. Immediate cancellation of a model call
-already in progress is not part of this synchronous request contract and
-requires separate service-side cancellation coordination. This policy must be
-confirmed in the US-59 review before claiming post-acknowledgement cancellation.
+**In-flight policy (proposed):** execution-service re-reads `ai_enabled`
+from the authenticated sync-service lookup **after the sandbox run and immediately
+before dispatching the asynchronous analysis**. If the Host switched AI off
+during the sandbox run, the subsequent analysis receives `false` and all
+external AI steps are skipped; an unavailable/invalid lookup also fails closed.
+The next run/analysis always fetches the latest state without a page reload.
+External calls which had already started before the Host's switch-off cannot
+be cancelled by this mechanism; that stronger requirement needs coordinated
+in-flight cancellation across services. Digvijay and Yash must confirm the
+proposed handoff boundary before the contract is finalized.

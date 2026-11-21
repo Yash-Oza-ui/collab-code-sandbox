@@ -2,6 +2,7 @@ package com.collabcode.execution.controller;
 
 import com.collabcode.execution.broadcast.RoomBroadcastService;
 import com.collabcode.execution.model.RunFile;
+import com.collabcode.execution.analysis.AnalysisService;
 import com.collabcode.execution.model.RunResponse;
 import com.collabcode.execution.model.RunSpec;
 import com.collabcode.execution.model.SavedSource;
@@ -32,6 +33,7 @@ import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.Mockito.*;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
@@ -78,6 +80,9 @@ class RunControllerT19Test {
     @MockBean
     private RoomBroadcastService broadcastService;
 
+    @MockBean
+    private AnalysisService analysisService;
+
     @SpyBean
     private StubSavedVersionReader savedVersionReader;
 
@@ -101,6 +106,62 @@ class RunControllerT19Test {
     void tearDown() {
         savedVersionReader.reset();
         permissionLookupService.reset();
+    }
+
+
+    // US-59 FR35.3: the Host can disable AI during a sandbox run.
+    @Test
+    void aiSwitchOffDuringExecutionIsRecheckedBeforeAnalysisDispatch() throws Exception {
+        var accepted = new PermissionLookupResult(
+                "m_us59", "Ada", "participant", "pair", null, true, null, true);
+        var disabled = new PermissionLookupResult(
+                "m_us59", "Ada", "participant", "pair", null, true, null, false);
+        doReturn(accepted, disabled).when(permissionLookupService).lookup(ROOM_ID, SESSION_ID);
+
+        String body = """
+                {
+                  "request_id": "%s",
+                  "room_id": "%s",
+                  "session_id": "%s",
+                  "language": "python",
+                  "task": "complexity",
+                  "consent": true,
+                  "source": {"kind":"inline","files":[{"name":"main.py","content":"print(1)"}],"entry":"main.py"}
+                }
+                """.formatted(REQUEST_ID, ROOM_ID, SESSION_ID);
+
+        mockMvc.perform(post("/v1/runs").contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isOk());
+        verify(permissionLookupService, times(2)).lookup(ROOM_ID, SESSION_ID);
+        verify(analysisService).performAnalysisAsync(
+                eq(REQUEST_ID), anyString(), eq(ROOM_ID), eq(SESSION_ID), anyString(),
+                eq("complexity"), eq("python"), eq(true), eq(false), anyMap());
+    }
+
+    @Test
+    void aiLookupFailureAfterRunDeliversResultAndDisablesExternalAi() throws Exception {
+        var accepted = new PermissionLookupResult(
+                "m_us59", "Ada", "participant", "pair", null, true, null, true);
+        doReturn(accepted).doThrow(new com.collabcode.execution.exception.RoomServiceUnavailableException(
+                REQUEST_ID)).when(permissionLookupService).lookup(ROOM_ID, SESSION_ID);
+
+        String body = """
+                {
+                  "request_id": "%s",
+                  "room_id": "%s",
+                  "session_id": "%s",
+                  "language": "python",
+                  "task": "complexity",
+                  "consent": true,
+                  "source": {"kind":"inline","files":[{"name":"main.py","content":"print(1)"}],"entry":"main.py"}
+                }
+                """.formatted(REQUEST_ID, ROOM_ID, SESSION_ID);
+
+        mockMvc.perform(post("/v1/runs").contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isOk());
+        verify(analysisService).performAnalysisAsync(
+                eq(REQUEST_ID), anyString(), eq(ROOM_ID), eq(SESSION_ID), anyString(),
+                eq("complexity"), eq("python"), eq(true), eq(false), anyMap());
     }
 
     // ------------------------------------------------------------------ 1. inline success
