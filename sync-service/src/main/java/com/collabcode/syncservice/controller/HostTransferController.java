@@ -1,5 +1,7 @@
 package com.collabcode.syncservice.controller;
 
+import com.collabcode.syncservice.audit.AuditLogService;
+import com.collabcode.syncservice.handler.ControlHandler;
 import com.collabcode.syncservice.room.Member;
 import com.collabcode.syncservice.room.OwnerTokens;
 import com.collabcode.syncservice.room.Role;
@@ -47,12 +49,30 @@ public class HostTransferController {
     private final RoomService roomService;
     private final RoomRegistry registry;
     private final HostGuard hostGuard;
+    private final ControlHandler controlHandler;
+    private final AuditLogService auditLogService;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     public HostTransferController(RoomService roomService, RoomRegistry registry, HostGuard hostGuard) {
+        this(roomService, registry, hostGuard, null, null);
+    }
+
+    public HostTransferController(RoomService roomService, RoomRegistry registry, HostGuard hostGuard, ControlHandler controlHandler) {
+        this(roomService, registry, hostGuard, controlHandler, null);
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public HostTransferController(
+            RoomService roomService,
+            RoomRegistry registry,
+            HostGuard hostGuard,
+            ControlHandler controlHandler,
+            @org.springframework.beans.factory.annotation.Autowired(required = false) AuditLogService auditLogService) {
         this.roomService = roomService;
         this.registry = registry;
         this.hostGuard = hostGuard;
+        this.controlHandler = controlHandler;
+        this.auditLogService = auditLogService;
     }
 
     @PostMapping("/rooms/{roomId}/members/{memberId}/make-host")
@@ -93,6 +113,22 @@ public class HostTransferController {
         // Deliver the new owner token to the new Host ONLY, on their control socket(s),
         // then tell the whole room about the role change (V2.4).
         sendHostGranted(roomId, newHost.getSessionId(), newHost.getMemberId(), newOwnerToken);
+        if (controlHandler != null) {
+            controlHandler.clearAndNotifyEditRequest(roomId, newHost.getMemberId(), "role_changed");
+        }
+        if (auditLogService != null) {
+            auditLogService.record(
+                    roomId,
+                    "host_transfer",
+                    g.caller(),
+                    newHost,
+                    newHost.getDisplayName(),
+                    newHost.getMemberId(),
+                    "role",
+                    "participant",
+                    "host",
+                    null);
+        }
         broadcastRoster(room);
 
         log.info("HostTransfer: host role transferred to member={} (owner token reissued)", newHost.getMemberId());

@@ -1,5 +1,6 @@
 package com.collabcode.syncservice.room;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -126,5 +127,91 @@ public final class RoomMessages {
         payload.put("pending", module.pending());
         payload.put("deleted", deleted);
         return payload;
+    }
+
+    /**
+     * {@code edit-access-requested} (US-38, V2.22): pushed to all joined control
+     * sockets of the Host when a participant without edit access asks for it.
+     */
+    public static Map<String, Object> editAccessRequested(String memberId, String displayName, Instant requestedAt) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("type", "edit-access-requested");
+        m.put("member_id", memberId);
+        m.put("display_name", displayName);
+        m.put("requested_at", requestedAt.toString());
+        return m;
+    }
+
+    /**
+     * {@code edit-access-responded} (US-38, V2.22): sent to the requester's control
+     * sockets when the Host approves or declines their request.
+     */
+    public static Map<String, Object> editAccessResponded(String memberId, boolean approved, String message) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("type", "edit-access-responded");
+        m.put("member_id", memberId);
+        m.put("approved", approved);
+        m.put("message", message);
+        return m;
+    }
+
+    /**
+     * {@code edit-access-request-cleared} (US-38, V2.22): sent to Host control sockets
+     * when a pending request is automatically cleared (granted, role_changed, removed, left).
+     */
+    public static Map<String, Object> editAccessRequestCleared(String memberId, String reason) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("type", "edit-access-request-cleared");
+        m.put("member_id", memberId);
+        m.put("reason", reason);
+        return m;
+    }
+
+    /**
+     * Generic error frame on the control socket (V2.5, V2.22).
+     */
+    public static Map<String, Object> controlError(String code, String message) {
+        Map<String, Object> errObj = new LinkedHashMap<>();
+        errObj.put("code", code);
+        errObj.put("message", message);
+
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("type", "error");
+        m.put("code", code);
+        m.put("message", message);
+        m.put("error", errObj);
+        return m;
+    }
+
+    /**
+     * {@code audit-entry} (US-58, V2.23; FR34): sent to all connections when a role
+     * or permission change succeeds.
+     */
+    public static Map<String, Object> auditEntry(Room.AuditLogEntry entry) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("type", "audit-entry");
+        m.put("entry", auditEntryData(entry));
+        return m;
+    }
+
+    /**
+     * Serialises an {@link Room.AuditLogEntry} to an entry object for WebSocket or REST response.
+     */
+    public static Map<String, Object> auditEntryData(Room.AuditLogEntry entry) {
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("id", entry.id());
+        data.put("timestamp", entry.timestamp().toString());
+        data.put("action", entry.action());
+        data.put("actor", entry.actorDisplayName());
+        data.put("actor_display_name", entry.actorDisplayName());
+        data.put("actor_member_id", entry.actorMemberId());
+        data.put("target", entry.targetDisplayName());
+        data.put("target_display_name", entry.targetDisplayName());
+        data.put("target_member_id", entry.targetMemberId());
+        data.put("property", entry.property());
+        data.put("old_value", entry.oldValue());
+        data.put("new_value", entry.newValue());
+        data.put("details", entry.details());
+        return data;
     }
 }

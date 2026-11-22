@@ -1,5 +1,6 @@
 package com.collabcode.syncservice.controller;
 
+import com.collabcode.syncservice.audit.AuditLogService;
 import com.collabcode.syncservice.handler.ControlHandler;
 import com.collabcode.syncservice.module.ModuleRecord;
 import com.collabcode.syncservice.module.ModuleService;
@@ -46,6 +47,7 @@ public class ModuleController {
     private final RoomService roomService;
     private final ModuleService moduleService;
     private final ControlHandler controlHandler;
+    private final AuditLogService auditLogService;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     public ModuleController(
@@ -53,10 +55,21 @@ public class ModuleController {
             RoomService roomService,
             ModuleService moduleService,
             ControlHandler controlHandler) {
+        this(store, roomService, moduleService, controlHandler, null);
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public ModuleController(
+            RoomStore store,
+            RoomService roomService,
+            ModuleService moduleService,
+            ControlHandler controlHandler,
+            @org.springframework.beans.factory.annotation.Autowired(required = false) AuditLogService auditLogService) {
         this.store = store;
         this.roomService = roomService;
         this.moduleService = moduleService;
         this.controlHandler = controlHandler;
+        this.auditLogService = auditLogService;
     }
 
     /**
@@ -358,7 +371,24 @@ public class ModuleController {
         }
 
         try {
-            ModuleRecord module = moduleService.grantWriteAccess(roomId, moduleId, member, ownerToken, targetMemberId);
+            ModuleService.WriteAccessResult result = moduleService.grantWriteAccessResult(roomId, moduleId, member, ownerToken, targetMemberId);
+            ModuleRecord module = result.module();
+
+            if (result.changed() && auditLogService != null) {
+                Member targetMember = room.getMembers().get(targetMemberId);
+                String targetName = targetMember != null ? targetMember.getDisplayName() : targetMemberId;
+                auditLogService.record(
+                        roomId,
+                        "write_access",
+                        member,
+                        targetMember,
+                        targetName,
+                        targetMemberId,
+                        "can_write",
+                        false,
+                        true,
+                        "module: " + module.name());
+            }
 
             // Broadcast module-updated to all connected control sockets
             controlHandler.broadcastModuleUpdated(roomId, RoomMessages.moduleUpdated(module, false));
@@ -419,7 +449,24 @@ public class ModuleController {
         }
 
         try {
-            ModuleRecord module = moduleService.revokeWriteAccess(roomId, moduleId, member, ownerToken, memberId);
+            ModuleService.WriteAccessResult result = moduleService.revokeWriteAccessResult(roomId, moduleId, member, ownerToken, memberId);
+            ModuleRecord module = result.module();
+
+            if (result.changed() && auditLogService != null) {
+                Member targetMember = room.getMembers().get(memberId);
+                String targetName = targetMember != null ? targetMember.getDisplayName() : memberId;
+                auditLogService.record(
+                        roomId,
+                        "write_access",
+                        member,
+                        targetMember,
+                        targetName,
+                        memberId,
+                        "can_write",
+                        true,
+                        false,
+                        "module: " + module.name());
+            }
 
             // Broadcast module-updated to all connected control sockets
             controlHandler.broadcastModuleUpdated(roomId, RoomMessages.moduleUpdated(module, false));

@@ -3,8 +3,10 @@ package com.collabcode.syncservice.handler;
 import com.collabcode.syncservice.room.HostDepartureManager;
 import com.collabcode.syncservice.room.JoinOutcome;
 import com.collabcode.syncservice.room.Member;
+import com.collabcode.syncservice.room.Role;
 import com.collabcode.syncservice.room.Room;
 import com.collabcode.syncservice.room.RoomMessages;
+import com.collabcode.syncservice.room.RoomMode;
 import com.collabcode.syncservice.room.RoomRegistry;
 import com.collabcode.syncservice.room.RoomService;
 import com.collabcode.syncservice.room.RoomStore;
@@ -20,6 +22,8 @@ import org.springframework.web.socket.handler.AbstractWebSocketHandler;
 
 import java.io.IOException;
 import java.net.URI;
+import java.time.Instant;
+import java.util.List;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -169,17 +173,23 @@ public class ControlHandler extends AbstractWebSocketHandler {
     @Override
     public void afterConnectionClosed(@NonNull WebSocketSession session,
                                       @NonNull CloseStatus status) {
+        String roomId = (String) session.getAttributes().get(ATTR_ROOM_ID);
+        String clientSessionId = (String) session.getAttributes().get(ATTR_SESSION_ID);
         registry.remove(session);
         checkHostDeparture(session);
+        checkRequesterDeparture(roomId, clientSessionId);
         log.info("Control: closed wsSession={} room={} status={}",
-                session.getId(), session.getAttributes().get(ATTR_ROOM_ID), status);
+                session.getId(), roomId, status);
     }
 
     @Override
     public void handleTransportError(@NonNull WebSocketSession session,
                                      @NonNull Throwable ex) {
+        String roomId = (String) session.getAttributes().get(ATTR_ROOM_ID);
+        String clientSessionId = (String) session.getAttributes().get(ATTR_SESSION_ID);
         registry.remove(session);
         checkHostDeparture(session);
+        checkRequesterDeparture(roomId, clientSessionId);
         log.warn("Control: transport error wsSession={}: {}", session.getId(), ex.getMessage());
     }
 
@@ -188,6 +198,25 @@ public class ControlHandler extends AbstractWebSocketHandler {
             hostDepartures.hostDisconnected(
                     (String) session.getAttributes().get(ATTR_ROOM_ID),
                     (String) session.getAttributes().get(ATTR_SESSION_ID));
+        }
+    }
+
+    private void checkRequesterDeparture(String roomId, String clientSessionId) {
+        if (roomId == null || clientSessionId == null) return;
+        Room room = roomStore.get(roomId);
+        if (room == null || room.isClosed()) return;
+        Member member = roomService.findMemberBySession(roomId, clientSessionId);
+        if (member == null) return;
+        List<WebSocketSession> remaining = registry.findAllBySessionId(roomId, clientSessionId);
+        boolean hasOpenControlSession = false;
+        for (WebSocketSession s : remaining) {
+            if (s.isOpen() && s.getAttributes().get("docId") == null) {
+                hasOpenControlSession = true;
+                break;
+            }
+        }
+        if (!hasOpenControlSession) {
+            clearAndNotifyEditRequest(roomId, member.getMemberId(), "left");
         }
     }
 
@@ -206,14 +235,73 @@ public class ControlHandler extends AbstractWebSocketHandler {
         Boolean alreadyJoined = (Boolean) session.getAttributes().get(ATTR_JOINED);
 
         if (Boolean.TRUE.equals(alreadyJoined)) {
-            // After join, additional text control messages are silently ignored for now
-            // (further messages such as role changes are handled in US-35, US-43).
-            log.debug("Control: ignoring post-join text frame from wsSession={}", session.getId());
+            handlePostJoinMessage(session, roomId, message.getPayload());
             return;
         }
 
         // --- Process the first text frame as a join message ---
         handleJoin(session, roomId, message.getPayload());
+    }
+
+    private void handlePostJoinMessage(WebSocketSession session, String roomId, String rawText) {
+        JsonNode root;
+        try {
+            root = objectMapper.readTree(rawText);
+        } catch (Exception e) {
+            log.debug("Control: malformed post-join text frame from wsSession={}", session.getId());
+            return;
+        }
+
+        JsonNode typeNode = root.get("type");
+        if (typeNode == null || !typeNode.isTextual()) {
+            return;
+        }
+
+        String type = typeNode.asText();
+        if ("request-edit-access".equals(type)) {
+            handleRequestEditAccess(session, roomId);
+        } else {
+            log.debug("Control: ignoring unhandled post-join message type='{}' from wsSession={}", type, session.getId());
+        }
+    }
+
+    private void handleRequestEditAccess(WebSocketSession session, String roomId) {
+        Room room = roomStore.get(roomId);
+        if (room == null || room.isClosed()) {
+            return;
+        }
+        String sessionId = (String) session.getAttributes().get(ATTR_SESSION_ID);
+        Member sender = roomService.findMemberBySession(roomId, sessionId);
+        if (sender == null) {
+            return;
+        }
+
+        if (room.getMode() != RoomMode.PAIR) {
+            sendControlError(session, "INVALID_REQUEST",
+                    "Edit-access requests apply only in Pair mode; Open mode uses module requests.");
+            return;
+        }
+
+        if (sender.getRole() == Role.HOST || sender.isCanEdit()) {
+            sendControlError(session, "INVALID_REQUEST", "You already have edit access.");
+            return;
+        }
+
+        if (sender.getRole() == Role.OBSERVER) {
+            sendControlError(session, "INVALID_REQUEST",
+                    "Observers cannot request edit access; ask the Host to make you a participant first.");
+            return;
+        }
+
+        Instant now = Instant.now();
+        boolean added = room.addEditRequest(sender.getMemberId(), sender.getDisplayName(), now);
+        if (!added) {
+            // One pending request per member: asking again is a no-op
+            return;
+        }
+
+        sendToHostControlSessions(roomId,
+                RoomMessages.editAccessRequested(sender.getMemberId(), sender.getDisplayName(), now));
     }
 
     // -----------------------------------------------------------------------
@@ -347,6 +435,85 @@ public class ControlHandler extends AbstractWebSocketHandler {
             }
         } catch (Exception e) {
             log.error("Control: failed to broadcast module-updated for room={}: {}", roomId, e.getMessage());
+        }
+    }
+
+    /**
+     * Broadcast an {@code audit-entry} message to every control socket in the room (US-58, V2.23; FR34).
+     */
+    public void broadcastAuditEntry(String roomId, Room.AuditLogEntry entry) {
+        Room room = roomStore.get(roomId);
+        if (room == null || entry == null) {
+            return;
+        }
+
+        try {
+            String json = objectMapper.writeValueAsString(RoomMessages.auditEntry(entry));
+            for (WebSocketSession target : registry.getJoinedControlSessions(roomId)) {
+                sendText(target, json);
+            }
+        } catch (Exception e) {
+            log.error("Control: failed to broadcast audit-entry for room={}: {}", roomId, e.getMessage());
+        }
+    }
+
+    /**
+     * Send message to all joined control sessions of the Host in the room (US-38, V2.22).
+     */
+    public void sendToHostControlSessions(String roomId, Map<String, Object> message) {
+        Room room = roomStore.get(roomId);
+        if (room == null) return;
+        try {
+            String json = objectMapper.writeValueAsString(message);
+            for (WebSocketSession target : registry.getJoinedControlSessions(roomId)) {
+                String sessId = (String) target.getAttributes().get(ATTR_SESSION_ID);
+                Member member = roomService.findMemberBySession(roomId, sessId);
+                if (member != null && member.getRole() == Role.HOST) {
+                    sendText(target, json);
+                }
+            }
+        } catch (Exception e) {
+            log.warn("Control: failed to send to host control sessions for room={}: {}", roomId, e.getMessage());
+        }
+    }
+
+    /**
+     * Send message to all control sessions of a specific member by their sessionId (US-38, V2.22).
+     */
+    public void sendToMemberControlSessions(String roomId, String sessionId, Map<String, Object> message) {
+        try {
+            String json = objectMapper.writeValueAsString(message);
+            for (WebSocketSession session : registry.findAllBySessionId(roomId, sessionId)) {
+                if (session.isOpen() && session.getAttributes().get("docId") == null) {
+                    sendText(session, json);
+                }
+            }
+        } catch (Exception e) {
+            log.warn("Control: failed to send to member control sessions: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * Clear pending edit request for member and notify Host sockets (US-38, V2.22).
+     */
+    public void clearAndNotifyEditRequest(String roomId, String memberId, String reason) {
+        Room room = roomStore.get(roomId);
+        if (room == null) return;
+        Room.EditRequest removed = room.removeEditRequest(memberId);
+        if (removed != null) {
+            sendToHostControlSessions(roomId, RoomMessages.editAccessRequestCleared(memberId, reason));
+        }
+    }
+
+    /**
+     * Send an error frame to a control session (V2.5, V2.22).
+     */
+    public void sendControlError(WebSocketSession session, String code, String message) {
+        try {
+            String json = objectMapper.writeValueAsString(RoomMessages.controlError(code, message));
+            sendText(session, json);
+        } catch (Exception e) {
+            log.warn("Control: failed to send error message to wsSession={}: {}", session.getId(), e.getMessage());
         }
     }
 
