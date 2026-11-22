@@ -622,6 +622,7 @@ export default function RoomPage(props: RoomPageProps = {}) {
           setPendingEditRequests((prev) => prev.filter((item) => item.member_id !== msg.member_id))
         },
         onControlError: (msg: ControlErrorMessage) => {
+          editRequestPendingRef.current = false
           setEditRequestPending(false)
           setEditRequestError(msg.message || 'Could not complete request.')
         },
@@ -700,7 +701,10 @@ export default function RoomPage(props: RoomPageProps = {}) {
             }
             if (me?.permissions && typeof me.permissions.can_edit === 'boolean') {
               setMyCanEdit(me.permissions.can_edit)
-              if (me.permissions.can_edit) setEditRequestPending(false)
+              if (me.permissions.can_edit) {
+                setEditRequestPending(false)
+                editRequestPendingRef.current = false
+              }
             }
           }
           setHostOnlyRun(roster.host_only_run === true)

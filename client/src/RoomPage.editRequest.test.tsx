@@ -359,5 +359,10 @@ describe('RoomPage US-38: Request edit access in Pair mode', () => {
     expect(container.querySelector('[data-testid="edit-request-error"]')?.textContent).toBe(
       'Observers cannot request edit access.',
     )
+    const btn = container.querySelector('[data-testid="request-edit-access-button"]') as HTMLButtonElement
+    act(() => {
+      btn.click()
+    })
+    expect(controlSocket()?.sentJson.filter((m) => m.type === 'request-edit-access')).toHaveLength(1)
   })
 })
