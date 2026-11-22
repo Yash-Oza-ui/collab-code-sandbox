@@ -93,14 +93,14 @@ async function run() {
   const guestSession = randomUUID()
 
   // 2. Connect control sockets
-  const hostCtrl = await open(`${wsBase}/v1/rooms/${roomId}/control`, 'hostCtrl')
-  const guestCtrl = await open(`${wsBase}/v1/rooms/${roomId}/control`, 'guestCtrl')
+  const hostCtrl = await open(`${wsBase}/ws/rooms/${roomId}?session_id=${hostSession}`, 'hostCtrl')
+  const guestCtrl = await open(`${wsBase}/ws/rooms/${roomId}?session_id=${guestSession}`, 'guestCtrl')
 
-  hostCtrl.socket.send(JSON.stringify({ type: 'join', session_id: hostSession, display_name: 'Alice', owner_token: ownerToken }))
+  hostCtrl.socket.send(JSON.stringify({ type: 'join', display_name: 'Alice', owner_token: ownerToken }))
   const hostJoined = await pollMessage(hostCtrl, 'joined')
   assert(hostJoined, 'host joined')
 
-  guestCtrl.socket.send(JSON.stringify({ type: 'join', session_id: guestSession, display_name: 'Bob' }))
+  guestCtrl.socket.send(JSON.stringify({ type: 'join', display_name: 'Bob' }))
   const guestJoined = await pollMessage(guestCtrl, 'joined')
   assert(guestJoined, 'guest joined')
   const guestId = guestJoined.member_id
@@ -171,6 +171,7 @@ async function run() {
 
   hostCtrl.socket.close()
   guestCtrl.socket.close()
+  await sleep(300)
   console.log('US-58: all integration checks passed successfully!')
 }
 
