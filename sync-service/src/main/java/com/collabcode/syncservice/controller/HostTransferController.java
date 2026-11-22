@@ -1,5 +1,6 @@
 package com.collabcode.syncservice.controller;
 
+import com.collabcode.syncservice.audit.AuditLogService;
 import com.collabcode.syncservice.handler.ControlHandler;
 import com.collabcode.syncservice.room.Member;
 import com.collabcode.syncservice.room.OwnerTokens;
@@ -49,18 +50,29 @@ public class HostTransferController {
     private final RoomRegistry registry;
     private final HostGuard hostGuard;
     private final ControlHandler controlHandler;
+    private final AuditLogService auditLogService;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     public HostTransferController(RoomService roomService, RoomRegistry registry, HostGuard hostGuard) {
-        this(roomService, registry, hostGuard, null);
+        this(roomService, registry, hostGuard, null, null);
+    }
+
+    public HostTransferController(RoomService roomService, RoomRegistry registry, HostGuard hostGuard, ControlHandler controlHandler) {
+        this(roomService, registry, hostGuard, controlHandler, null);
     }
 
     @org.springframework.beans.factory.annotation.Autowired
-    public HostTransferController(RoomService roomService, RoomRegistry registry, HostGuard hostGuard, ControlHandler controlHandler) {
+    public HostTransferController(
+            RoomService roomService,
+            RoomRegistry registry,
+            HostGuard hostGuard,
+            ControlHandler controlHandler,
+            @org.springframework.beans.factory.annotation.Autowired(required = false) AuditLogService auditLogService) {
         this.roomService = roomService;
         this.registry = registry;
         this.hostGuard = hostGuard;
         this.controlHandler = controlHandler;
+        this.auditLogService = auditLogService;
     }
 
     @PostMapping("/rooms/{roomId}/members/{memberId}/make-host")
@@ -103,6 +115,19 @@ public class HostTransferController {
         sendHostGranted(roomId, newHost.getSessionId(), newHost.getMemberId(), newOwnerToken);
         if (controlHandler != null) {
             controlHandler.clearAndNotifyEditRequest(roomId, newHost.getMemberId(), "role_changed");
+        }
+        if (auditLogService != null) {
+            auditLogService.record(
+                    roomId,
+                    "host_transfer",
+                    g.caller(),
+                    newHost,
+                    newHost.getDisplayName(),
+                    newHost.getMemberId(),
+                    "role",
+                    "participant",
+                    "host",
+                    null);
         }
         broadcastRoster(room);
 
