@@ -64,6 +64,9 @@ class FailingInputResponse(BaseModel):
     expected_output: str | None = None
     actual_output: str | None = None
     tests_executed: int = 0
+    aggregate_runs_executed: int = 0
+    aggregate_batch_requests: int = 0
+    aggregate_run_cap: int = 0
     minimization_status: Literal["completed", "budget_exhausted", "not_applicable"] = "not_applicable"
     test_case: TestCase | None = None
     can_save_as_test_case: bool = False
@@ -76,6 +79,7 @@ class Budget:
         self.remaining = settings.FAILING_INPUT_MAX_RUNS
         self.deadline = time.monotonic() + settings.FAILING_INPUT_BUDGET_SECONDS
         self.used = 0
+        self.batch_requests = 0
         self.exhausted = False
 
     def can_run(self, count: int) -> bool:
@@ -143,6 +147,8 @@ async def sandbox_batch(
     }
     if expected is not None:
         body["expected_outputs"] = expected
+    # Count each outgoing batch attempt independently of successful run completions.
+    budget.batch_requests += 1
     try:
         async with httpx.AsyncClient(timeout=settings.FAILING_INPUT_HTTP_TIMEOUT_SECONDS) as client:
             res = await client.post(url, json=body, headers={"X-Internal-Token": token})
@@ -370,5 +376,13 @@ async def failing_input(
     # Count the AI-free skipped path here without double-counting chain failures.
     if step.error_code and not chain_used:
         record_fallback(payload.room_id)
+    # Report total sandbox processes, not only candidate tests. Reference runs,
+    # script validation, and minimizer probes all share the same configured cap.
+    final.aggregate_runs_executed = budget.used
+    final.aggregate_batch_requests = budget.batch_requests
+    final.aggregate_run_cap = settings.FAILING_INPUT_MAX_RUNS
+    response.headers["X-Failing-Input-Aggregate-Runs"] = str(budget.used)
+    response.headers["X-Failing-Input-Batch-Requests"] = str(budget.batch_requests)
+    response.headers["X-Failing-Input-Run-Cap"] = str(settings.FAILING_INPUT_MAX_RUNS)
     request.state.error_code = step.error_code
     return final

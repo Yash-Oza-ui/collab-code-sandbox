@@ -184,6 +184,20 @@ jobs:
         run: |
           if [ -f gradlew ]; then chmod +x gradlew && ./gradlew build --no-daemon; else gradle build --no-daemon; fi
   
+  pre-commit:
+    name: pre-commit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install pre-commit
+        run: python -m pip install pre-commit
+      - name: pre-commit run --all-files
+        run: pre-commit run --all-files
+
   gitleaks:
     name: gitleaks
     runs-on: ubuntu-latest
@@ -232,6 +246,17 @@ jobs:
       - name: Smoke test and integration tests
         run: bash tests/integration/run-all.sh
 
+      - name: Upload measured Task 3 and US-71 Docker evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: task3-and-batch-evidence
+          path: |
+            tests/integration/results/task3-evaluation.json
+            tests/integration/results/task3-evaluation.md
+            tests/integration/results/us71-container-count.json
+          if-no-files-found: warn
+
       - name: Show container status and logs (on failure)
         if: failure()
         run: |
@@ -248,7 +273,7 @@ jobs:
   summary:
     name: build-and-test
     if: always()
-    needs: [client, ai-ml-service, spring-boot, gitleaks, integration]
+    needs: [client, ai-ml-service, spring-boot, pre-commit, gitleaks, integration]
     runs-on: ubuntu-latest
     steps:
       - name: Check results of all jobs
