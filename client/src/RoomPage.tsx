@@ -46,6 +46,7 @@ import {
   type EditAccessRequestClearedMessage,
   type EditAccessRequestedMessage,
   type EditAccessRespondedMessage,
+  type AuditEntryMessage,
 } from './awarenessWs'
 import { ownerTokenKey } from './createRoom'
 import {
@@ -64,6 +65,12 @@ import {
   listEditRequests,
   type PendingEditRequest,
 } from './hostApi'
+import {
+  fetchAuditLog,
+  formatAuditEntry,
+  formatAuditTimestamp,
+  type AuditLogEntry,
+} from './auditLogApi'
 import { getRoomIdFromPath } from './roomId'
 import { useRoomDoc } from './roomDoc'
 import { parseRunResultFrame, runNotAllowedMessage } from './runCode'
@@ -223,6 +230,10 @@ export default function RoomPage(props: RoomPageProps = {}) {
   const [editRequestStatusMessage, setEditRequestStatusMessage] = useState<string | null>(null)
   const [editRequestError, setEditRequestError] = useState<string | null>(null)
   const [respondingEditRequestFor, setRespondingEditRequestFor] = useState<string | null>(null)
+  const [auditLogOpen, setAuditLogOpen] = useState(false)
+  const [auditEntries, setAuditEntries] = useState<AuditLogEntry[]>([])
+  const [auditLogLoading, setAuditLogLoading] = useState(false)
+  const [auditLogError, setAuditLogError] = useState<string | null>(null)
   const isHost = role?.toLowerCase() === 'host'
   const isEditorReadOnly =
     isObserver ||
@@ -631,6 +642,12 @@ export default function RoomPage(props: RoomPageProps = {}) {
           setEditRequestPending(false)
           setEditRequestError(msg.message || 'Could not complete request.')
         },
+        onAuditEntry: (msg: AuditEntryMessage) => {
+          setAuditEntries((prev) => {
+            if (prev.some((e) => e.id === msg.entry.id)) return prev
+            return [msg.entry, ...prev]
+          })
+        },
         onModuleUpdated: (msg) => {
           if (msg.deleted) {
             setWorkspaceModules((prev) => prev.filter((m) => m.module_id !== msg.module_id))
@@ -996,6 +1013,37 @@ export default function RoomPage(props: RoomPageProps = {}) {
       setPendingEditRequests((prev) => prev.filter((item) => item.member_id !== memberId))
     } else {
       setEditRequestError(res.error)
+    }
+  }
+
+  async function handleToggleAuditLog() {
+    const nextOpen = !auditLogOpen
+    setAuditLogOpen(nextOpen)
+    if (!nextOpen || !roomId) return
+    const sessionId = sessionIdRef.current ?? wsOptions?.sessionId ?? getCollabSessionId()
+    setAuditLogLoading(true)
+    setAuditLogError(null)
+    const res = await fetchAuditLog({
+      roomId,
+      sessionId,
+      fetchFn: wsOptions?.fetchFn,
+    })
+    setAuditLogLoading(false)
+    if (res.ok) {
+      setAuditEntries((prev) => {
+        const seen = new Set<string>()
+        const merged: AuditLogEntry[] = []
+        for (const entry of [...res.entries, ...prev]) {
+          if (!seen.has(entry.id)) {
+            seen.add(entry.id)
+            merged.push(entry)
+          }
+        }
+        merged.sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp))
+        return merged
+      })
+    } else {
+      setAuditLogError(res.error)
     }
   }
 
@@ -1660,7 +1708,59 @@ export default function RoomPage(props: RoomPageProps = {}) {
             ⚠️ {docError}
           </span>
         )}
+        {joinStatus === 'joined' && (
+          <button
+            type="button"
+            className="audit-log-toggle-button"
+            data-testid="audit-log-toggle"
+            onClick={() => void handleToggleAuditLog()}
+          >
+            {auditLogOpen ? 'Hide Audit Log' : 'Audit Log'}
+          </button>
+        )}
       </header>
+      {auditLogOpen && (
+        <section className="audit-log-panel" data-testid="audit-log-panel" aria-label="Audit Log">
+          <div className="audit-log-header">
+            <h3>Activity &amp; Audit Log</h3>
+            <button
+              type="button"
+              data-testid="audit-log-close"
+              onClick={() => setAuditLogOpen(false)}
+            >
+              Close
+            </button>
+          </div>
+          {auditLogLoading && <p data-testid="audit-log-loading">Loading audit log...</p>}
+          {auditLogError && (
+            <p role="alert" data-testid="audit-log-error">
+              {auditLogError}
+            </p>
+          )}
+          {!auditLogLoading && !auditLogError && auditEntries.length === 0 && (
+            <p data-testid="audit-log-empty">No permission or role changes yet.</p>
+          )}
+          {auditEntries.length > 0 && (
+            <ul className="audit-log-list" data-testid="audit-log-list">
+              {auditEntries.map((entry) => (
+                <li key={entry.id} data-testid={`audit-entry-${entry.id}`}>
+                  <span className="audit-log-message">{formatAuditEntry(entry)}</span>
+                  <span className="audit-log-meta">
+                    {' '}
+                    ({entry.property}: {String(entry.old_value)} -&gt; {String(entry.new_value)})
+                  </span>
+                  {entry.timestamp && (
+                    <time className="audit-log-time" dateTime={entry.timestamp}>
+                      {' '}
+                      {formatAuditTimestamp(entry.timestamp)}
+                    </time>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+      )}
       {roomMode?.mode === 'open' && (
         <WorkspacePanel
           roomId={roomId || ''}
