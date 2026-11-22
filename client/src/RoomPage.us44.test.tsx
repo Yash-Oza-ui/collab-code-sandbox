@@ -5,8 +5,10 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import * as Y from 'yjs'
 import RoomPage from './RoomPage'
+import { USER_COLORS } from './userColor'
 
 const activeBindings: Array<{ ytext: Y.Text; model: any }> = []
+const deltaDecorationsSpy = vi.fn().mockReturnValue([])
 
 vi.mock('@monaco-editor/react', async () => {
   const React = await import('react')
@@ -14,9 +16,11 @@ vi.mock('@monaco-editor/react', async () => {
     default: ({ options, onMount }: any) => {
       React.useEffect(() => {
         onMount?.({
-          getModel: () => ({}),
+          getModel: () => ({
+            getPositionAt: (offset: number) => ({ lineNumber: 1, column: offset + 1 }),
+          }),
           updateOptions: vi.fn(),
-          deltaDecorations: vi.fn().mockReturnValue([]),
+          deltaDecorations: deltaDecorationsSpy,
         })
       }, [])
       return <div data-testid="mock-monaco" data-readonly={String(Boolean(options?.readOnly))} />
@@ -110,6 +114,7 @@ describe('RoomPage US-44: Read every module live', () => {
   let root: Root | null = null
 
   beforeEach(() => {
+    deltaDecorationsSpy.mockClear()
     MockWs.instances = []
     MockWs.joinRole = 'participant'
     MockWs.initialModules = []
@@ -281,6 +286,89 @@ describe('RoomPage US-44: Read every module live', () => {
 
     await vi.waitFor(() => {
       expect(activeBindings.at(-1)?.ytext.toString()).toBe('beta-resynced')
+    })
+  })
+
+  it('renders remote cursor labels against the active module doc after switching modules in Open mode', async () => {
+    MockWs.joinRole = 'participant'
+    MockWs.initialModules = [
+        {
+        module_id: 'mod_a',
+        name: 'main.py',
+        owner_member_id: 'm_owner',
+        writers: [],
+        is_entry: true,
+        pending: false,
+        },
+        {
+        module_id: 'mod_b',
+        name: 'utils.py',
+        owner_member_id: 'm_owner',
+        writers: [],
+        is_entry: false,
+        pending: false,
+        },
+    ]
+
+    const moduleDocs = new Map<string, Y.Doc>()
+    const docA = new Y.Doc()
+    const docB = new Y.Doc()
+    docA.getText('monaco').insert(0, 'alpha')
+    docB.getText('monaco').insert(0, 'beta-module')
+    moduleDocs.set('mod_a', docA)
+    moduleDocs.set('mod_b', docB)
+
+    const awarenessRef: { current: any } = { current: null }
+
+    root = createRoot(container)
+    act(() => {
+        root?.render(
+        <RoomPage
+            awarenessRef={awarenessRef}
+            moduleDocs={moduleDocs}
+            wsOptions={{ WebSocketClass: MockWs as unknown as typeof WebSocket }}
+        />,
+        )
+    })
+
+    submitDisplayName('Reader')
+
+    await vi.waitFor(() => {
+        expect(activeBindings.at(-1)?.ytext.toString()).toBe('alpha')
+        expect(awarenessRef.current).toBeTruthy()
+    })
+
+    const utilsBtn = Array.from(container.querySelectorAll('button')).find((b) =>
+        b.textContent?.includes('utils.py'),
+    )
+    expect(utilsBtn).toBeTruthy()
+    act(() => {
+        utilsBtn?.click()
+    })
+
+    await vi.waitFor(() => {
+        expect(activeBindings.at(-1)?.ytext.toString()).toBe('beta-module')
+    })
+
+    deltaDecorationsSpy.mockClear()
+
+    const headOnB = Y.createRelativePositionFromTypeIndex(docB.getText('monaco'), 4)
+    act(() => {
+        awarenessRef.current.states.set(999, {
+        user: { name: 'Owner', color: USER_COLORS[0], member_id: 'm_owner' },
+        selection: { head: headOnB },
+        })
+        awarenessRef.current.emit('change', [{ added: [999], updated: [], removed: [] }, 'remote'])
+    })
+
+    await vi.waitFor(() => {
+        const lastCall = deltaDecorationsSpy.mock.calls.at(-1)
+        expect(lastCall).toBeTruthy()
+        const decorations = lastCall?.[1] as Array<any>
+        expect(decorations).toHaveLength(1)
+        expect(decorations[0].range.startColumn).toBe(5)
+        expect(decorations[0].options.after.content).toContain('Owner')
+        expect(decorations[0].options.after.inlineClassName).toContain('remote-cursor-label-0')
     })
   })
 })
