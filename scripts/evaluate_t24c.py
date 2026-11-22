@@ -322,63 +322,71 @@ def run_evaluation():
     print("\n--- 6. Evaluating Monthly AI Cost Cap & Concurrent Reservations (US-24) ---")
     reset_counters()
     tracker = get_tracker()
-    tracker.monthly_budget_usd = 1.00
-    tracker.token_cost_per_token = 0.001  # $1.00 = 1000 tokens
-
-    # 700 tokens -> $0.70 (below 80%)
-    record_model_call("room-cap", tokens=700)
-    below_alert = tracker.alert_80_percent_triggered
-    # 150 tokens -> $0.85 (above 80%)
-    record_model_call("room-cap", tokens=150)
-    cross_alert = tracker.alert_80_percent_triggered
-    # 150 tokens -> $1.00 (cap reached)
-    record_model_call("room-cap", tokens=150)
-    cap_reached = is_cost_cap_reached()
-
-    # Blocked call
-    blocked_raised = False
+    orig_budget = tracker._monthly_budget_override
+    orig_cost = tracker._token_cost_override
     try:
-        tracker.reserve_call(estimated_tokens=100)
-    except CostCapReachedError:
-        blocked_raised = True
+        tracker.monthly_budget_usd = 1.00
+        tracker.token_cost_per_token = 0.001  # $1.00 = 1000 tokens
 
-    # Concurrent reservation race test under barrier
-    reset_counters()
-    tracker.token_cost_per_token = 0.0000035
-    tracker.monthly_budget_usd = 201 * 0.0000035  # Headroom for exactly 2 x 100-token calls
-    succ_res, block_res = [], []
-    r_lock = threading.Lock()
-    r_bar = threading.Barrier(10)
+        # 700 tokens -> $0.70 (below 80%)
+        record_model_call("room-cap", tokens=700)
+        below_alert = tracker.alert_80_percent_triggered
+        # 150 tokens -> $0.85 (above 80%)
+        record_model_call("room-cap", tokens=150)
+        cross_alert = tracker.alert_80_percent_triggered
+        # 150 tokens -> $1.00 (cap reached)
+        record_model_call("room-cap", tokens=150)
+        cap_reached = is_cost_cap_reached()
 
-    def conc_res(idx):
-        r_bar.wait()
+        # Blocked call
+        blocked_raised = False
         try:
-            r = tracker.reserve_call(estimated_tokens=100)
-            with r_lock:
-                succ_res.append((idx, r))
+            tracker.reserve_call(estimated_tokens=100)
         except CostCapReachedError:
-            with r_lock:
-                block_res.append(idx)
+            blocked_raised = True
 
-    th_pool = [threading.Thread(target=conc_res, args=(i,)) for i in range(10)]
-    for t in th_pool: t.start()
-    for t in th_pool: t.join()
+        # Concurrent reservation race test under barrier
+        reset_counters()
+        tracker.token_cost_per_token = 0.0000035
+        tracker.monthly_budget_usd = 201 * 0.0000035  # Headroom for exactly 2 x 100-token calls
+        succ_res, block_res = [], []
+        r_lock = threading.Lock()
+        r_bar = threading.Barrier(10)
 
-    conc_pass = (len(succ_res) == 2 and len(block_res) == 8 and tracker.get_active_reservations_tokens() == 200)
-    for _, r in succ_res: r.release()
+        def conc_res(idx):
+            r_bar.wait()
+            try:
+                r = tracker.reserve_call(estimated_tokens=100)
+                with r_lock:
+                    succ_res.append((idx, r))
+            except CostCapReachedError:
+                with r_lock:
+                    block_res.append(idx)
 
-    cap_pass = (not below_alert) and cross_alert and cap_reached and blocked_raised and conc_pass
-    results["cost_cap"].append({
-        "id": "CAP-01",
-        "below_alert": below_alert,
-        "cross_alert": cross_alert,
-        "cap_reached": cap_reached,
-        "reservation_blocked": blocked_raised,
-        "concurrent_admissions": len(succ_res),
-        "concurrent_rejections": len(block_res),
-        "status": "PASS" if cap_pass else "FAIL",
-    })
-    print(f"[{'PASS' if cap_pass else 'FAIL'}] CAP-01: 80% alert={cross_alert}, Cap reached={cap_reached}, Concurrent barrier: admitted={len(succ_res)}, rejected={len(block_res)}")
+        th_pool = [threading.Thread(target=conc_res, args=(i,)) for i in range(10)]
+        for t in th_pool: t.start()
+        for t in th_pool: t.join()
+
+        conc_pass = (len(succ_res) == 2 and len(block_res) == 8 and tracker.get_active_reservations_tokens() == 200)
+        for _, r in succ_res: r.release()
+
+        cap_pass = (not below_alert) and cross_alert and cap_reached and blocked_raised and conc_pass
+        results["cost_cap"].append({
+            "id": "CAP-01",
+            "below_alert": below_alert,
+            "cross_alert": cross_alert,
+            "cap_reached": cap_reached,
+            "reservation_blocked": blocked_raised,
+            "concurrent_admissions": len(succ_res),
+            "concurrent_rejections": len(block_res),
+            "status": "PASS" if cap_pass else "FAIL",
+        })
+        print(f"[{'PASS' if cap_pass else 'FAIL'}] CAP-01: 80% alert={cross_alert}, Cap reached={cap_reached}, Concurrent barrier: admitted={len(succ_res)}, rejected={len(block_res)}")
+    finally:
+        reset_counters()
+        with tracker._lock:
+            tracker._monthly_budget_override = orig_budget
+            tracker._token_cost_override = orig_cost
 
     # ------------------------------------------------------------------------
     # 7. Fallback Behavior (US-78)
@@ -396,45 +404,55 @@ def run_evaluation():
     ]
 
     for fid, trigger, cfg, exp_code, exp_msg, fstatus in fallbacks:
-        if cfg.get("force_cap"):
-            tr = get_tracker()
-            tr.monthly_budget_usd = 1.00
-            tr.token_cost_per_token = 0.001
-            record_model_call("room-fb-test", tokens=1000)
-        else:
-            reset_counters()
+        tr = get_tracker()
+        orig_fb_budget = tr._monthly_budget_override
+        orig_fb_cost = tr._token_cost_override
+        try:
+            if cfg.get("force_cap"):
+                tr.monthly_budget_usd = 1.00
+                tr.token_cost_per_token = 0.001
+                record_model_call("room-fb-test", tokens=1000)
+            else:
+                reset_counters()
 
-        if cfg.get("provider_error"):
-            patcher = patch("app.llm.client.LLMClient.complete", side_effect=AsyncMock(side_effect=RuntimeError("500")))
-        else:
-            patcher = patch("app.llm.client.LLMClient.complete", side_effect=AsyncMock(return_value="Valid explanation"))
+            if cfg.get("provider_error"):
+                patcher = patch("app.llm.client.LLMClient.complete", side_effect=AsyncMock(side_effect=RuntimeError("500")))
+            else:
+                patcher = patch("app.llm.client.LLMClient.complete", side_effect=AsyncMock(return_value="Valid explanation"))
 
-        with patcher:
-            resp = client.post("/v1/analyses/crash-explanation", json={
-                "request_id": f"req-{fid}",
-                "room_id": f"room-{fid}",
-                "analysis_id": f"ana-{fid}",
-                "request_type": "crash_explanation",
-                "language": "cpp",
-                "consent": cfg["consent"],
-                "ai_enabled": cfg["ai_enabled"],
-                "sanitizer_output": fixtures[0][5],
-                "code_snippet": "v[5] = 10;",
+            with patcher:
+                resp = client.post("/v1/analyses/crash-explanation", json={
+                    "request_id": f"req-{fid}",
+                    "room_id": f"room-{fid}",
+                    "analysis_id": f"ana-{fid}",
+                    "request_type": "crash_explanation",
+                    "language": "cpp",
+                    "consent": cfg["consent"],
+                    "ai_enabled": cfg["ai_enabled"],
+                    "sanitizer_output": fixtures[0][5],
+                    "code_snippet": "v[5] = 10;",
+                })
+                data = resp.json()
+                obs_code = data.get("ai_step", {}).get("error_code")
+                obs_status = data.get("ai_step", {}).get("status")
+
+            f_pass = (obs_status == "skipped" and obs_code == exp_code)
+            results["fallback"].append({
+                "id": fid,
+                "trigger": trigger,
+                "expected_code": exp_code,
+                "observed_code": obs_code,
+                "upstream_status": "PASS" if f_pass else "FAIL",
+                "downstream_mapper": "FallbackMessageMapper.java (FallbackMessageMapperTest.java)",
+                "mapped_user_message": exp_msg,
+                "status": fstatus if f_pass else "FAIL",
             })
-            data = resp.json()
-            obs_code = data.get("ai_step", {}).get("error_code")
-            obs_status = data.get("ai_step", {}).get("status")
-
-        f_pass = (obs_status == "skipped" and obs_code == exp_code)
-        results["fallback"].append({
-            "id": fid,
-            "trigger": trigger,
-            "expected_code": exp_code,
-            "observed_code": obs_code,
-            "expected_message": exp_msg,
-            "status": fstatus if f_pass else "FAIL",
-        })
-        print(f"[{'PASS' if f_pass else 'FAIL'}] {fid}: Trigger '{trigger}' -> error_code={obs_code}, status={obs_status}")
+            print(f"[{'PASS' if f_pass else 'FAIL'}] {fid}: Trigger '{trigger}' -> error_code={obs_code}, status={obs_status} (maps downstream to: \"{exp_msg}\")")
+        finally:
+            reset_counters()
+            with tr._lock:
+                tr._monthly_budget_override = orig_fb_budget
+                tr._token_cost_override = orig_fb_cost
 
     # ------------------------------------------------------------------------
     # 8. Concurrent Multi-Room Load Evaluation & Stampede Analysis
@@ -487,6 +505,14 @@ def run_evaluation():
             lats_fb = list(pool.map(make_req, stg3))
 
     def calc_percentiles(arr):
+        """Calculate p50, p95, and max latencies using the nearest-rank method.
+
+        Nearest-rank percentile convention: rank = int(len(s) * P) (0-indexed).
+        For sample sizes N <= 20:
+          - N = 16: rank = int(16 * 0.95) = 15, matching s[15] (the maximum element).
+          - N = 8:  rank = int(8 * 0.95)  = 7,  matching s[7] (the maximum element).
+        Under nearest-rank indexing, p95 equals max for these small sample sizes.
+        """
         s = sorted(arr)
         return {
             "p50": round(s[len(s) // 2], 2),
@@ -521,17 +547,23 @@ def run_evaluation():
     print(f"   Warm cache hits:  16 (p50={p_warm['p50']}ms, p95={p_warm['p95']}ms, max={p_warm['max']}ms)")
     print(f"   Fallbacks:         8 (p50={p_fb['p50']}ms, p95={p_fb['p95']}ms, max={p_fb['max']}ms)")
 
-    # Cold Cache Stampede Demonstration
+    # Cold Cache Stampede Demonstration (Synchronized using 4-party barrier)
     reset_counters()
     get_analysis_cache().clear()
+    s_barrier = threading.Barrier(4)
+
+    def make_stampede_req(idx):
+        s_barrier.wait(timeout=5.0)
+        return make_req(("room-stampede", 900 + idx, 0, True))
+
     with patch.object(LLMClient, "_execute_complete", mock_exec_load):
         with ThreadPoolExecutor(max_workers=4) as stampede_pool:
             stampede_lats = list(stampede_pool.map(
-                lambda idx: make_req(("room-stampede", 900 + idx, 0, True)),
+                make_stampede_req,
                 range(4)
             ))
     stampede_tot = get_total_usage()
-    print(f"[OBSERVATION] Cold Cache Stampede: 4 identical simultaneous requests produced {stampede_tot['total_model_calls']} model calls (expected un-deduplicated window) and 0 counter corruption.")
+    print(f"[OBSERVATION] Cold Cache Stampede: 4 synchronized simultaneous requests produced {stampede_tot['total_model_calls']} model calls (expected un-deduplicated window) and 0 counter corruption.")
 
     print("\n" + "=" * 80)
     print("ALL EVALUATIONS COMPLETE.")

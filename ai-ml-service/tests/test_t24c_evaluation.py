@@ -36,6 +36,8 @@ from app.counters import (
     record_fallback,
     record_model_call,
     reset_counters,
+    set_clock,
+    wait_for_alert_webhook,
 )
 from app.llm.client import LLMClient
 from app.llm.explainer import split_sentences
@@ -47,6 +49,28 @@ from app.sanitizer import (
 )
 
 client = TestClient(app, raise_server_exceptions=False)
+
+
+@pytest.fixture(autouse=True)
+def isolate_tracker_and_cache():
+    """Ensure clean counter, budget configuration, clock, and cache state before and after every test (test isolation)."""
+    tracker = get_tracker()
+    orig_budget_override = tracker._monthly_budget_override
+    orig_token_cost_override = tracker._token_cost_override
+    orig_clock = tracker._clock_fn
+    reset_counters()
+    set_clock(None)
+    get_analysis_cache().clear()
+    try:
+        yield
+    finally:
+        wait_for_alert_webhook(timeout=1.0)
+        reset_counters()
+        with tracker._lock:
+            tracker._monthly_budget_override = orig_budget_override
+            tracker._token_cost_override = orig_token_cost_override
+            tracker._clock_fn = orig_clock
+        get_analysis_cache().clear()
 
 
 # ============================================================================
@@ -512,59 +536,66 @@ def test_usage_counters_controlled_sequence_and_aggregation():
 
 def test_monthly_cost_cap_admission_and_rejection(caplog):
     """Verify admission while budget remains, 80% alert threshold, and rejection with COST_CAP_REACHED."""
-    reset_counters()
     tracker = get_tracker()
+    orig_budget = tracker._monthly_budget_override
+    orig_cost = tracker._token_cost_override
+    reset_counters()
+    try:
+        budget = 1.00  # $1.00 budget
+        tracker.monthly_budget_usd = budget
+        tracker.token_cost_per_token = 0.001  # $0.001 per token (1000 tokens = $1.00)
 
-    budget = 1.00  # $1.00 budget
-    tracker.monthly_budget_usd = budget
-    tracker.token_cost_per_token = 0.001  # $0.001 per token (1000 tokens = $1.00)
+        # 1. Admit request below 80% (700 tokens = $0.70)
+        with caplog.at_level(logging.WARNING):
+            record_model_call("room-cap-1", tokens=700)
+            assert tracker.alert_80_percent_triggered is False
+            assert not is_cost_cap_reached()
+            assert tracker.get_monthly_spend_usd() == 0.70
 
-    # 1. Admit request below 80% (700 tokens = $0.70)
-    with caplog.at_level(logging.WARNING):
-        record_model_call("room-cap-1", tokens=700)
-        assert tracker.alert_80_percent_triggered is False
-        assert not is_cost_cap_reached()
-        assert tracker.get_monthly_spend_usd() == 0.70
+            # 2. Cross 80% threshold ($0.80 out of $1.00): 150 more tokens -> 850 total = $0.85
+            record_model_call("room-cap-1", tokens=150)
+            assert tracker.alert_80_percent_triggered is True
+            assert not is_cost_cap_reached()
+            assert tracker.get_monthly_spend_usd() == 0.85
 
-        # 2. Cross 80% threshold ($0.80 out of $1.00): 150 more tokens -> 850 total = $0.85
+        alert_logs = [r for r in caplog.records if "AI_COST_CAP_ALERT" in r.getMessage()]
+        assert len(alert_logs) == 1
+        assert "spend_usd=0.8500" in alert_logs[0].getMessage()
+
+        # 3. Reach budget cap (150 more tokens -> 1000 total = $1.00)
         record_model_call("room-cap-1", tokens=150)
-        assert tracker.alert_80_percent_triggered is True
-        assert not is_cost_cap_reached()
-        assert tracker.get_monthly_spend_usd() == 0.85
+        assert tracker.get_monthly_spend_usd() == 1.00
+        assert is_cost_cap_reached() is True
+        assert get_total_usage()["cost_cap_reached"] is True
 
-    alert_logs = [r for r in caplog.records if "AI_COST_CAP_ALERT" in r.getMessage()]
-    assert len(alert_logs) == 1
-    assert "spend_usd=0.8500" in alert_logs[0].getMessage()
+        # 4. Attempt next call -> Must be blocked with CostCapReachedError in reservation
+        with pytest.raises(CostCapReachedError):
+            tracker.reserve_call(estimated_tokens=100)
 
-    # 3. Reach budget cap (150 more tokens -> 1000 total = $1.00)
-    record_model_call("room-cap-1", tokens=150)
-    assert tracker.get_monthly_spend_usd() == 1.00
-    assert is_cost_cap_reached() is True
-    assert get_total_usage()["cost_cap_reached"] is True
-
-    # 4. Attempt next call -> Must be blocked with CostCapReachedError in reservation
-    with pytest.raises(CostCapReachedError):
-        tracker.reserve_call(estimated_tokens=100)
-
-    # Verify endpoint handles COST_CAP_REACHED cleanly
-    payload = {
-        "request_id": "req-cap-blocked",
-        "room_id": "room-cap-1",
-        "analysis_id": "ana-cap-blocked",
-        "request_type": "crash_explanation",
-        "language": "cpp",
-        "consent": True,
-        "ai_enabled": True,
-        "sanitizer_output": SANITIZER_FIXTURES[0]["raw_report"],
-        "code_snippet": "v[5] = 10;",
-    }
-    resp = client.post("/v1/analyses/crash-explanation", json=payload)
-    assert resp.status_code == 200
-    data = resp.json()
-    assert data["ai_step"]["status"] == "skipped"
-    assert data["ai_step"]["error_code"] == "COST_CAP_REACHED"
-    # Deterministic parser summary must still be returned!
-    assert data["error_type"] == "heap-buffer-overflow"
+        # Verify endpoint handles COST_CAP_REACHED cleanly
+        payload = {
+            "request_id": "req-cap-blocked",
+            "room_id": "room-cap-1",
+            "analysis_id": "ana-cap-blocked",
+            "request_type": "crash_explanation",
+            "language": "cpp",
+            "consent": True,
+            "ai_enabled": True,
+            "sanitizer_output": SANITIZER_FIXTURES[0]["raw_report"],
+            "code_snippet": "v[5] = 10;",
+        }
+        resp = client.post("/v1/analyses/crash-explanation", json=payload)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ai_step"]["status"] == "skipped"
+        assert data["ai_step"]["error_code"] == "COST_CAP_REACHED"
+        # Deterministic parser summary must still be returned!
+        assert data["error_type"] == "heap-buffer-overflow"
+    finally:
+        reset_counters()
+        with tracker._lock:
+            tracker._monthly_budget_override = orig_budget
+            tracker._token_cost_override = orig_cost
 
 
 def test_concurrent_cost_cap_reservations_prevent_overshoot():
@@ -572,44 +603,52 @@ def test_concurrent_cost_cap_reservations_prevent_overshoot():
 
     are atomic and reject excess requests without bypassing the cap (NFR7.2, US-24).
     """
-    reset_counters()
     tracker = get_tracker()
-    tracker.token_cost_per_token = 0.0000035
+    orig_budget = tracker._monthly_budget_override
+    orig_cost = tracker._token_cost_override
+    reset_counters()
+    try:
+        tracker.token_cost_per_token = 0.0000035
 
-    # Headroom for exactly two 100-token reservations:
-    # 2 * 100 * 0.0000035 < 201 * 0.0000035 (budget)
-    # 3 * 100 * 0.0000035 >= 201 * 0.0000035 (rejection)
-    tracker.monthly_budget_usd = 201 * 0.0000035
+        # Headroom for exactly two 100-token reservations:
+        # 2 * 100 * 0.0000035 < 201 * 0.0000035 (budget)
+        # 3 * 100 * 0.0000035 >= 201 * 0.0000035 (rejection)
+        tracker.monthly_budget_usd = 201 * 0.0000035
 
-    successful = []
-    blocked = []
-    lock = threading.Lock()
-    barrier = threading.Barrier(10)
+        successful = []
+        blocked = []
+        lock = threading.Lock()
+        barrier = threading.Barrier(10)
 
-    def attempt_reservation(worker_id: int):
-        barrier.wait()
-        try:
-            res = tracker.reserve_call(estimated_tokens=100)
-            with lock:
-                successful.append((worker_id, res))
-        except CostCapReachedError:
-            with lock:
-                blocked.append(worker_id)
+        def attempt_reservation(worker_id: int):
+            barrier.wait()
+            try:
+                res = tracker.reserve_call(estimated_tokens=100)
+                with lock:
+                    successful.append((worker_id, res))
+            except CostCapReachedError:
+                with lock:
+                    blocked.append(worker_id)
 
-    threads = [threading.Thread(target=attempt_reservation, args=(i,)) for i in range(10)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
+        threads = [threading.Thread(target=attempt_reservation, args=(i,)) for i in range(10)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
 
-    assert len(successful) == 2, f"Expected exactly 2 admissions under concurrency, got {len(successful)}"
-    assert len(blocked) == 8, f"Expected exactly 8 rejections under concurrency, got {len(blocked)}"
-    assert tracker.get_active_reservations_tokens() == 200
+        assert len(successful) == 2, f"Expected exactly 2 admissions under concurrency, got {len(successful)}"
+        assert len(blocked) == 8, f"Expected exactly 8 rejections under concurrency, got {len(blocked)}"
+        assert tracker.get_active_reservations_tokens() == 200
 
-    # Cleanup
-    for _, res in successful:
-        res.release()
-    assert tracker.get_active_reservations_tokens() == 0
+        # Cleanup
+        for _, res in successful:
+            res.release()
+        assert tracker.get_active_reservations_tokens() == 0
+    finally:
+        reset_counters()
+        with tracker._lock:
+            tracker._monthly_budget_override = orig_budget
+            tracker._token_cost_override = orig_cost
 
 
 # ============================================================================
@@ -804,11 +843,13 @@ def test_concurrent_cold_cache_stampede_behavior():
         active_res,
         max_tokens=None,
     ):
-        await asyncio.sleep(0.01)  # 10ms provider latency
+        await asyncio.sleep(0.02)  # 20ms provider latency
         active_res.commit(room_id=room_id, tokens=50)
         return "Explanation: Out of bounds read at line 5.\nSuggested Fix: Add boundary check."
 
-    def make_identical_request(req_id: int):
+    barrier = threading.Barrier(4)
+
+    def make_identical_request(req_id: int, wait_barrier: bool = True):
         payload = {
             "request_id": f"req-stampede-{req_id}",
             "room_id": room_id,
@@ -820,13 +861,15 @@ def test_concurrent_cold_cache_stampede_behavior():
             "sanitizer_output": SANITIZER_FIXTURES[0]["raw_report"],
             "code_snippet": "v[5] = 10;",
         }
+        if wait_barrier:
+            barrier.wait(timeout=5.0)
         resp = client.post("/v1/analyses/crash-explanation", json=payload)
         assert resp.status_code == 200
         return resp.json()
 
     with patch.object(LLMClient, "_execute_complete", mock_execute):
         with ThreadPoolExecutor(max_workers=4) as executor:
-            results = list(executor.map(make_identical_request, range(4)))
+            results = list(executor.map(lambda i: make_identical_request(i, wait_barrier=True), range(4)))
 
     room_usage = get_room_usage(room_id)
     total = get_total_usage()
@@ -839,7 +882,7 @@ def test_concurrent_cold_cache_stampede_behavior():
     assert total["total_tokens_used"] == 200
 
     # The 5th sequential call arrives after cache is populated and MUST hit the cache
-    make_identical_request(99)
+    make_identical_request(99, wait_barrier=False)
     updated_usage = get_room_usage(room_id)
     assert updated_usage["model_calls"] == 4  # No additional model calls
     assert updated_usage["cache_hits"] == 1   # Hit warm cache
