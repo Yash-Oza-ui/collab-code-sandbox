@@ -9,6 +9,7 @@ import {
   type Awareness,
 } from 'y-protocols/awareness'
 import { DEFAULT_SYNC_WS_URL, getClientConfig } from './config'
+import type { AuditLogEntry } from './auditLogApi'
 
 export const COLLAB_SESSION_ID_KEY = 'collab_session_id'
 
@@ -415,6 +416,11 @@ export interface ControlErrorMessage {
   message: string
 }
 
+export interface AuditEntryMessage {
+  type: 'audit-entry'
+  entry: AuditLogEntry
+}
+
 export interface ConnectAwarenessWsOptions {
   roomId: string
   displayName?: string
@@ -449,6 +455,7 @@ export interface ConnectAwarenessWsOptions {
   onEditAccessResponded?: (msg: EditAccessRespondedMessage) => void
   onEditAccessRequestCleared?: (msg: EditAccessRequestClearedMessage) => void
   onControlError?: (msg: ControlErrorMessage) => void
+  onAuditEntry?: (msg: AuditEntryMessage) => void
   onError?: (event: Event) => void
   onClose?: (event: CloseEvent) => void
   onDocError?: (event: Event) => void
@@ -505,6 +512,7 @@ export function connectAwarenessWs(
     onEditAccessResponded,
     onEditAccessRequestCleared,
     onControlError,
+    onAuditEntry,
     onError,
     onClose,
     onDocError,
@@ -1016,6 +1024,8 @@ export function connectAwarenessWs(
             onEditAccessRequestCleared?.(msg as EditAccessRequestClearedMessage)
           } else if (msg.type === 'error') {
             onControlError?.(msg as ControlErrorMessage)
+          } else if (msg.type === 'audit-entry') {
+            onAuditEntry?.(msg as AuditEntryMessage)
           }
         } catch {
           // ignore non-json control frames
