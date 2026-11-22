@@ -1,5 +1,6 @@
 package com.collabcode.syncservice.controller;
 
+import com.collabcode.syncservice.audit.AuditLogService;
 import com.collabcode.syncservice.room.Member;
 import com.collabcode.syncservice.room.Role;
 import com.collabcode.syncservice.room.Room;
@@ -54,12 +55,23 @@ public class RunPermissionController {
     private final RoomService roomService;
     private final RoomRegistry registry;
     private final HostGuard hostGuard;
+    private final AuditLogService auditLogService;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     public RunPermissionController(RoomService roomService, RoomRegistry registry, HostGuard hostGuard) {
+        this(roomService, registry, hostGuard, null);
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public RunPermissionController(
+            RoomService roomService,
+            RoomRegistry registry,
+            HostGuard hostGuard,
+            @org.springframework.beans.factory.annotation.Autowired(required = false) AuditLogService auditLogService) {
         this.roomService = roomService;
         this.registry = registry;
         this.hostGuard = hostGuard;
+        this.auditLogService = auditLogService;
     }
 
     // -----------------------------------------------------------------------
@@ -109,6 +121,19 @@ public class RunPermissionController {
         }
         if (changed) {
             log.info("RunPermission: member={} run {} by the Host", memberId, canRun ? "given back" : "taken away");
+            if (auditLogService != null) {
+                auditLogService.record(
+                        roomId,
+                        "run_permission",
+                        g.caller(),
+                        updated,
+                        updated.getDisplayName(),
+                        updated.getMemberId(),
+                        "can_run",
+                        !canRun,
+                        canRun,
+                        null);
+            }
             broadcastRoster(room);
         }
         // The member as it appears in roster (same shape as V2.17).
@@ -145,6 +170,19 @@ public class RunPermissionController {
         }
         if (changed) {
             log.info("RunPermission: room host-only running {}", hostOnly ? "on" : "off");
+            if (auditLogService != null) {
+                auditLogService.record(
+                        roomId,
+                        "host_only_run",
+                        g.caller(),
+                        null,
+                        "Room",
+                        null,
+                        "host_only_run",
+                        !hostOnly,
+                        hostOnly,
+                        null);
+            }
             broadcastRoster(updated);
         }
         Map<String, Object> body = new LinkedHashMap<>();

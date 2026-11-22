@@ -3,8 +3,12 @@ package com.collabcode.syncservice.room;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
+import java.util.Deque;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedDeque;
 
 /**
  * In-memory room record (T-17 V2.1).
@@ -67,6 +71,28 @@ public class Room {
     /** memberId -> EditRequest. At most one pending request per member. */
     private final Map<String, EditRequest> pendingEditRequests = new ConcurrentHashMap<>();
 
+    /**
+     * Audit log entry for role and permission changes (US-58, V2.23; FR34).
+     */
+    public record AuditLogEntry(
+            String id,
+            Instant timestamp,
+            String action,
+            String actorDisplayName,
+            String actorMemberId,
+            String targetDisplayName,
+            String targetMemberId,
+            String property,
+            Object oldValue,
+            Object newValue,
+            String details
+    ) {}
+
+    /**
+     * Bounded in-memory audit log of role and permission changes (US-58, V2.23; FR34).
+     */
+    private final Deque<AuditLogEntry> auditLog = new ConcurrentLinkedDeque<>();
+
     public Room(String roomId, RoomMode mode, String preset, String language, String ownerTokenHash) {
         this.roomId = roomId;
         this.mode = mode;
@@ -102,6 +128,7 @@ public class Room {
         members.clear();
         blocked.clear();
         pendingEditRequests.clear();
+        auditLog.clear();
         requiresApproval = false;
         hostOnlyRun = false;
         aiEnabled = false;
@@ -160,7 +187,31 @@ public class Room {
         copy.aiEnabled = this.aiEnabled;
         copy.members.putAll(this.members);
         copy.pendingEditRequests.putAll(this.pendingEditRequests);
+        copy.auditLog.addAll(this.auditLog);
         return copy;
+    }
+
+    // ----- Audit log (US-58, V2.23; FR34) -----
+
+    public synchronized AuditLogEntry addAuditEntry(AuditLogEntry entry, int maxEntries) {
+        if (entry == null) {
+            return null;
+        }
+        while (auditLog.size() >= maxEntries && !auditLog.isEmpty()) {
+            auditLog.pollFirst();
+        }
+        auditLog.addLast(entry);
+        return entry;
+    }
+
+    public List<AuditLogEntry> getAuditLog() {
+        List<AuditLogEntry> list = new ArrayList<>(auditLog);
+        Collections.reverse(list);
+        return list;
+    }
+
+    public void clearAuditLog() {
+        auditLog.clear();
     }
 
     // ----- Edit requests in Pair mode (US-38, V2.22) -----

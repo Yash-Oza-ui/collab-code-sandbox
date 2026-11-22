@@ -1,5 +1,6 @@
 package com.collabcode.syncservice.controller;
 
+import com.collabcode.syncservice.audit.AuditLogService;
 import com.collabcode.syncservice.handler.ControlHandler;
 import com.collabcode.syncservice.module.ModuleRecord;
 import com.collabcode.syncservice.module.ModuleService;
@@ -674,5 +675,95 @@ class ModuleControllerUnitTest {
                 .andExpect(jsonPath("$.error.code").value("INVALID_REQUEST"));
 
         assertThat(broadcasts).isEmpty();
+    }
+
+    @Test
+    @DisplayName("Repeated grant and revoke do not duplicate audit log entries")
+    void repeatedGrantAndRevoke_recordsAuditOnlyWhenWriterSetChanges() throws Exception {
+        AuditLogService mockAuditLog = org.mockito.Mockito.mock(AuditLogService.class);
+        ControlHandler stubControlHandler = new ControlHandler(roomStore, roomService, roomRegistry) {
+            @Override
+            public void broadcastModuleUpdated(String roomId, Map<String, Object> moduleUpdatedMsg) {
+                broadcasts.add(moduleUpdatedMsg);
+            }
+        };
+        ModuleController controllerWithAudit = new ModuleController(roomStore, roomService, moduleService, stubControlHandler, mockAuditLog);
+        MockMvc testMvc = MockMvcBuilders.standaloneSetup(controllerWithAudit).build();
+
+        Member host = roomService.findMemberBySession(OPEN_ROOM_ID, HOST_SESSION);
+        Member guest = roomService.findMemberBySession(OPEN_ROOM_ID, GUEST_SESSION);
+        ModuleRecord mod = moduleService.createApprovedModule(OPEN_ROOM_ID, host, "audit-test.py");
+
+        // 1. Initial grant -> calls auditLogService.record
+        testMvc.perform(post("/v1/rooms/" + OPEN_ROOM_ID + "/modules/" + mod.moduleId() + "/writers")
+                        .header("X-Session-Id", HOST_SESSION)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"member_id\":\"" + guest.getMemberId() + "\"}"))
+                .andExpect(status().isOk());
+
+        org.mockito.Mockito.verify(mockAuditLog, org.mockito.Mockito.times(1))
+                .record(org.mockito.ArgumentMatchers.eq(OPEN_ROOM_ID),
+                        org.mockito.ArgumentMatchers.eq("write_access"),
+                        org.mockito.ArgumentMatchers.any(),
+                        org.mockito.ArgumentMatchers.any(),
+                        org.mockito.ArgumentMatchers.any(),
+                        org.mockito.ArgumentMatchers.eq(guest.getMemberId()),
+                        org.mockito.ArgumentMatchers.eq("can_write"),
+                        org.mockito.ArgumentMatchers.eq(false),
+                        org.mockito.ArgumentMatchers.eq(true),
+                        org.mockito.ArgumentMatchers.any());
+
+        // 2. Repeated grant -> must NOT call auditLogService.record again
+        testMvc.perform(post("/v1/rooms/" + OPEN_ROOM_ID + "/modules/" + mod.moduleId() + "/writers")
+                        .header("X-Session-Id", HOST_SESSION)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"member_id\":\"" + guest.getMemberId() + "\"}"))
+                .andExpect(status().isOk());
+
+        org.mockito.Mockito.verify(mockAuditLog, org.mockito.Mockito.times(1))
+                .record(org.mockito.ArgumentMatchers.eq(OPEN_ROOM_ID),
+                        org.mockito.ArgumentMatchers.eq("write_access"),
+                        org.mockito.ArgumentMatchers.any(),
+                        org.mockito.ArgumentMatchers.any(),
+                        org.mockito.ArgumentMatchers.any(),
+                        org.mockito.ArgumentMatchers.eq(guest.getMemberId()),
+                        org.mockito.ArgumentMatchers.eq("can_write"),
+                        org.mockito.ArgumentMatchers.eq(false),
+                        org.mockito.ArgumentMatchers.eq(true),
+                        org.mockito.ArgumentMatchers.any());
+
+        // 3. Initial revoke -> calls auditLogService.record
+        testMvc.perform(delete("/v1/rooms/" + OPEN_ROOM_ID + "/modules/" + mod.moduleId() + "/writers/" + guest.getMemberId())
+                        .header("X-Session-Id", HOST_SESSION))
+                .andExpect(status().isOk());
+
+        org.mockito.Mockito.verify(mockAuditLog, org.mockito.Mockito.times(1))
+                .record(org.mockito.ArgumentMatchers.eq(OPEN_ROOM_ID),
+                        org.mockito.ArgumentMatchers.eq("write_access"),
+                        org.mockito.ArgumentMatchers.any(),
+                        org.mockito.ArgumentMatchers.any(),
+                        org.mockito.ArgumentMatchers.any(),
+                        org.mockito.ArgumentMatchers.eq(guest.getMemberId()),
+                        org.mockito.ArgumentMatchers.eq("can_write"),
+                        org.mockito.ArgumentMatchers.eq(true),
+                        org.mockito.ArgumentMatchers.eq(false),
+                        org.mockito.ArgumentMatchers.any());
+
+        // 4. Repeated revoke -> must NOT call auditLogService.record again
+        testMvc.perform(delete("/v1/rooms/" + OPEN_ROOM_ID + "/modules/" + mod.moduleId() + "/writers/" + guest.getMemberId())
+                        .header("X-Session-Id", HOST_SESSION))
+                .andExpect(status().isOk());
+
+        org.mockito.Mockito.verify(mockAuditLog, org.mockito.Mockito.times(1))
+                .record(org.mockito.ArgumentMatchers.eq(OPEN_ROOM_ID),
+                        org.mockito.ArgumentMatchers.eq("write_access"),
+                        org.mockito.ArgumentMatchers.any(),
+                        org.mockito.ArgumentMatchers.any(),
+                        org.mockito.ArgumentMatchers.any(),
+                        org.mockito.ArgumentMatchers.eq(guest.getMemberId()),
+                        org.mockito.ArgumentMatchers.eq("can_write"),
+                        org.mockito.ArgumentMatchers.eq(true),
+                        org.mockito.ArgumentMatchers.eq(false),
+                        org.mockito.ArgumentMatchers.any());
     }
 }

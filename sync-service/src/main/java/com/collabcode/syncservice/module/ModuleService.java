@@ -261,13 +261,15 @@ public class ModuleService {
                 .toList();
     }
 
+    public record WriteAccessResult(ModuleRecord module, boolean changed) {}
+
     /**
      * Grant write access to a member for a module (US-43, FR22.1).
      *
      * <p>Only the module owner or the Host may grant write access.
      * When called by the Host, a valid {@code X-Owner-Token} is required.
      */
-    public synchronized ModuleRecord grantWriteAccess(
+    public synchronized WriteAccessResult grantWriteAccessResult(
             String roomId,
             String moduleId,
             Member caller,
@@ -304,8 +306,17 @@ public class ModuleService {
             throw new IllegalArgumentException("MEMBER_NOT_FOUND");
         }
 
-        module.addWriter(targetMemberId);
-        return module;
+        boolean changed = module.addWriter(targetMemberId);
+        return new WriteAccessResult(module, changed);
+    }
+
+    public synchronized ModuleRecord grantWriteAccess(
+            String roomId,
+            String moduleId,
+            Member caller,
+            String ownerToken,
+            String targetMemberId) {
+        return grantWriteAccessResult(roomId, moduleId, caller, ownerToken, targetMemberId).module();
     }
 
     /**
@@ -314,7 +325,7 @@ public class ModuleService {
      * <p>Only the module owner or the Host may revoke write access.
      * The module owner always keeps write access (cannot be revoked).
      */
-    public synchronized ModuleRecord revokeWriteAccess(
+    public synchronized WriteAccessResult revokeWriteAccessResult(
             String roomId,
             String moduleId,
             Member caller,
@@ -355,8 +366,17 @@ public class ModuleService {
             throw new IllegalArgumentException("MEMBER_NOT_FOUND");
         }
 
-        module.removeWriter(targetMemberId);
-        return module;
+        boolean changed = module.removeWriter(targetMemberId);
+        return new WriteAccessResult(module, changed);
+    }
+
+    public synchronized ModuleRecord revokeWriteAccess(
+            String roomId,
+            String moduleId,
+            Member caller,
+            String ownerToken,
+            String targetMemberId) {
+        return revokeWriteAccessResult(roomId, moduleId, caller, ownerToken, targetMemberId).module();
     }
 
     /** A socket may address only an approved module. */

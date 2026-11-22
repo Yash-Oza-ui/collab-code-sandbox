@@ -1,0 +1,35 @@
+{
+  "room_id": "Zq8-Lw2Ef6Th0Yx4Rn7JbA",
+  "entries": [
+    {
+      "id": "aud_1732274400000_2",
+      "timestamp": "2026-11-22T11:35:00Z",
+      "action": "edit_access",
+      "actor": "Host",
+      "actor_display_name": "Host",
+      "actor_member_id": "m_4b19d2",
+      "target": "Alice",
+      "target_display_name": "Alice",
+      "target_member_id": "m_7f3a19",
+      "property": "can_edit",
+      "old_value": false,
+      "new_value": true,
+      "details": null
+    },
+    {
+      "id": "aud_1732274400000_1",
+      "timestamp": "2026-11-22T11:30:00Z",
+      "action": "role_change",
+      "actor": "Host",
+      "actor_display_name": "Host",
+      "actor_member_id": "m_4b19d2",
+      "target": "Bob",
+      "target_display_name": "Bob",
+      "target_member_id": "m_9c84e1",
+      "property": "role",
+      "old_value": "participant",
+      "new_value": "observer",
+      "details": null
+    }
+  ]
+}
