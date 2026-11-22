@@ -187,6 +187,48 @@ public class ModuleService {
         return removed;
     }
 
+    /**
+     * US-42: Transfer approved modules owned by a Host-removed member to the
+     * current Host, and remove the former member from every approved module's
+     * writer list. Returns changed modules for module-updated broadcasts.
+     */
+    public synchronized List<ModuleRecord> transferOwnedModules(
+            String roomId, String removedMemberId, String hostMemberId) {
+        Room room = requireOpenRoom(roomId);
+        if (removedMemberId == null || removedMemberId.isBlank()
+                || hostMemberId == null || hostMemberId.isBlank()
+                || removedMemberId.equals(hostMemberId)) {
+            throw new IllegalArgumentException("INVALID_MEMBER_ID");
+        }
+        Member host = room.getMembers().get(hostMemberId);
+        if (host == null || host.getRole() != Role.HOST) {
+            throw new IllegalArgumentException("HOST_NOT_FOUND");
+        }
+        Map<String, ModuleRecord> modules = byRoom.get(roomId);
+        if (modules == null) {
+            return List.of();
+        }
+        List<ModuleRecord> updated = new java.util.ArrayList<>();
+        for (ModuleRecord module : modules.values()) {
+            if (module.pending()) {
+                continue;
+            }
+            boolean changed = false;
+            if (removedMemberId.equals(module.ownerMemberId())) {
+                module.transferOwnership(hostMemberId);
+                changed = true;
+            }
+            if (module.removeWriter(removedMemberId)) {
+                changed = true;
+            }
+            if (changed) {
+                updated.add(module);
+            }
+        }
+        updated.sort(Comparator.comparing(ModuleRecord::moduleId));
+        return updated;
+    }
+
     /** Returns pending module requests awaiting Host approval (US-40). */
     public synchronized List<ModuleRecord> listPending(String roomId, Member requester) {
         requireOpenRoom(roomId);

@@ -1,5 +1,7 @@
 package com.collabcode.syncservice.controller;
 
+import com.collabcode.syncservice.module.ModuleRecord;
+import com.collabcode.syncservice.module.ModuleService;
 import com.collabcode.syncservice.room.JoinOutcome;
 import com.collabcode.syncservice.room.RoomService;
 import com.collabcode.syncservice.room.RoomStore;
@@ -51,6 +53,9 @@ class MembershipControllerTest {
 
     @Autowired
     RoomStore store;
+
+    @Autowired
+    ModuleService moduleService;
 
     private String base() {
         return "http://localhost:" + port;
@@ -446,6 +451,75 @@ class MembershipControllerTest {
         assertThat(pendingRes.statusCode()).isEqualTo(200);
         JsonNode arr = om.readTree(pendingRes.body());
         assertThat(arr).isEmpty();
+    }
+
+    @Test
+    void us42_removalTransfersOwnedModulesAndRevokesWriters() throws Exception {
+        String[] room = createOpenRoom();
+        String hostId = roomService.join(room[0], HOST, "Host", room[1]).getMember().getMemberId();
+        String guestId = roomService.join(room[0], GUEST, "Guest", null).getMember().getMemberId();
+        String otherId = roomService.join(room[0], OTHER, "Other", null).getMember().getMemberId();
+
+        ModuleRecord guestOwned = moduleService.createModule(room[0], guestId, "guest.py", false);
+        guestOwned.addWriter(otherId);
+        guestOwned.setVersion(7);
+        guestOwned.setRunnable(false);
+        guestOwned.setEntry(true);
+
+        ModuleRecord hostOwned = moduleService.createModule(room[0], hostId, "host.py", false);
+        hostOwned.addWriter(guestId);
+        hostOwned.addWriter(otherId);
+        ModuleRecord untouched = moduleService.createModule(room[0], hostId, "untouched.py", false);
+        ModuleRecord pending = moduleService.createModule(room[0], guestId, "pending.py", true);
+
+        HttpResponse<String> res = post("/v1/rooms/" + room[0] + "/members/" + guestId + "/remove", HOST, room[1]);
+        assertThat(res.statusCode()).isEqualTo(200);
+
+        assertThat(guestOwned.ownerMemberId()).isEqualTo(hostId);
+        assertThat(guestOwned.pending()).isFalse();
+        assertThat(guestOwned.writers()).containsExactly(otherId);
+        assertThat(guestOwned.version()).isEqualTo(7);
+        assertThat(guestOwned.runnable()).isFalse();
+        assertThat(guestOwned.isEntry()).isTrue();
+        assertThat(guestOwned.canEdit(hostId)).isTrue();
+        assertThat(guestOwned.canEdit(guestId)).isFalse();
+        assertThat(guestOwned.canEdit(otherId)).isTrue();
+
+        assertThat(hostOwned.ownerMemberId()).isEqualTo(hostId);
+        assertThat(hostOwned.writers()).containsExactly(otherId);
+        assertThat(untouched.ownerMemberId()).isEqualTo(hostId);
+        assertThat(untouched.writers()).isEmpty();
+        assertThat(moduleService.find(room[0], pending.moduleId())).isNull();
+    }
+
+    @Test
+    void us42_removalBroadcastsUpdatedOwnerAndWriterPermissions() throws Exception {
+        String[] room = createOpenRoom();
+        Ws hostSocket = Ws.connect(port, "/ws/rooms/" + room[0] + "?session_id=" + HOST);
+        try {
+            hostSocket.sendText("{\"type\":\"join\",\"display_name\":\"Host\",\"owner_token\":\"" + room[1] + "\"}");
+            assertThat(hostSocket.awaitText("joined", 3, TimeUnit.SECONDS)).isNotNull();
+            String hostId = awaitMemberId(room[0], HOST);
+            String guestId = roomService.join(room[0], GUEST, "Guest", null).getMember().getMemberId();
+
+            ModuleRecord guestOwned = moduleService.createModule(room[0], guestId, "guest_event.py", false);
+            ModuleRecord hostOwned = moduleService.createModule(room[0], hostId, "host_event.py", false);
+            hostOwned.addWriter(guestId);
+
+            HttpResponse<String> res = post("/v1/rooms/" + room[0] + "/members/" + guestId + "/remove", HOST, room[1]);
+            assertThat(res.statusCode()).isEqualTo(200);
+
+            String first = hostSocket.awaitText("module-updated", 3, TimeUnit.SECONDS);
+            String second = hostSocket.awaitText("module-updated", 3, TimeUnit.SECONDS);
+            assertThat(first).isNotNull();
+            assertThat(second).isNotNull();
+            assertThat(first + second).contains(guestOwned.moduleId(), hostOwned.moduleId());
+            assertThat(first + second).contains(hostId);
+            assertThat(first + second).doesNotContain("\"deleted\":true");
+            assertThat(hostOwned.writers()).doesNotContain(guestId);
+        } finally {
+            hostSocket.close();
+        }
     }
 
     private String awaitMemberId(String roomId, String sessionId) throws InterruptedException {

@@ -109,6 +109,24 @@ public class MembershipController {
             return HostGuard.error(HttpStatus.NOT_FOUND, "MEMBER_NOT_FOUND", "Member not found in this room.");
         }
 
+        // US-42: Transfer approved modules to the current Host and revoke the
+        // removed member's writer access on all approved modules.
+        // Pair-mode rooms have no modules, so skip module ownership processing.
+        if (room.getMode() == com.collabcode.syncservice.room.RoomMode.OPEN) {
+            String hostMemberId = room.getMembers().values().stream()
+                    .filter(m -> m.getRole() == Role.HOST)
+                    .map(Member::getMemberId)
+                    .findFirst()
+                    .orElseThrow(() -> new IllegalStateException("HOST_NOT_FOUND"));
+
+            List<com.collabcode.syncservice.module.ModuleRecord> updatedModules =
+                    moduleService.transferOwnedModules(roomId, memberId, hostMemberId);
+            for (com.collabcode.syncservice.module.ModuleRecord module : updatedModules) {
+                controlHandler.broadcastModuleUpdated(
+                        roomId, RoomMessages.moduleUpdated(module, false));
+            }
+        }
+
         // Drop any pending module requests created by the removed member (US-40)
         List<com.collabcode.syncservice.module.ModuleRecord> removedPending = moduleService.removePendingRequestsForMember(roomId, memberId);
         for (com.collabcode.syncservice.module.ModuleRecord pendingMod : removedPending) {
