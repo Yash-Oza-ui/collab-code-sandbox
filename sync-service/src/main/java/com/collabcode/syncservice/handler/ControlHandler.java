@@ -439,6 +439,25 @@ public class ControlHandler extends AbstractWebSocketHandler {
     }
 
     /**
+     * Broadcast an {@code audit-entry} message to every control socket in the room (US-58, V2.23; FR34).
+     */
+    public void broadcastAuditEntry(String roomId, Room.AuditLogEntry entry) {
+        Room room = roomStore.get(roomId);
+        if (room == null || entry == null) {
+            return;
+        }
+
+        try {
+            String json = objectMapper.writeValueAsString(RoomMessages.auditEntry(entry));
+            for (WebSocketSession target : registry.getJoinedControlSessions(roomId)) {
+                sendText(target, json);
+            }
+        } catch (Exception e) {
+            log.error("Control: failed to broadcast audit-entry for room={}: {}", roomId, e.getMessage());
+        }
+    }
+
+    /**
      * Send message to all joined control sessions of the Host in the room (US-38, V2.22).
      */
     public void sendToHostControlSessions(String roomId, Map<String, Object> message) {

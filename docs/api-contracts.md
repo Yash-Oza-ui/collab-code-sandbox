@@ -1440,7 +1440,7 @@ A malformed `audience` (V2.10) is also `INVALID_MESSAGE`. The new internal calls
 
 **Not decided in version 2.** These are listed so that nobody assumes they are covered:
 
-- Host controls other than modules, the Observer role (V2.17), remove / re-admit / regenerate link (V2.18), Run control (V2.20) and Pair edit access (V2.21) have no message or endpoint yet: join approval (FR9.3), the AI switch (FR35.1), transferring the Host role (FR31.1), the audit log (FR34), export (FR33) and deleting a room (FR32). They need a contract entry before the stories that build them.
+- Host controls other than modules, the Observer role (V2.17), remove / re-admit / regenerate link (V2.18), Run control (V2.20) and Pair edit access (V2.21) have no message or endpoint yet: join approval (FR9.3), the AI switch (FR35.1), transferring the Host role (FR31.1), export (FR33) and deleting a room (FR32). They need a contract entry before the stories that build them.
 - Reassigning the modules a removed member owned, and pruning a retired `member_id` from `writers` (V2.6, V2.18). Deferred to US-42.
 - What a run does with a module that has never been saved (FR24.1, FR25.1).
 - A joiner syncs from a connected writer: a read-only peer's sync step 2 is dropped (V2.12). If no writer is connected, a late joiner receives nothing. To be checked when the relay is built.
@@ -1908,6 +1908,104 @@ Rules:
 6. **Automatic clearing:** A pending request is cleared (and Host sockets receive `{ "type": "edit-access-request-cleared", "member_id": "...", "reason": "granted" | "role_changed" | "removed" | "left" }`) if the requester gets `can_edit` via V2.21, has their role changed (V2.17) or becomes Host (V2.19), is removed (V2.18), or disconnects from all control sockets.
 7. Errors (V2.12): `404 ROOM_NOT_FOUND`, `404 SESSION_NOT_FOUND`, `404 MEMBER_NOT_FOUND`, `403 NOT_OWNER`, `422 INVALID_REQUEST`.
 
+## V2.23 Audit log of role and permission changes (US-58) — Proposed
+
+**Traceability:** FR34 · US-58 · EPIC 5 · Sprint 5 (new in v2)
+
+A room-scoped audit log records every successful change of:
+1. Member role (US-27, V2.17: Participant to Observer and back).
+2. Host role transfer (US-54, V2.19: handing the Host role to a participant).
+3. Edit access in Pair mode (US-36, V2.21: giving or taking back edit access, including US-38 edit request approval).
+4. Module write access in Open mode (US-43: granting or revoking write access to a module).
+5. Run permission per member (US-60, V2.20: taking Run away from a participant or giving it back).
+6. Host-only running policy (US-60, V2.20: switching the room to Host-only running and back).
+
+### 1. Retrieve the audit log (REST, all joined room members)
+
+```text
+GET http://localhost:8081/v1/rooms/{room_id}/audit-log
+X-Session-Id: <caller-session-id>
+```
+
+Response `200 OK` (`docs/examples/v2-audit-log-response.json`):
+
+```json
+{
+  "room_id": "Zq8-Lw2Ef6Th0Yx4Rn7JbA",
+  "entries": [
+    {
+      "id": "aud_1732274400000_2",
+      "timestamp": "2026-11-22T11:35:00Z",
+      "action": "edit_access",
+      "actor": "Host",
+      "actor_display_name": "Host",
+      "actor_member_id": "m_4b19d2",
+      "target": "Alice",
+      "target_display_name": "Alice",
+      "target_member_id": "m_7f3a19",
+      "property": "can_edit",
+      "old_value": false,
+      "new_value": true,
+      "details": null
+    },
+    {
+      "id": "aud_1732274400000_1",
+      "timestamp": "2026-11-22T11:30:00Z",
+      "action": "role_change",
+      "actor": "Host",
+      "actor_display_name": "Host",
+      "actor_member_id": "m_4b19d2",
+      "target": "Bob",
+      "target_display_name": "Bob",
+      "target_member_id": "m_9c84e1",
+      "property": "role",
+      "old_value": "participant",
+      "new_value": "observer",
+      "details": null
+    }
+  ]
+}
+```
+
+Rules:
+1. Anyone joined in the room can open the log (Host, Participant, Observer). The caller identity (`X-Session-Id`) must belong to an active member in the room (`404 SESSION_NOT_FOUND` otherwise).
+2. The entries are returned sorted newest first, so late joiners immediately see past room events.
+3. Errors (V2.12): `404 ROOM_NOT_FOUND`, `404 SESSION_NOT_FOUND`, `422 INVALID_REQUEST` (missing or invalid `X-Session-Id` format).
+
+### 2. Live push notification over Control WebSocket
+
+Whenever any of the 6 permission/role changes succeeds, the server broadcasts an `audit-entry` message to all joined control sessions in the room (`docs/examples/v2-audit-log-entry-ws.json`):
+
+```json
+{
+  "type": "audit-entry",
+  "entry": {
+    "id": "aud_1732274400000_1",
+    "timestamp": "2026-11-22T11:30:00Z",
+    "action": "role_change",
+    "actor": "Host",
+    "actor_display_name": "Host",
+    "actor_member_id": "m_4b19d2",
+    "target": "Bob",
+    "target_display_name": "Bob",
+    "target_member_id": "m_9c84e1",
+    "property": "role",
+    "old_value": "participant",
+    "new_value": "observer",
+    "details": null
+  }
+}
+```
+
+### 3. Server-authoritative invariants & privacy
+
+1. **Server-written only:** Audit entries are created exclusively by the server when a mutation succeeds. No endpoint exists for clients to create, edit or delete entries (`POST`/`PUT`/`PATCH`/`DELETE` on `/v1/rooms/{room_id}/audit-log` yield `405 Method Not Allowed`).
+2. **Refused requests add no entry:** If an operation is refused (e.g. `403 NOT_OWNER` or `422 INVALID_REQUEST`), no audit entry is created.
+3. **Privacy & sanitization (NFR8.2, V2.3):** Entries reference members by display name and public `member_id`. Private `session_id` is never recorded. Neither user code nor editor text is ever included.
+4. **Bounded capacity (DR3):** The in-memory audit log has a maximum size configured via `app.audit-log.max-entries` (`APP_AUDIT_LOG_MAX_ENTRIES`, default `100`). When capacity is exceeded, the oldest entries are dropped.
+5. **Lifecycle (FR32, US-56):** The log is in-memory room state held in `sync-service` (`Room.java`). It is carried over if the room link is regenerated (US-28) and purged when the room ends or is deleted (`Room.clearSensitiveState()`).
+6. **Scope:** Module ownership changes (US-40, US-41, US-42) are not recorded in this story.
+
 ## US-56: Internal room-ended notification (Proposed — awaiting execution-service and AI-ML owners)
 
 **Traceability:** FR32, US-56, T-18 Decision 9; internal service-to-service only. This proposal does **not** add a public Host delete/close endpoint. The existing US-55 automatic Host-departure closure is the trigger once that branch is merged. Bhavya Vekariya (execution-service) and Prince Gadara (ai-ml-service) must confirm this new contract before implementation is merged.
@@ -1976,6 +2074,7 @@ Success returns `200 OK` and `{"room_id":"Zq8-Lw2Ef6Th0Yx4Rn7JbA","status":"clea
 | v2 (run permission) | 19 Nov 2026 | V2.20 added (US-60): `PATCH /v1/rooms/{room_id}/members/{member_id}/run-permission` takes Run away from a participant and gives it back (FR41.2), and `PATCH /v1/rooms/{room_id}/run-policy` switches Host-only running (FR41.3), both Host-only (`NOT_OWNER` otherwise). The reasons `observer`, `run_revoked`, `host_only` are those of V2.12 and the lookup (V2.11) is unchanged in shape. `roster` and `joined` gain `permissions.run_denied_reason`, and `roster` gains `host_only_run` (V2.4). Restricting Run removed from the undecided list in V2.15. |
 | v2 (edit access) | Nov 2026 | V2.21 added (US-36): `PATCH /v1/rooms/{room_id}/members/{member_id}/edit-access` gives or takes back edit access in Pair mode (FR19.1). Edit access controls apply only in Pair mode (Open mode refuses with `422 INVALID_REQUEST`). Host access cannot be changed (`422`) and Observers cannot have edit access (`422`). Broadcasts updated roster on change. |
 | v2 (edit request) | 20 Nov 2026 | V2.22 added (US-38): control-socket `request-edit-access` / `edit-access-requested` / `edit-access-responded` / `edit-access-request-cleared` and Host-only `POST /v1/rooms/{room_id}/edit-requests/{member_id}/approve` and `/decline` in Pair mode (FR19.3). Reuses `RoomService.setEditAccess` (V2.21). Edit requests removed from V2.15 undecided list. |
+| v2 (audit log) | 22 Nov 2026 | V2.23 added (US-58): `GET /v1/rooms/{room_id}/audit-log` and control-socket `audit-entry` push for role, edit access, module write access, and run permission changes (FR34). Bounded in-memory store; deleted with room; server-written only. Audit log removed from V2.15 undecided list. |
 
 ### Runner infrastructure error (v1 proposal addition)
 

@@ -1,5 +1,6 @@
 package com.collabcode.syncservice.controller;
 
+import com.collabcode.syncservice.audit.AuditLogService;
 import com.collabcode.syncservice.room.Member;
 import com.collabcode.syncservice.room.OwnerTokens;
 import com.collabcode.syncservice.room.Role;
@@ -52,6 +53,7 @@ public class MemberController {
     private final RoomService roomService;
     private final ControlHandler controlHandler;
     private final HostGuard hostGuard;
+    private final AuditLogService auditLogService;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     public MemberController(
@@ -59,10 +61,21 @@ public class MemberController {
             RoomService roomService,
             ControlHandler controlHandler,
             HostGuard hostGuard) {
+        this(store, roomService, controlHandler, hostGuard, null);
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public MemberController(
+            RoomStore store,
+            RoomService roomService,
+            ControlHandler controlHandler,
+            HostGuard hostGuard,
+            @org.springframework.beans.factory.annotation.Autowired(required = false) AuditLogService auditLogService) {
         this.store = store;
         this.roomService = roomService;
         this.controlHandler = controlHandler;
         this.hostGuard = hostGuard;
+        this.auditLogService = auditLogService;
     }
 
     @PatchMapping("/rooms/{roomId}/members/{memberId}")
@@ -116,10 +129,26 @@ public class MemberController {
                     "The Host's role cannot be changed here.");
         }
 
+        Role oldRole = target.getRole();
+        boolean roleChanged = oldRole != newRole;
+
         Member updated = roomService.changeRole(roomId, memberId, newRole);
         if (updated == null) {
             // Removed between the lookup and the change.
             return error(HttpStatus.NOT_FOUND, "MEMBER_NOT_FOUND", "Member not found in this room.");
+        }
+        if (roleChanged && auditLogService != null) {
+            auditLogService.record(
+                    roomId,
+                    "role_change",
+                    caller,
+                    updated,
+                    updated.getDisplayName(),
+                    updated.getMemberId(),
+                    "role",
+                    oldRole.name().toLowerCase(),
+                    newRole.name().toLowerCase(),
+                    null);
         }
         controlHandler.clearAndNotifyEditRequest(roomId, memberId, "role_changed");
         controlHandler.broadcastRoster(roomId);
@@ -179,7 +208,8 @@ public class MemberController {
                     "Observers cannot have edit access; make them a participant first.");
         }
 
-        boolean changed = target.isCanEdit() != canEdit;
+        boolean oldCanEdit = target.isCanEdit();
+        boolean changed = oldCanEdit != canEdit;
         Member updated = roomService.setEditAccess(roomId, memberId, canEdit);
         if (updated == null) {
             return error(HttpStatus.NOT_FOUND, "MEMBER_NOT_FOUND", "Member not found in this room.");
@@ -190,6 +220,19 @@ public class MemberController {
         }
 
         if (changed) {
+            if (auditLogService != null) {
+                auditLogService.record(
+                        roomId,
+                        "edit_access",
+                        g.caller(),
+                        updated,
+                        updated.getDisplayName(),
+                        updated.getMemberId(),
+                        "can_edit",
+                        oldCanEdit,
+                        canEdit,
+                        null);
+            }
             controlHandler.broadcastRoster(roomId);
         }
 
