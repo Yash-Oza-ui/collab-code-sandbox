@@ -371,9 +371,10 @@ public class ModuleController {
         }
 
         try {
-            ModuleRecord module = moduleService.grantWriteAccess(roomId, moduleId, member, ownerToken, targetMemberId);
+            ModuleService.WriteAccessResult result = moduleService.grantWriteAccessResult(roomId, moduleId, member, ownerToken, targetMemberId);
+            ModuleRecord module = result.module();
 
-            if (auditLogService != null) {
+            if (result.changed() && auditLogService != null) {
                 Member targetMember = room.getMembers().get(targetMemberId);
                 String targetName = targetMember != null ? targetMember.getDisplayName() : targetMemberId;
                 auditLogService.record(
@@ -448,9 +449,10 @@ public class ModuleController {
         }
 
         try {
-            ModuleRecord module = moduleService.revokeWriteAccess(roomId, moduleId, member, ownerToken, memberId);
+            ModuleService.WriteAccessResult result = moduleService.revokeWriteAccessResult(roomId, moduleId, member, ownerToken, memberId);
+            ModuleRecord module = result.module();
 
-            if (auditLogService != null) {
+            if (result.changed() && auditLogService != null) {
                 Member targetMember = room.getMembers().get(memberId);
                 String targetName = targetMember != null ? targetMember.getDisplayName() : memberId;
                 auditLogService.record(

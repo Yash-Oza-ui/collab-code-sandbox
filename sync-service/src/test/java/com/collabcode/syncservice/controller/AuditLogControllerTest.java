@@ -392,6 +392,10 @@ class AuditLogControllerTest {
         HttpResponse<String> grantResp = http.send(grantReq, HttpResponse.BodyHandlers.ofString());
         assertThat(grantResp.statusCode()).isEqualTo(200);
 
+        // Repeated grant to GuestBob: writer set does NOT change, must not create a duplicate entry
+        HttpResponse<String> repeatedGrantResp = http.send(grantReq, HttpResponse.BodyHandlers.ofString());
+        assertThat(repeatedGrantResp.statusCode()).isEqualTo(200);
+
         // Revoke write access from GuestBob
         HttpRequest revokeReq = HttpRequest.newBuilder()
                 .uri(URI.create(base() + "/v1/rooms/" + roomId + "/modules/" + moduleId + "/writers/" + guestId))
@@ -402,6 +406,10 @@ class AuditLogControllerTest {
         HttpResponse<String> revokeResp = http.send(revokeReq, HttpResponse.BodyHandlers.ofString());
         assertThat(revokeResp.statusCode()).isEqualTo(200);
 
+        // Repeated revoke from GuestBob: writer set does NOT change, must not create a duplicate entry
+        HttpResponse<String> repeatedRevokeResp = http.send(revokeReq, HttpResponse.BodyHandlers.ofString());
+        assertThat(repeatedRevokeResp.statusCode()).isEqualTo(200);
+
         // Query audit log
         HttpRequest getLogReq = HttpRequest.newBuilder()
                 .uri(URI.create(base() + "/v1/rooms/" + roomId + "/audit-log"))
@@ -410,6 +418,7 @@ class AuditLogControllerTest {
                 .build();
         HttpResponse<String> logResp = http.send(getLogReq, HttpResponse.BodyHandlers.ofString());
         JsonNode entries = om.readTree(logResp.body()).get("entries");
+        // Exactly 2 entries: 1 for initial grant, 1 for initial revoke (repeated requests created 0 entries)
         assertThat(entries).hasSize(2);
 
         // Newest: write_access revoke
