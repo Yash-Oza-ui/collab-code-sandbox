@@ -350,7 +350,12 @@ export default function RoomPage(props: RoomPageProps = {}) {
       remoteCursorDecorationsRef.current,
       decorations,
     )
-  }, [docRef])
+  }, [getActiveDoc])
+
+  const renderRemoteCursorLabelsRef = useRef(renderRemoteCursorLabels)
+  useEffect(() => {
+    renderRemoteCursorLabelsRef.current = renderRemoteCursorLabels
+  }, [renderRemoteCursorLabels])
 
   const updateActivePresence = useCallback(() => {
     const awareness = awarenessInstanceRef.current
@@ -491,7 +496,7 @@ export default function RoomPage(props: RoomPageProps = {}) {
     awareness.on('change', handleAwarenessChange)
 
     const handleRemoteCursorChange = () => {
-      renderRemoteCursorLabels()
+      renderRemoteCursorLabelsRef.current()
       updateActivePresence()
     }
 
@@ -671,7 +676,7 @@ export default function RoomPage(props: RoomPageProps = {}) {
           rosterRef.current = roster.members ?? []
           setRoster(rosterRef.current)
           applyRosterNamesToAwareness(awareness, rosterRef.current)
-          renderRemoteCursorLabels()
+          renderRemoteCursorLabelsRef.current()
           updateActivePresence()
           if (myMemberIdRef.current) {
             const me = roster.members?.find((m) => m.member_id === myMemberIdRef.current)
@@ -897,7 +902,7 @@ export default function RoomPage(props: RoomPageProps = {}) {
         delete (window as unknown as { awareness?: Awareness }).awareness
       }
     }
-  }, [roomId, isInvalidRoomId, docRef, externalAwarenessRef, propDocId, moduleDocs, resolveDocId, wsOptions, showRunResult, applyRole, resumeNameKey, renderRemoteCursorLabels, updateActivePresence])
+  }, [roomId, isInvalidRoomId, docRef, externalAwarenessRef, propDocId, moduleDocs, resolveDocId, wsOptions, showRunResult, applyRole, resumeNameKey, updateActivePresence])
 
   // Keep presence updated in awareness whenever displayName and userColor are set or change
   useEffect(() => {
@@ -1219,6 +1224,12 @@ export default function RoomPage(props: RoomPageProps = {}) {
       setChangingEditFor(null)
     }
   }
+
+  useEffect(() => {
+    if (roomMode?.mode === 'open' && editorRef.current) {
+      renderRemoteCursorLabels()
+    }
+  }, [activeModuleId, roomMode?.mode, renderRemoteCursorLabels])
 
   const handleSelectModule = useCallback(
     (moduleId: string) => {
@@ -1605,12 +1616,12 @@ export default function RoomPage(props: RoomPageProps = {}) {
             AI {roomAiEnabled ? 'on' : 'off'}
           </span>
         )}
-        {roomMode?.mode === 'pair' && (
+        {(roomMode?.mode === 'pair' || (roomMode?.mode === 'open' && activeModuleId)) && (
           <span
-            className={`room-edit-status-badge ${!isObserver && (isHost || myCanEdit === true) ? 'can-edit' : 'read-only'}`}
+            className={`room-edit-status-badge ${!isEditorReadOnly ? 'can-edit' : 'read-only'}`}
             data-testid="room-edit-status-badge"
           >
-            {!isObserver && (isHost || myCanEdit === true) ? 'You can edit' : 'Read only'}
+            {!isEditorReadOnly ? 'You can edit' : 'Read only'}
           </span>
         )}
         {displayName && (
