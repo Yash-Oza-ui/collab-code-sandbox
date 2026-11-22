@@ -1,0 +1,38 @@
+name: T-24b Docker evaluation evidence
+
+# Run on demand for reproducible Task 3 measured results at an exact commit.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  task3-evaluation-evidence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Prepare integration environment
+        run: |
+          python -m pip install -r tests/integration/requirements.txt
+          cp .env.example .env
+      - name: Start Docker-backed services
+        run: bash tests/integration/up.sh
+      - name: Run Task 3 evaluation against Docker
+        run: bash tests/integration/test-t24b-task3-evaluation.sh
+      - name: Upload raw results and measured Markdown, including failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: task3-evaluation-results
+          path: |
+            tests/integration/results/task3-evaluation.json
+            tests/integration/results/task3-evaluation.md
+          if-no-files-found: warn
+      - name: Tear down services
+        if: always()
+        run: docker compose --profile '*' down -v --remove-orphans || true

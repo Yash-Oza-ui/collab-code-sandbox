@@ -48,6 +48,7 @@ Or set them in `ai-ml-service/.env` (git-ignored, copied from `.env.example`).
 | NFR14    | Max runs per session                     | sync-service       | `APP_ROOM_LIMITS_MAX_RUNS_PER_SESSION`            | `0` (none)  | US-63 🔲         |
 | FR15     | Run record retention (seconds, provisional) | sync-service | `APP_RUN_HISTORY_RETENTION_SECONDS` | `86400` (24h, not final) | US-30 🟡 |
 | FR15     | Run record sweep interval (ms) | sync-service | `APP_RUN_HISTORY_SWEEP_INTERVAL_MS` | `60000` | US-30 ✅ |
+| FR34     | Audit log max entries per room           | sync-service       | `APP_AUDIT_LOG_MAX_ENTRIES`                       | `100`       | US-58 ✅ |
 | FR37.2   | AI slowdown factor                       | ai-ml-service      | `AI_SLOWDOWN_FACTOR`                              | `1.0`       | US-77 🔲         |
 | FR40.4   | LLM request timeout (seconds)            | ai-ml-service      | `LLM_TIMEOUT_SECONDS`                             | `10.0`      | US-16 ✅         |
 | FR40.4   | Max tokens per AI request                | ai-ml-service      | `AI_MAX_TOKENS_PER_REQUEST`                       | `4096`      | US-24 ✅         |

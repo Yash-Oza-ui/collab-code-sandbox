@@ -1,5 +1,6 @@
 package com.collabcode.syncservice.controller;
 
+import com.collabcode.syncservice.room.Member;
 import com.collabcode.syncservice.room.OwnerTokens;
 import com.collabcode.syncservice.room.Room;
 import com.collabcode.syncservice.room.RoomService;
@@ -32,8 +33,12 @@ public class HostGuard {
         this.roomService = roomService;
     }
 
-    /** Outcome of the guard: either an error response, or the resolved room. */
-    public record Result(ResponseEntity<Map<String, Object>> error, Room room) {
+    /** Outcome of the guard: either an error response, or the resolved room and caller. */
+    public record Result(ResponseEntity<Map<String, Object>> error, Room room, Member caller) {
+        public Result(ResponseEntity<Map<String, Object>> error, Room room) {
+            this(error, room, null);
+        }
+
         public boolean ok() {
             return error == null;
         }
@@ -49,19 +54,20 @@ public class HostGuard {
     public Result requireHost(String roomId, String sessionId, String ownerToken) {
         if (!isUuid(sessionId)) {
             return new Result(error(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_REQUEST",
-                    "Header 'X-Session-Id' must be a UUID."), null);
+                    "Header 'X-Session-Id' must be a UUID."), null, null);
         }
         Room room = store.get(roomId);
         if (room == null) {
-            return new Result(error(HttpStatus.NOT_FOUND, "ROOM_NOT_FOUND", "Room not found."), null);
+            return new Result(error(HttpStatus.NOT_FOUND, "ROOM_NOT_FOUND", "Room not found."), null, null);
         }
-        if (roomService.findMemberBySession(roomId, sessionId) == null) {
-            return new Result(error(HttpStatus.NOT_FOUND, "SESSION_NOT_FOUND", "You are not in this room."), null);
+        Member caller = roomService.findMemberBySession(roomId, sessionId);
+        if (caller == null) {
+            return new Result(error(HttpStatus.NOT_FOUND, "SESSION_NOT_FOUND", "You are not in this room."), null, null);
         }
         if (!OwnerTokens.matches(ownerToken, room.getOwnerTokenHash())) {
-            return new Result(error(HttpStatus.FORBIDDEN, "NOT_OWNER", "Missing or invalid owner token."), null);
+            return new Result(error(HttpStatus.FORBIDDEN, "NOT_OWNER", "Missing or invalid owner token."), null, null);
         }
-        return new Result(null, room);
+        return new Result(null, room, caller);
     }
 
     /** True if the value is a well-formed UUID v4 (contract §3.3). */
