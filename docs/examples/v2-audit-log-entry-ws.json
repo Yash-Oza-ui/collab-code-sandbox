@@ -1,0 +1,18 @@
+{
+  "type": "audit-entry",
+  "entry": {
+    "id": "aud_1732274400000_1",
+    "timestamp": "2026-11-22T11:30:00Z",
+    "action": "role_change",
+    "actor": "Host",
+    "actor_display_name": "Host",
+    "actor_member_id": "m_4b19d2",
+    "target": "Bob",
+    "target_display_name": "Bob",
+    "target_member_id": "m_9c84e1",
+    "property": "role",
+    "old_value": "participant",
+    "new_value": "observer",
+    "details": null
+  }
+}

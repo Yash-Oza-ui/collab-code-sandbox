@@ -182,4 +182,36 @@ public final class RoomMessages {
         m.put("error", errObj);
         return m;
     }
+
+    /**
+     * {@code audit-entry} (US-58, V2.23; FR34): sent to all connections when a role
+     * or permission change succeeds.
+     */
+    public static Map<String, Object> auditEntry(Room.AuditLogEntry entry) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("type", "audit-entry");
+        m.put("entry", auditEntryData(entry));
+        return m;
+    }
+
+    /**
+     * Serialises an {@link Room.AuditLogEntry} to an entry object for WebSocket or REST response.
+     */
+    public static Map<String, Object> auditEntryData(Room.AuditLogEntry entry) {
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("id", entry.id());
+        data.put("timestamp", entry.timestamp().toString());
+        data.put("action", entry.action());
+        data.put("actor", entry.actorDisplayName());
+        data.put("actor_display_name", entry.actorDisplayName());
+        data.put("actor_member_id", entry.actorMemberId());
+        data.put("target", entry.targetDisplayName());
+        data.put("target_display_name", entry.targetDisplayName());
+        data.put("target_member_id", entry.targetMemberId());
+        data.put("property", entry.property());
+        data.put("old_value", entry.oldValue());
+        data.put("new_value", entry.newValue());
+        data.put("details", entry.details());
+        return data;
+    }
 }

@@ -1,5 +1,6 @@
 package com.collabcode.syncservice.controller;
 
+import com.collabcode.syncservice.audit.AuditLogService;
 import com.collabcode.syncservice.handler.ControlHandler;
 import com.collabcode.syncservice.room.Member;
 import com.collabcode.syncservice.room.Role;
@@ -42,16 +43,28 @@ public class EditRequestController {
     private final RoomService roomService;
     private final ControlHandler controlHandler;
     private final HostGuard hostGuard;
+    private final AuditLogService auditLogService;
 
     public EditRequestController(
             RoomStore store,
             RoomService roomService,
             ControlHandler controlHandler,
             HostGuard hostGuard) {
+        this(store, roomService, controlHandler, hostGuard, null);
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public EditRequestController(
+            RoomStore store,
+            RoomService roomService,
+            ControlHandler controlHandler,
+            HostGuard hostGuard,
+            @org.springframework.beans.factory.annotation.Autowired(required = false) AuditLogService auditLogService) {
         this.store = store;
         this.roomService = roomService;
         this.controlHandler = controlHandler;
         this.hostGuard = hostGuard;
+        this.auditLogService = auditLogService;
     }
 
     @PostMapping("/rooms/{roomId}/edit-requests/{memberId}/approve")
@@ -95,8 +108,23 @@ public class EditRequestController {
                     "The Host's edit access cannot be changed.");
         }
 
+        boolean oldCanEdit = target.isCanEdit();
         Member updated = roomService.setEditAccess(roomId, memberId, true);
         room.removeEditRequest(memberId);
+
+        if (auditLogService != null) {
+            auditLogService.record(
+                    roomId,
+                    "edit_access",
+                    g.caller(),
+                    updated,
+                    updated.getDisplayName(),
+                    updated.getMemberId(),
+                    "can_edit",
+                    oldCanEdit,
+                    true,
+                    "Approved edit request");
+        }
 
         controlHandler.broadcastRoster(roomId);
         controlHandler.sendToMemberControlSessions(roomId, target.getSessionId(),

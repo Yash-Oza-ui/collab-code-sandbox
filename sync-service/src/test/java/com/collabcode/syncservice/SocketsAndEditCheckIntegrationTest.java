@@ -1377,6 +1377,43 @@ class SocketsAndEditCheckIntegrationTest {
         }
     }
 
+    @Test
+    void auditLog_webSocketReceivesAuditEntryOnPermissionChanges() throws Exception {
+        Map<String, Object> room = createRoom("pair", "teach_interview", null);
+        String roomId = (String) room.get("room_id");
+        String ownerToken = (String) room.get("owner_token");
+
+        try (WsClient ctrlHost = connectControl(roomId, SESSION_A);
+             WsClient ctrlGuest = connectControl(roomId, SESSION_B)) {
+            sendJoin(ctrlHost, "Alice", ownerToken);
+            sendJoin(ctrlGuest, "Bob", null);
+            drainText(ctrlHost, 2);
+            drainText(ctrlGuest, 2);
+
+            Member bob = roomService.findMemberBySession(roomId, SESSION_B);
+
+            // Grant edit access via REST
+            patchEditAccess(roomId, bob.getMemberId(), SESSION_A, ownerToken, true);
+
+            // Both control sockets must receive audit-entry
+            String hostAudit = pollControlMessage(ctrlHost, "audit-entry", 3, TimeUnit.SECONDS);
+            assertThat(hostAudit)
+                    .isNotNull()
+                    .contains("\"type\":\"audit-entry\"")
+                    .contains("\"action\":\"edit_access\"")
+                    .contains("\"actor\":\"Alice\"")
+                    .contains("\"target\":\"Bob\"")
+                    .contains("\"property\":\"can_edit\"")
+                    .contains("\"new_value\":true");
+
+            String guestAudit = pollControlMessage(ctrlGuest, "audit-entry", 3, TimeUnit.SECONDS);
+            assertThat(guestAudit)
+                    .isNotNull()
+                    .contains("\"type\":\"audit-entry\"")
+                    .contains("\"action\":\"edit_access\"");
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Inner helpers
     // -----------------------------------------------------------------------
