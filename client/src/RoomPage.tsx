@@ -42,6 +42,10 @@ import {
   CLOSE_REMOVED,
   CLOSE_ROOM_CLOSED,
   CLOSE_UNKNOWN_ROOM,
+  type ControlErrorMessage,
+  type EditAccessRequestClearedMessage,
+  type EditAccessRequestedMessage,
+  type EditAccessRespondedMessage,
 } from './awarenessWs'
 import { ownerTokenKey } from './createRoom'
 import {
@@ -55,6 +59,10 @@ import {
   type BlockedMember,
   type HostApiResult,
   type HostCallContext,
+  approveEditRequest,
+  declineEditRequest,
+  listEditRequests,
+  type PendingEditRequest,
 } from './hostApi'
 import { getRoomIdFromPath } from './roomId'
 import { useRoomDoc } from './roomDoc'
@@ -209,6 +217,12 @@ export default function RoomPage(props: RoomPageProps = {}) {
   const [myCanEdit, setMyCanEdit] = useState<boolean | null>(null)
   const [changingEditFor, setChangingEditFor] = useState<string | null>(null)
   const [editAccessError, setEditAccessError] = useState<string | null>(null)
+  const [pendingEditRequests, setPendingEditRequests] = useState<PendingEditRequest[]>([])
+  const [editRequestPending, setEditRequestPending] = useState(false)
+  const editRequestPendingRef = useRef(false)
+  const [editRequestStatusMessage, setEditRequestStatusMessage] = useState<string | null>(null)
+  const [editRequestError, setEditRequestError] = useState<string | null>(null)
+  const [respondingEditRequestFor, setRespondingEditRequestFor] = useState<string | null>(null)
   const isHost = role?.toLowerCase() === 'host'
   const isEditorReadOnly =
     isObserver ||
@@ -511,6 +525,8 @@ export default function RoomPage(props: RoomPageProps = {}) {
         },
         onJoined: (joined) => {
           myMemberIdRef.current = joined.member_id ?? null
+          setEditRequestPending(false)
+          editRequestPendingRef.current = false
           setMyMemberId(joined.member_id ?? null)
           applyRole(joined.role)
           setMyCanRun(typeof joined.permissions?.can_run === 'boolean' ? joined.permissions.can_run : null)
@@ -583,6 +599,37 @@ export default function RoomPage(props: RoomPageProps = {}) {
             try { sessionStorage.setItem(resumeNameKey, name) } catch { /* storage disabled */ }
           }
           onDisplayNameAcceptedRef.current?.(name, color)
+        },
+        onEditAccessRequested: (msg: EditAccessRequestedMessage) => {
+          setPendingEditRequests((prev) => {
+            const filtered = prev.filter((item) => item.member_id !== msg.member_id)
+            return [
+              ...filtered,
+              {
+                member_id: msg.member_id,
+                display_name: msg.display_name,
+                requested_at: msg.requested_at,
+              },
+            ]
+          })
+        },
+        onEditAccessResponded: (msg: EditAccessRespondedMessage) => {
+          setEditRequestPending(false)
+          editRequestPendingRef.current = false
+          setEditRequestError(null)
+          setEditRequestStatusMessage(
+            msg.approved
+              ? 'The Host approved your request'
+              : msg.message || 'The Host declined your edit access request.',
+          )
+        },
+        onEditAccessRequestCleared: (msg: EditAccessRequestClearedMessage) => {
+          setPendingEditRequests((prev) => prev.filter((item) => item.member_id !== msg.member_id))
+        },
+        onControlError: (msg: ControlErrorMessage) => {
+          editRequestPendingRef.current = false
+          setEditRequestPending(false)
+          setEditRequestError(msg.message || 'Could not complete request.')
         },
         onModuleUpdated: (msg) => {
           if (msg.deleted) {
@@ -659,6 +706,10 @@ export default function RoomPage(props: RoomPageProps = {}) {
             }
             if (me?.permissions && typeof me.permissions.can_edit === 'boolean') {
               setMyCanEdit(me.permissions.can_edit)
+              if (me.permissions.can_edit) {
+                setEditRequestPending(false)
+                editRequestPendingRef.current = false
+              }
             }
           }
           setHostOnlyRun(roster.host_only_run === true)
@@ -901,6 +952,52 @@ export default function RoomPage(props: RoomPageProps = {}) {
       cancelled = true
     }
   }, [isHost, getHostContext, hostDataVersion])
+
+  useEffect(() => {
+    if (!isHost || roomMode?.mode !== 'pair' || joinStatus !== 'joined' || reconnecting) return
+    const ctx = getHostContext()
+    if (!ctx) return
+    let cancelled = false
+    void listEditRequests(ctx).then((res) => {
+      if (cancelled) return
+      if (res.ok) setPendingEditRequests(res.data)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [isHost, roomMode?.mode, joinStatus, reconnecting, getHostContext])
+
+  function handleRequestEditAccess() {
+    if (editRequestPendingRef.current) return
+    setEditRequestError(null)
+    setEditRequestStatusMessage(null)
+    const sent = connRef.current?.requestEditAccess()
+    if (sent) {
+      editRequestPendingRef.current = true
+      setEditRequestPending(true)
+    } else {
+      setEditRequestError('Not connected to the room. Please try again.')
+    }
+  }
+
+  async function handleRespondEditRequest(memberId: string, approve: boolean) {
+    const ctx = getHostContext()
+    if (!ctx) {
+      setEditRequestError('Missing Host credentials. Please rejoin the room.')
+      return
+    }
+    setRespondingEditRequestFor(memberId)
+    setEditRequestError(null)
+    const res = approve
+      ? await approveEditRequest(ctx, memberId)
+      : await declineEditRequest(ctx, memberId)
+    setRespondingEditRequestFor(null)
+    if (res.ok) {
+      setPendingEditRequests((prev) => prev.filter((item) => item.member_id !== memberId))
+    } else {
+      setEditRequestError(res.error)
+    }
+  }
 
   async function runHostAction<T>(
     key: string,
@@ -1758,6 +1855,69 @@ export default function RoomPage(props: RoomPageProps = {}) {
           <p role="alert" data-testid="edit-access-error">
             {editAccessError}
           </p>
+        )}
+
+        {roomMode?.mode === 'pair' &&
+          role?.toLowerCase() === 'participant' &&
+          myCanEdit === false &&
+          !isHost &&
+          !isObserver && (
+            <button
+              type="button"
+              data-testid="request-edit-access-button"
+              onClick={handleRequestEditAccess}
+              disabled={editRequestPending}
+            >
+              {editRequestPending ? 'Request sent, waiting for the Host' : 'Request edit access'}
+            </button>
+          )}
+
+        {roomMode?.mode === 'pair' && editRequestStatusMessage && (
+          <p role="status" data-testid="edit-request-status">
+            {editRequestStatusMessage}
+          </p>
+        )}
+
+        {roomMode?.mode === 'pair' && editRequestError && (
+          <p role="alert" data-testid="edit-request-error">
+            {editRequestError}
+          </p>
+        )}
+
+        {isHost && roomMode?.mode === 'pair' && (
+          <div className="edit-access-requests-panel" data-testid="edit-access-requests-panel">
+            <h4>Edit access requests ({pendingEditRequests.length})</h4>
+            {pendingEditRequests.length === 0 ? (
+              <p data-testid="no-edit-requests">No pending edit requests.</p>
+            ) : (
+              <ul>
+                {pendingEditRequests.map((req) => {
+                  const busy = respondingEditRequestFor === req.member_id
+                  return (
+                    <li key={req.member_id} data-testid={`edit-request-${req.member_id}`}>
+                      <span>{req.display_name}</span>
+                      <button
+                        type="button"
+                        data-testid={`approve-edit-request-${req.member_id}`}
+                        onClick={() => void handleRespondEditRequest(req.member_id, true)}
+                        disabled={busy}
+                      >
+                        Approve
+                      </button>
+                      <button
+                        type="button"
+                        data-testid={`decline-edit-request-${req.member_id}`}
+                        onClick={() => void handleRespondEditRequest(req.member_id, false)}
+                        disabled={busy}
+                      >
+                        Decline
+                      </button>
+                    </li>
+                  )
+                })}
+              </ul>
+            )}
+          </div>
         )}
 
         {isHost && blocked.length > 0 && (
