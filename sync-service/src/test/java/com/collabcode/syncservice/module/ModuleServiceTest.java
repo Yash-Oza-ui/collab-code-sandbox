@@ -9,6 +9,7 @@ import com.collabcode.syncservice.room.RoomStore;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.List;
 
@@ -489,5 +490,44 @@ class ModuleServiceTest {
         assertThatThrownBy(() -> moduleService.setEntry(OPEN_ROOM_ID, pending.moduleId(), host, OWNER_TOKEN, true))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessage("MODULE_PENDING");
+    }
+
+    @Test
+    @DisplayName("US-63: approved module count cannot exceed configuration")
+    void us63_createBeyondLimitIsRejectedAndDoesNotCreateModule() {
+        ReflectionTestUtils.setField(moduleService, "maxModulesPerRoom", 1);
+        ModuleRecord first = moduleService.createApprovedModule(OPEN_ROOM_ID, host, "one.py");
+        assertThatThrownBy(() -> moduleService.createApprovedModule(OPEN_ROOM_ID, host, "two.py"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("LIMIT_REACHED");
+        assertThat(moduleService.listApproved(OPEN_ROOM_ID, host))
+                .extracting(ModuleRecord::moduleId).containsExactly(first.moduleId());
+    }
+
+    @Test
+    @DisplayName("US-63: full room leaves participant request pending on approval refusal")
+    void us63_pendingApprovalAtLimitDoesNotMutateRequest() {
+        ReflectionTestUtils.setField(moduleService, "maxModulesPerRoom", 1);
+        moduleService.createApprovedModule(OPEN_ROOM_ID, host, "one.py");
+        ModuleRecord pending = moduleService.requestCreate(OPEN_ROOM_ID, participant, "two.py");
+        assertThatThrownBy(() -> moduleService.approve(OPEN_ROOM_ID, pending.moduleId(), host, OWNER_TOKEN))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("LIMIT_REACHED");
+        assertThat(pending.pending()).isTrue();
+        assertThat(moduleService.listPending(OPEN_ROOM_ID, host))
+                .extracting(ModuleRecord::moduleId).contains(pending.moduleId());
+        assertThat(moduleService.listApproved(OPEN_ROOM_ID, host)).hasSize(1);
+    }
+
+    @Test
+    @DisplayName("US-63: configuration can increase module capacity without code changes")
+    void us63_configuredLimitChangesBehavior() {
+        ReflectionTestUtils.setField(moduleService, "maxModulesPerRoom", 1);
+        moduleService.createApprovedModule(OPEN_ROOM_ID, host, "one.py");
+        assertThatThrownBy(() -> moduleService.createApprovedModule(OPEN_ROOM_ID, host, "two.py"))
+                .hasMessage("LIMIT_REACHED");
+        ReflectionTestUtils.setField(moduleService, "maxModulesPerRoom", 2);
+        assertThat(moduleService.createApprovedModule(OPEN_ROOM_ID, host, "two.py"))
+                .isNotNull();
     }
 }

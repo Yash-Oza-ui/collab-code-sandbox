@@ -1880,6 +1880,7 @@ Rules:
 ### 2. Host approves or declines (REST, Host-only)
 
 ```text
+GET  http://localhost:8081/v1/rooms/{room_id}/edit-requests
 POST http://localhost:8081/v1/rooms/{room_id}/edit-requests/{member_id}/approve
 POST http://localhost:8081/v1/rooms/{room_id}/edit-requests/{member_id}/decline
 X-Session-Id: <caller-session-id>

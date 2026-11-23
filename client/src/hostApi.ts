@@ -42,6 +42,12 @@ export interface EditAccessResponse {
   }
 }
 
+export interface PendingEditRequest {
+  member_id: string
+  display_name: string
+  requested_at: string
+}
+
 const ROOM_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/
 
 /** Plain-words text for an error code of V2.12; the server message is the fallback. */
@@ -55,6 +61,8 @@ function errorText(code: string | undefined, serverMessage: string | undefined, 
       return 'This room no longer exists.'
     case 'SESSION_NOT_FOUND':
       return 'You are not in this room. Please rejoin.'
+    case 'INVALID_REQUEST':
+      return serverMessage || 'That request is not valid right now.'
     default:
       return serverMessage || code || `The request failed (HTTP ${status}).`
   }
@@ -183,5 +191,52 @@ export function setAiSwitch(ctx: HostCallContext, enabled: boolean) {
       ? { ai_enabled: raw.ai_enabled }
       : null,
     { ai_enabled: enabled },
+  )
+}
+
+/** Pending Pair-mode edit-access requests, newest from server (US-38 / V2.22). */
+/** Pending Pair-mode edit-access requests, newest from the server (US-38 / V2.22). */
+export function listEditRequests(ctx: HostCallContext) {
+  return hostRequest<PendingEditRequest[]>(ctx, 'GET', '/edit-requests', (raw) => {
+    if (!Array.isArray(raw)) return null
+    const out: PendingEditRequest[] = []
+    for (const item of raw) {
+      if (
+        !isObject(item) ||
+        typeof item.member_id !== 'string' ||
+        typeof item.display_name !== 'string' ||
+        typeof item.requested_at !== 'string'
+      ) {
+        return null
+      }
+      out.push({
+        member_id: item.member_id,
+        display_name: item.display_name,
+        requested_at: item.requested_at,
+      })
+    }
+    return out
+  })
+}
+
+/** Approve a participant's pending edit-access request (US-38 / V2.22). */
+export function approveEditRequest(ctx: HostCallContext, memberId: string) {
+  return hostRequest<EditAccessResponse>(
+    ctx,
+    'POST',
+    `/edit-requests/${encodeURIComponent(memberId)}/approve`,
+    (raw) => {
+      if (!isObject(raw) || typeof raw.member_id !== 'string') return null
+      return raw as unknown as EditAccessResponse
+    },
+  )
+}
+
+/** Decline a participant's pending edit-access request (US-38 / V2.22). */
+export function declineEditRequest(ctx: HostCallContext, memberId: string) {
+  return hostRequest(ctx, 'POST', `/edit-requests/${encodeURIComponent(memberId)}/decline`, (raw) =>
+    isObject(raw) && raw.status === 'declined' && typeof raw.member_id === 'string'
+      ? { member_id: raw.member_id }
+      : null,
   )
 }

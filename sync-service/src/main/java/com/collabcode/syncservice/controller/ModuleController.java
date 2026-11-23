@@ -190,11 +190,16 @@ public class ModuleController {
             }
             return moduleError(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_REQUEST", msg != null ? msg : "Invalid request.");
         } catch (IllegalStateException e) {
-            if ("NAME_TAKEN".equals(e.getMessage())) {
-                return moduleError(HttpStatus.CONFLICT, "NAME_TAKEN", "Module name '" + name + "' is already taken in this workspace.");
-            }
-            return moduleError(HttpStatus.CONFLICT, e.getMessage(), e.getMessage());
-        }
+    if ("NAME_TAKEN".equals(e.getMessage())) {
+        return moduleError(HttpStatus.CONFLICT, "NAME_TAKEN",
+                "Module name '" + name + "' is already taken in this workspace.");
+    }
+    if ("LIMIT_REACHED".equals(e.getMessage())) {
+        return moduleError(HttpStatus.CONFLICT, "LIMIT_REACHED",
+                "This workspace has reached its maximum number of modules. Please contact the Host.");
+    }
+    return moduleError(HttpStatus.CONFLICT, e.getMessage(), e.getMessage());
+}
     }
 
     /**
@@ -275,8 +280,12 @@ public class ModuleController {
                     ? HttpStatus.NOT_FOUND : HttpStatus.UNPROCESSABLE_ENTITY;
             return moduleError(status, msg, msg);
         } catch (IllegalStateException e) {
-            return moduleError(HttpStatus.NOT_FOUND, "MODULE_NOT_FOUND", "Module not found.");
-        }
+    if ("LIMIT_REACHED".equals(e.getMessage())) {
+        return moduleError(HttpStatus.CONFLICT, "LIMIT_REACHED",
+                "This workspace has reached its maximum number of modules. Please decline a pending request or remove a module.");
+    }
+    return moduleError(HttpStatus.NOT_FOUND, "MODULE_NOT_FOUND", "Module not found.");
+}
     }
 
     /**
