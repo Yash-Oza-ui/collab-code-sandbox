@@ -799,7 +799,7 @@ All paths are under `/v1/rooms/{room_id}/modules`. "Who" is who may call it. Eac
 | Transfer owner | `POST /v1/rooms/{room_id}/modules/{module_id}/transfer` | **owner** (FR21.4) | `{ "to_member_id": "m_4b19d2" }` | `200` module object |
 | Grant write | `POST /v1/rooms/{room_id}/modules/{module_id}/writers` | **owner or Host** (FR22.1) | `{ "member_id": "m_4b19d2" }` | `200` module object |
 | Revoke write | `DELETE /v1/rooms/{room_id}/modules/{module_id}/writers/{member_id}` | **owner or Host** (FR22.1) | — | `200` module object |
-| Save version | `POST /v1/rooms/{room_id}/modules/{module_id}/save` | owner or writer | — | `200` `{ "module_id": "…", "version": 5 }` |
+| Save version | `POST /v1/rooms/{room_id}/modules/{module_id}/save` | owner or writer | `{ "text": "…" }` (see V2.24) | `200` module object with `version`, `saved_by`, `saved_by_name`, `saved_at`, `dirty: false` (see V2.24) |
 
 A `PATCH` carries **exactly one** of `name`, `runnable` or `is_entry`; the caller allowed depends on the field (owner for `name` and `runnable`, Host for `is_entry`, as the rows show). Sending zero or more than one of these fields is `INVALID_REQUEST`. Module **targets** (`owner_member_id`, `to_member_id`, `member_id`, the `writers` path segment) are always public `member_id`s, never `session_id`s.
 
@@ -2007,6 +2007,19 @@ Whenever any of the 6 permission/role changes succeeds, the server broadcasts an
 5. **Lifecycle (FR32, US-56):** The log is in-memory room state held in `sync-service` (`Room.java`). It is carried over if the room link is regenerated (US-28) and purged when the room ends or is deleted (`Room.clearSensitiveState()`).
 6. **Scope:** Module ownership changes (US-40, US-41, US-42) are not recorded in this story.
 
+## V2.24 Save a module manually (US-45) — Proposed
+
+**Traceability:** FR24.1, FR24.2 · US-45 · EPIC 7 · Sprint 5 (new in v2)
+
+In Open mode, a module's owner or a member in `writers` (US-43) manually saves the module's current editor text as a new immutable version on `sync-service`. Nothing is autosaved (no timer, disconnect, or run-start save). Runs (US-47, US-48) read saved versions only.
+
+### 1. Save endpoint
+
+```text
+POST http://localhost:8081/v1/rooms/{room_id}/modules/{module_id}/save
+Content-Type: application/json
+X-Session-Id: <caller-session-id>
+
 ## US-56: Internal room-ended notification (Proposed — awaiting execution-service and AI-ML owners)
 
 **Traceability:** FR32, US-56, T-18 Decision 9; internal service-to-service only. This proposal does **not** add a public Host delete/close endpoint. The existing US-55 automatic Host-departure closure is the trigger once that branch is merged. Bhavya Vekariya (execution-service) and Prince Gadara (ai-ml-service) must confirm this new contract before implementation is merged.
@@ -2076,6 +2089,7 @@ Success returns `200 OK` and `{"room_id":"Zq8-Lw2Ef6Th0Yx4Rn7JbA","status":"clea
 | v2 (edit access) | Nov 2026 | V2.21 added (US-36): `PATCH /v1/rooms/{room_id}/members/{member_id}/edit-access` gives or takes back edit access in Pair mode (FR19.1). Edit access controls apply only in Pair mode (Open mode refuses with `422 INVALID_REQUEST`). Host access cannot be changed (`422`) and Observers cannot have edit access (`422`). Broadcasts updated roster on change. |
 | v2 (edit request) | 20 Nov 2026 | V2.22 added (US-38): control-socket `request-edit-access` / `edit-access-requested` / `edit-access-responded` / `edit-access-request-cleared` and Host-only `POST /v1/rooms/{room_id}/edit-requests/{member_id}/approve` and `/decline` in Pair mode (FR19.3). Reuses `RoomService.setEditAccess` (V2.21). Edit requests removed from V2.15 undecided list. |
 | v2 (audit log) | 22 Nov 2026 | V2.23 added (US-58): `GET /v1/rooms/{room_id}/audit-log` and control-socket `audit-entry` push for role, edit access, module write access, and run permission changes (FR34). Bounded in-memory store; deleted with room; server-written only. Audit log removed from V2.15 undecided list. |
+| v2 (save module) | 24 Nov 2026 | V2.24 added (US-45): `POST /v1/rooms/{room_id}/modules/{module_id}/save` body `{ "text" }`, `saved_by` / `saved_by_name` / `saved_at` / `dirty` fields on module objects and `module-updated` (FR24.1, FR24.2). |
 
 ### Runner infrastructure error (v1 proposal addition)
 
