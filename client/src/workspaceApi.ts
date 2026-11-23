@@ -9,6 +9,9 @@ export interface WorkspaceModule {
   is_entry?: boolean
   version?: number
   pending?: boolean
+  dirty?: boolean
+  saved_by?: { member_id: string; display_name: string } | null
+  saved_at?: string | null
 }
 
 export interface WorkspaceApiContext {
@@ -648,4 +651,63 @@ export async function revokeWriteAccess(
       error: err instanceof Error ? err.message : 'Network error while revoking write access.',
     }
   }
+}
+
+function saveErrorText(code: string | undefined, serverMessage: string | undefined, status: number): string {
+  switch (code) {
+    case 'NOT_MODULE_WRITER':
+      return 'Only the module owner or a writer can save this module.'
+    case 'MODULE_NOT_FOUND':
+      return 'Module not found.'
+    case 'ROOM_NOT_FOUND':
+      return 'This room no longer exists.'
+    case 'SESSION_NOT_FOUND':
+      return 'You are not in this room. Please rejoin.'
+    default:
+      return serverMessage || code || `Could not save module (HTTP ${status}).`
+  }
+}
+
+export async function saveModule(
+  ctx: WorkspaceApiContext,
+  moduleId: string,
+  text: string,
+): Promise<WorkspaceApiResult<WorkspaceModule>> {
+  const fetchFn = ctx.fetchFn ?? fetch
+  const base = ctx.baseUrl ?? config.platformApiUrl
+  let response: Response
+  try {
+    response = await fetchFn(
+      `${base}/v1/rooms/${encodeURIComponent(ctx.roomId)}/modules/${encodeURIComponent(moduleId)}/save`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Session-Id': ctx.sessionId,
+        },
+        body: JSON.stringify({ text }),
+      },
+    )
+  } catch {
+    return { ok: false, status: 0, code: 'NETWORK', error: 'Could not connect to the room server. Please try again.' }
+  }
+
+  let body: unknown
+  try {
+    body = await response.json()
+  } catch {
+    body = null
+  }
+
+  if (!response.ok) {
+    const envelope = (body as { error?: { code?: unknown; message?: unknown } } | null)?.error
+    const code = typeof envelope?.code === 'string' ? envelope.code : undefined
+    const message = typeof envelope?.message === 'string' ? envelope.message : undefined
+    return { ok: false, status: response.status, code, error: saveErrorText(code, message, response.status) }
+  }
+
+  if (typeof body !== 'object' || body === null || typeof (body as { module_id?: unknown }).module_id !== 'string') {
+    return { ok: false, status: response.status, code: 'BAD_RESPONSE', error: 'The room server sent an unexpected answer.' }
+  }
+  return { ok: true, data: body as WorkspaceModule }
 }

@@ -8,7 +8,7 @@ import com.collabcode.syncservice.room.RoomMode;
 import com.collabcode.syncservice.room.RoomStore;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
-
+import java.time.Instant;
 import java.security.SecureRandom;
 import java.util.Base64;
 import java.util.Comparator;
@@ -396,6 +396,38 @@ public class ModuleService {
     public ModuleRecord find(String roomId, String moduleId) {
         Map<String, ModuleRecord> modules = byRoom.get(roomId);
         return modules == null ? null : modules.get(moduleId);
+    }
+
+    /**
+     * Manually saves the module's current text as a new immutable version (US-45, FR24.1).
+     * Kept in one function so US-63 size limits can plug in cleanly.
+     */
+    public synchronized ModuleRecord saveModule(String roomId, String moduleId, Member caller, String text) {
+        requireOpenRoom(roomId);
+        if (caller == null) {
+            throw new IllegalArgumentException("SESSION_NOT_FOUND");
+        }
+        ModuleRecord module = find(roomId, moduleId);
+        if (module == null) {
+            throw new IllegalStateException("MODULE_NOT_FOUND");
+        }
+        if (module.pending()) {
+            throw new IllegalStateException("MODULE_PENDING");
+        }
+        if (caller.getRole() == Role.OBSERVER || !module.canEdit(caller.getMemberId())) {
+            throw new SecurityException("NOT_MODULE_WRITER");
+        }
+        if (text == null) {
+            throw new IllegalArgumentException("INVALID_REQUEST");
+        }
+        module.save(caller, text, Instant.now());
+        return module;
+    }
+
+    /** Marks an approved module dirty after an accepted edit frame (US-45, FR24.2). */
+    public boolean markDirty(String roomId, String moduleId) {
+        ModuleRecord module = find(roomId, moduleId);
+        return module != null && !module.pending() && module.markDirty();
     }
 
     /** Result of updating entry file designation. */

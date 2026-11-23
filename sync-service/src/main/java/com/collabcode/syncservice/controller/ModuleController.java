@@ -607,6 +607,64 @@ public class ModuleController {
         }
     }
 
+    /** Manually saves a module's current editor text as a new version (US-45, V2.24). */
+    @PostMapping("/rooms/{roomId}/modules/{moduleId}/save")
+    public ResponseEntity<?> saveModule(
+            @PathVariable String roomId,
+            @PathVariable String moduleId,
+            @RequestHeader(value = "X-Session-Id", required = false) String sessionId,
+            @RequestBody(required = false) String rawBody) {
+        if (sessionId == null || sessionId.isBlank()) {
+            return moduleError(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_REQUEST", "X-Session-Id header is required.");
+        }
+        Room room = store.get(roomId);
+        if (room == null || room.isClosed()) {
+            return moduleError(HttpStatus.NOT_FOUND, "ROOM_NOT_FOUND", "Room not found.");
+        }
+        if (room.getMode() != RoomMode.OPEN) {
+            return moduleError(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_REQUEST", "Pair mode rooms do not have modules.");
+        }
+        Member caller = roomService.findMemberBySession(roomId, sessionId);
+        if (caller == null) {
+            return moduleError(HttpStatus.NOT_FOUND, "SESSION_NOT_FOUND", "Session has not joined this room.");
+        }
+
+        JsonNode json;
+        try {
+            json = (rawBody == null || rawBody.isBlank()) ? null : objectMapper.readTree(rawBody);
+        } catch (Exception e) {
+            return moduleError(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_REQUEST", "Invalid JSON body.");
+        }
+        if (json == null || !json.has("text") || !json.get("text").isTextual()) {
+            return moduleError(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_REQUEST", "Field 'text' must be a string.");
+        }
+        String text = json.get("text").asText();
+
+        try {
+            ModuleRecord saved = moduleService.saveModule(roomId, moduleId, caller, text);
+            controlHandler.broadcastModuleUpdated(roomId, RoomMessages.moduleUpdated(saved, false));
+            return ResponseEntity.ok(moduleBody(saved));
+        } catch (SecurityException e) {
+            return moduleError(HttpStatus.FORBIDDEN, "NOT_MODULE_WRITER",
+                    "Only the module owner or a writer can save this module.");
+        } catch (IllegalStateException e) {
+            if ("MODULE_NOT_FOUND".equals(e.getMessage())) {
+                return moduleError(HttpStatus.NOT_FOUND, "MODULE_NOT_FOUND", "Module not found.");
+            }
+            if ("MODULE_PENDING".equals(e.getMessage())) {
+                return moduleError(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_REQUEST",
+                        "Pending modules cannot be saved.");
+            }
+            return moduleError(HttpStatus.CONFLICT, e.getMessage(), e.getMessage());
+        } catch (IllegalArgumentException e) {
+            String msg = e.getMessage();
+            HttpStatus status = ("SESSION_NOT_FOUND".equals(msg) || "ROOM_NOT_FOUND".equals(msg))
+                    ? HttpStatus.NOT_FOUND
+                    : HttpStatus.UNPROCESSABLE_ENTITY;
+            return moduleError(status, msg, msg);
+        }
+    }
+
     private ResponseEntity<Map<String, Object>> moduleError(HttpStatus status, String code, String message) {
         Map<String, Object> error = new LinkedHashMap<>();
         error.put("code", code);
@@ -629,6 +687,16 @@ public class ModuleController {
         body.put("is_entry", module.isEntry());
         body.put("version", module.version());
         body.put("pending", module.pending());
+        body.put("dirty", module.dirty());
+        if (module.savedByMemberId() != null) {
+            Map<String, Object> savedBy = new LinkedHashMap<>();
+            savedBy.put("member_id", module.savedByMemberId());
+            savedBy.put("display_name", module.savedByDisplayName());
+            body.put("saved_by", savedBy);
+        } else {
+            body.put("saved_by", null);
+        }
+        body.put("saved_at", module.savedAt() != null ? module.savedAt().toString() : null);
         return body;
     }
 
@@ -643,6 +711,16 @@ public class ModuleController {
         payload.put("is_entry", module.isEntry());
         payload.put("version", module.version());
         payload.put("pending", module.pending());
+        payload.put("dirty", module.dirty());
+        if (module.savedByMemberId() != null) {
+            Map<String, Object> savedBy = new LinkedHashMap<>();
+            savedBy.put("member_id", module.savedByMemberId());
+            savedBy.put("display_name", module.savedByDisplayName());
+            payload.put("saved_by", savedBy);
+        } else {
+            payload.put("saved_by", null);
+        }
+        payload.put("saved_at", module.savedAt() != null ? module.savedAt().toString() : null);
         payload.put("deleted", deleted);
         return payload;
     }
