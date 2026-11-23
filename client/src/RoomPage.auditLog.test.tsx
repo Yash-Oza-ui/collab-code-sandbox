@@ -9,7 +9,7 @@ import { formatAuditEntry, type AuditLogEntry } from './auditLogApi'
 vi.mock('@monaco-editor/react', async () => {
   const React = await import('react')
   return {
-    default: ({ options, onMount }: any) => {
+    default: function MockEditor({ options, onMount }: any) {
       React.useEffect(() => {
         onMount?.({
           getModel: () => ({}),

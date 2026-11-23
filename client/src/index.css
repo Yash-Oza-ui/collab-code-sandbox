@@ -858,3 +858,50 @@ body {
   font-style: italic;
 }
 
+/* US-57: Export room files as zip */
+.room-export-container {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.room-export-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border-radius: 4px;
+  background: #0284c7;
+  color: #ffffff;
+  border: 1px solid #0369a1;
+  font-size: 0.825rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 0.15s ease-in-out;
+}
+
+.room-export-button:hover:not(:disabled) {
+  background: #0369a1;
+}
+
+.room-export-button:disabled {
+  opacity: 0.6;
+  background: #94a3b8;
+  border-color: #cbd5e1;
+  cursor: not-allowed;
+}
+
+.room-export-note {
+  font-size: 0.75rem;
+  color: #64748b;
+  font-style: italic;
+  white-space: nowrap;
+}
+
+.room-export-note.empty {
+  color: #dc2626;
+  font-style: normal;
+}
+
+
