@@ -119,8 +119,6 @@ describe('RoomPage US-57: Export room files as ZIP', () => {
     activeBindings.length = 0
 
     // Spy on URL.createObjectURL and revokeObjectURL
-    const origCreateObjectURL = URL.createObjectURL
-    const origRevokeObjectURL = URL.revokeObjectURL
     URL.createObjectURL = vi.fn((blob: Blob) => {
       downloadedBlob = blob
       return 'blob:mock-zip-url'
@@ -183,7 +181,6 @@ describe('RoomPage US-57: Export room files as ZIP', () => {
     act(() => {
       root?.render(
         <RoomPage
-          roomId="us57-export-room"
           wsOptions={{
             WebSocketClass: MockWs as unknown as typeof WebSocket,
             syncWsUrl: 'ws://localhost:8080',
@@ -206,7 +203,6 @@ describe('RoomPage US-57: Export room files as ZIP', () => {
     act(() => {
       root?.render(
         <RoomPage
-          roomId="us57-export-room"
           docRef={docRef}
           wsOptions={{
             WebSocketClass: MockWs as unknown as typeof WebSocket,
@@ -290,7 +286,6 @@ describe('RoomPage US-57: Export room files as ZIP', () => {
     act(() => {
       root?.render(
         <RoomPage
-          roomId="us57-export-room"
           moduleDocs={moduleDocs}
           wsOptions={{
             WebSocketClass: MockWs as unknown as typeof WebSocket,
@@ -345,7 +340,6 @@ describe('RoomPage US-57: Export room files as ZIP', () => {
     act(() => {
       root?.render(
         <RoomPage
-          roomId="us57-export-room"
           wsOptions={{
             WebSocketClass: MockWs as unknown as typeof WebSocket,
             syncWsUrl: 'ws://localhost:8080',
@@ -385,7 +379,6 @@ describe('RoomPage US-57: Export room files as ZIP', () => {
     act(() => {
       root?.render(
         <RoomPage
-          roomId="us57-export-room"
           docRef={docRef}
           wsOptions={{
             WebSocketClass: MockWs as unknown as typeof WebSocket,
@@ -432,7 +425,6 @@ describe('RoomPage US-57: Export room files as ZIP', () => {
     act(() => {
       root?.render(
         <RoomPage
-          roomId="us57-export-room"
           docRef={docRef}
           wsOptions={{
             WebSocketClass: MockWs as unknown as typeof WebSocket,

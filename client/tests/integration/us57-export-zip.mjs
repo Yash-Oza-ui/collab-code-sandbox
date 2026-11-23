@@ -295,7 +295,7 @@ try {
   // -------------------------------------------------------------
   // Test 1: Pair mode room export
   // -------------------------------------------------------------
-  const pairRoomRes = await request('/v1/rooms', 'POST', { mode: 'pair', language: 'python' })
+  const pairRoomRes = await request('/v1/rooms', 'POST', { mode: 'pair', preset: 'teach_interview' })
   assert.equal(pairRoomRes.status, 201)
   const pairRoomId = pairRoomRes.data.room_id
   const pairOwnerToken = pairRoomRes.data.owner_token
