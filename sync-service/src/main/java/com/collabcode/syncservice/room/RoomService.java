@@ -3,6 +3,7 @@ package com.collabcode.syncservice.room;
 import com.collabcode.syncservice.run.RunRecordStore;
 import com.collabcode.syncservice.run.SavedTestCaseStore;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.text.Normalizer;
@@ -22,6 +23,10 @@ import java.util.Locale;
 @Component
 public class RoomService {
 
+    // Provisional NFR15 limit; Spring overrides it from application.properties.
+    // The initializer also gives standalone unit tests the same default.
+    @Value("${app.room.limits.max-members-per-room:10}")
+    private int maxMembersPerRoom = 10;
     private final RoomStore store;
     private final RunRecordStore runRecordStore;
     private HostDepartureManager hostDepartures;
@@ -75,11 +80,19 @@ public class RoomService {
         if (existing != null) {
             return JoinOutcome.joined(existing);
         }
-
         // FR42: uniqueness is case-insensitive, across different sessions only.
         // Check before approval: a taken name must not enter an approval queue.
         if (findByName(room, displayName) != null) {
             return JoinOutcome.refused("NAME_TAKEN");
+        }
+
+        // US-63: An existing session was already accepted above. A returning Host
+        // with the valid owner token can rejoin even after the room reaches its cap.
+        // Others count once per session, not once per browser tab.
+        if (maxMembersPerRoom > 0
+                && room.getMembers().size() >= maxMembersPerRoom
+                && !isOwner(room, ownerToken)) {
+            return JoinOutcome.refused("ROOM_FULL");
         }
 
         // FR9.3 / US-26: if the room requires Host approval, the join is held as

@@ -43,6 +43,8 @@ Or set them in `ai-ml-service/.env` (git-ignored, copied from `.env.example`).
 | NFR14    | Max runs per repeated-run request        | execution-service  | `APP_EXECUTION_LIMITS_MAX_RUNS_PER_REQUEST`       | `10`        | US-64 ✅         |
 | NFR14    | Retry-After on RUN_BUDGET_EXCEEDED (s)   | execution-service  | `APP_EXECUTION_LIMITS_BUDGET_RETRY_AFTER_SECONDS` | `30`        | US-64 ✅         |
 | NFR15    | Max members per room                     | sync-service       | `APP_ROOM_LIMITS_MAX_MEMBERS_PER_ROOM`            | `10`        | US-16 🟡 (US-xx) |
+| NFR15 | Max modules per Open room (provisional) | sync-service | `APP_ROOM_LIMITS_MAX_MODULES_PER_ROOM` | `10` | US-63 (partial) |
+| NFR15 | Max saved-module size in bytes (provisional; US-45 pending) | sync-service | `APP_ROOM_LIMITS_MAX_MODULE_SIZE_BYTES` | `1048576` | US-63 (pending US-45) |
 | FR31.2   | Host-leaves timeout (ms)                 | sync-service       | `APP_ROOM_LIMITS_HOST_LEAVES_TIMEOUT_MS`          | `30000`     | US-16 🟡 (US-xx) |
 | NFR14    | Aggregate run time budget per session    | sync-service       | `APP_ROOM_LIMITS_AGGREGATE_RUN_BUDGET_MS`         | `0` (none)  | US-63 🔲         |
 | NFR14    | Max runs per session                     | sync-service       | `APP_ROOM_LIMITS_MAX_RUNS_PER_SESSION`            | `0` (none)  | US-63 🔲         |

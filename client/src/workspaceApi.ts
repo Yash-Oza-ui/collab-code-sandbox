@@ -176,7 +176,9 @@ export async function createModule(
         ok: false,
         status: res.status,
         code,
-        error: message || code || `Failed to create module (HTTP ${res.status}).`,
+        error: code === 'LIMIT_REACHED'
+        ? 'This workspace has reached its module limit. Please ask the Host to free up space.'
+        : message || code || `Failed to create module (HTTP ${res.status}).`,
       }
     }
 
@@ -249,7 +251,9 @@ export async function approveModule(
         ok: false,
         status: res.status,
         code,
-        error: message || code || `Failed to approve module (HTTP ${res.status}).`,
+        error: code === 'LIMIT_REACHED'
+        ? 'This workspace has reached its module limit. Please decline a pending request or free up space.'
+        : message || code || `Failed to approve module (HTTP ${res.status}).`,
       }
     }
 
