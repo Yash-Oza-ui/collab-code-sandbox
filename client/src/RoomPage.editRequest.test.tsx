@@ -9,7 +9,7 @@ import { ownerTokenKey } from './createRoom'
 vi.mock('@monaco-editor/react', async () => {
   const React = await import('react')
   return {
-    default: ({ options, onMount }: any) => {
+    default: function MockEditor({ options, onMount }: any) {
       React.useEffect(() => {
         onMount?.({
           getModel: () => ({}),
