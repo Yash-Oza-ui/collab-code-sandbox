@@ -2,6 +2,7 @@ package com.collabcode.syncservice.room;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.List;
 import java.util.Map;
@@ -329,5 +330,58 @@ class RoomServiceTest {
         JoinOutcome reconnectDebug = service.join(debug.getRoomId(), "sess-p2", "Dana", null);
         assertThat(reconnectDebug.isJoined()).isTrue();
         assertThat(reconnectDebug.getMember().isCanEdit()).isFalse();
+    }
+
+    @Test
+    void us63_limitTwo_acceptsTwo_thenRefusesThird_andAllowsReconnect() {
+        ReflectionTestUtils.setField(service, "maxMembersPerRoom", 2);
+        Room room = pairRoom("teach_interview", "secret");
+        JoinOutcome host = service.join(room.getRoomId(), "host-session", "Host", "secret");
+        JoinOutcome guest = service.join(room.getRoomId(), "guest-session", "Guest", null);
+        assertThat(host.isJoined()).isTrue();
+        assertThat(guest.isJoined()).isTrue();
+
+        JoinOutcome refused = service.join(room.getRoomId(), "other-session", "Other", null);
+        assertThat(refused.isJoined()).isFalse();
+        assertThat(refused.getRefusedReason()).isEqualTo("ROOM_FULL");
+        assertThat(service.roster(room.getRoomId())).hasSize(2);
+
+        JoinOutcome reconnect = service.join(room.getRoomId(), "guest-session", "Guest", null);
+        assertThat(reconnect.isJoined()).isTrue();
+        assertThat(reconnect.getMember().getMemberId()).isEqualTo(guest.getMember().getMemberId());
+        assertThat(service.roster(room.getRoomId())).hasSize(2);
+    }
+
+    @Test
+    void us63_limitTen_refusesEleventh_withoutAffectingOtherRoom() {
+        ReflectionTestUtils.setField(service, "maxMembersPerRoom", 10);
+        Room first = openRoom("secret");
+        for (int i = 0; i < 10; i++) {
+            assertThat(service.join(first.getRoomId(), "sess-" + i, "User" + i,
+                    i == 0 ? "secret" : null).isJoined()).isTrue();
+        }
+        JoinOutcome extra = service.join(first.getRoomId(), "sess-10", "User10", null);
+        assertThat(extra.isJoined()).isFalse();
+        assertThat(extra.getRefusedReason()).isEqualTo("ROOM_FULL");
+
+        Room second = pairRoom("teach_interview", "other-secret");
+        assertThat(service.join(second.getRoomId(), "new-session", "New", "other-secret")
+                .isJoined()).isTrue();
+    }
+
+    @Test
+    void us63_hostWithValidOwnerTokenCanReturnAtCapacity() {
+        ReflectionTestUtils.setField(service, "maxMembersPerRoom", 2);
+        Room room = pairRoom("teach_interview", "secret");
+        JoinOutcome originalHost = service.join(room.getRoomId(), "host-session", "Host", "secret");
+        assertThat(originalHost.isJoined()).isTrue();
+        assertThat(service.join(room.getRoomId(), "guest-1", "Guest1", null).isJoined()).isTrue();
+        // Simulate Host losing its roster entry during absence without blocking.
+        room.getMembers().remove(originalHost.getMember().getMemberId());
+        assertThat(service.join(room.getRoomId(), "guest-2", "Guest2", null).isJoined()).isTrue();
+        JoinOutcome returned = service.join(room.getRoomId(), "host-return", "Host", "secret");
+        assertThat(returned.isJoined()).isTrue();
+        assertThat(returned.getMember().getRole()).isEqualTo(Role.HOST);
+        assertThat(service.roster(room.getRoomId())).hasSize(3);
     }
 }

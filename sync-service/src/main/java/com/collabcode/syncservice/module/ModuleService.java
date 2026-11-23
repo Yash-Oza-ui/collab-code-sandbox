@@ -6,6 +6,7 @@ import com.collabcode.syncservice.room.Role;
 import com.collabcode.syncservice.room.Room;
 import com.collabcode.syncservice.room.RoomMode;
 import com.collabcode.syncservice.room.RoomStore;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.security.SecureRandom;
@@ -23,6 +24,10 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 @Component
 public class ModuleService {
+    // Provisional NFR15 default; Spring overrides from application.properties.
+    @Value("${app.room.limits.max-modules-per-room:10}")
+    private int maxModulesPerRoom = 10;
+
     private final RoomStore rooms;
     private final SecureRandom random = new SecureRandom();
     private final Map<String, Map<String, ModuleRecord>> byRoom = new ConcurrentHashMap<>();
@@ -60,6 +65,13 @@ public class ModuleService {
         Map<String, ModuleRecord> modules = byRoom.computeIfAbsent(roomId, ignored -> new ConcurrentHashMap<>());
         if (modules.values().stream().anyMatch(module -> module.name().equals(name))) {
             throw new IllegalStateException("NAME_TAKEN");
+        }
+
+        // Pending requests are not approved modules. They may remain pending
+        // when the room is full; capacity is checked again at Host approval.
+        if (!pending && maxModulesPerRoom > 0
+                && modules.values().stream().filter(m -> !m.pending()).count() >= maxModulesPerRoom) {
+            throw new IllegalStateException("LIMIT_REACHED");
         }
 
         String moduleId = generateId();
@@ -132,6 +144,17 @@ public class ModuleService {
         }
         if (target != null && target.getRole() == Role.OBSERVER) {
             throw new IllegalArgumentException("OBSERVER_CANNOT_OWN");
+        }
+
+        // Refuse approval when all active slots are occupied, without changing
+        // the pending request or creating an approved module.
+        if (module.pending() && maxModulesPerRoom > 0) {
+            Map<String, ModuleRecord> modules = byRoom.get(roomId);
+            long approved = modules == null ? 0
+                    : modules.values().stream().filter(m -> !m.pending()).count();
+            if (approved >= maxModulesPerRoom) {
+                throw new IllegalStateException("LIMIT_REACHED");
+            }
         }
 
         module.approve(targetOwnerId);

@@ -361,10 +361,12 @@ public class ControlHandler extends AbstractWebSocketHandler {
                 humanMessage = "The display name '" + displayName
                         + "' is already taken in this room. Please choose another name.";
             } else if ("USER_BLOCKED".equals(reason)) {
-                humanMessage = "The Host has removed you from this room.";
-            } else {
-                humanMessage = "Join refused: " + reason;
-            }
+    humanMessage = "The Host has removed you from this room.";
+} else if ("ROOM_FULL".equals(reason)) {
+    humanMessage = "This room is full. Please try again when a space is available.";
+} else {
+    humanMessage = "Join refused: " + reason;
+}
             sendText(session, objectMapper.writeValueAsString(
                     RoomMessages.joinRefused(reason, humanMessage)));
             log.info("Control: join refused room={} reason={}", roomId, reason);
