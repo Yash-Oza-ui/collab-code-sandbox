@@ -137,11 +137,26 @@ export function useSlowdownDecorations(editor: monaco.editor.IStandaloneCodeEdit
 
 ## 4. Mapping to Editors & Open Mode Module Support
 
-- **Pair Mode:** Only one shared active editor exists. All items in `changed_lines` map directly to `editor.getModel()`.
+- **Pair Mode:** Only one shared active editor exists. All items in `changed_lines` have `module_id: null` and map directly to `editor.getModel()`.
 - **Open Mode:** Each module possesses its own editor instance or model:
   - If `item.module_id` is present, look up the editor/tab corresponding to `item.module_id`.
   - Apply highlights only to that specific module's Monaco model.
   - If a module is not currently open, retain the changed line numbers in local state so decorations apply when the user switches to that module tab.
+  - If `item.module_id` is `null` (e.g. primary module or legacy dispatch), apply highlights to the active / primary module editor.
+
+### Upstream Dependency Notice for Open Mode (Multi-Module)
+In the current repository architecture:
+- `execution-service` (`RunController.java`) dispatches only the primary module file (`runSpec.getFiles().get(0).getContent()`) as `current_run.code` to `POST /v1/analyses/slowdown`.
+- Therefore, in Open mode runs under the current `execution-service` code, `module_id` is emitted as `null`, and line numbers apply to the primary module.
+- The AI/ML service engine (`app/diff.py`) already implements and tests `diff_modules_changed_lines(previous_module_hashes, current_modules)` to map changed lines per module ID. Full multi-module Open mode will activate as soon as `execution-service` is updated to pass multi-module files in `SlowdownAnalysisRequest`.
+- Client implementation should check:
+  ```typescript
+  if (item.module_id) {
+    applyToModuleEditor(item.module_id, item.line);
+  } else {
+    applyToActiveOrPrimaryModule(item.line);
+  }
+  ```
 
 ---
 
@@ -161,3 +176,12 @@ export function useSlowdownDecorations(editor: monaco.editor.IStandaloneCodeEdit
 4. **Superseded / New Run:**
    - When a new execution starts or a new analysis result arrives, automatically clear stale decorations.
    - When the editor is unmounted or switched, dispose of decoration collections.
+
+---
+
+## 6. Implementation Status & Tracking
+
+- **AI/ML Service Scope:** Complete in PR #239. Implements memory-efficient Hirschberg LCS diffing, room-scoped line-hash storage, privacy compliance (NFR8.2), and backwards-compatible contract schemas.
+- **Client Scope:** Pending implementation by Het Kapadiya and Niranjan Panchal.
+- **Issue Tracking:** PR #239 is marked `Part of #220`. Issue [#220](https://github.com/Yash-Oza-ui/collab-code-sandbox/issues/220) must remain **OPEN** until client-side Monaco decorations, dismissible banner, and two-browser verification are merged.
+

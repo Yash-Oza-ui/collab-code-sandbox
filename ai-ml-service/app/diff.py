@@ -36,6 +36,71 @@ class DiffResult:
     comparison_note: Optional[str] = None
 
 
+# Safety thresholds to prevent unbounded memory allocation and excessive computation
+MAX_INPUT_LINES: int = 10_000
+MAX_DIFF_MATRIX_CELLS: int = 1_000_000
+
+
+def _lcs_lengths(A: list[str], B: list[str]) -> list[int]:
+    """Compute the last row of the LCS DP table in O(len(B)) memory."""
+    dp = [0] * (len(B) + 1)
+    for a in A:
+        prev_val = 0
+        for j, b in enumerate(B):
+            temp = dp[j + 1]
+            if a == b:
+                dp[j + 1] = prev_val + 1
+            else:
+                dp[j + 1] = max(dp[j + 1], dp[j])
+            prev_val = temp
+    return dp
+
+
+def _hirschberg(
+    A: list[str],
+    B: list[str],
+    a_offset: int,
+    b_offset: int,
+) -> list[tuple[str, Optional[int], Optional[int]]]:
+    """Hirschberg's divide-and-conquer algorithm to compute edit script in O(len(B)) space."""
+    m = len(A)
+    n = len(B)
+
+    if m == 0:
+        return [("insert", None, b_offset + j) for j in range(n)]
+    if n == 0:
+        return [("delete", a_offset + i, None) for i in range(m)]
+
+    if m == 1:
+        a = A[0]
+        try:
+            k = B.index(a)
+            res = [("insert", None, b_offset + j) for j in range(k)]
+            res.append(("equal", a_offset, b_offset + k))
+            res.extend([("insert", None, b_offset + j) for j in range(k + 1, n)])
+            return res
+        except ValueError:
+            res = [("delete", a_offset, None)]
+            res.extend([("insert", None, b_offset + j) for j in range(n)])
+            return res
+
+    mid = m // 2
+    L1 = _lcs_lengths(A[:mid], B)
+    L2 = _lcs_lengths(A[mid:][::-1], B[::-1])
+
+    best_k = 0
+    max_score = -1
+    for k in range(n + 1):
+        score = L1[k] + L2[n - k]
+        if score > max_score:
+            max_score = score
+            best_k = k
+
+    left = _hirschberg(A[:mid], B[:best_k], a_offset, b_offset)
+    right = _hirschberg(A[mid:], B[best_k:], a_offset + mid, b_offset + best_k)
+    return left + right
+
+
 def compute_line_hashes(code: str) -> list[str]:
     """Compute SHA-256 hexadecimal digests for each line of source code.
 
@@ -122,34 +187,61 @@ def diff_line_hashes(
             comparison_note=note,
         )
 
-    # General case: Longest Common Subsequence (LCS) dynamic programming table
+    # Check raw input line limit
     m = len(previous_hashes)
     n = len(current_hashes)
-    dp = [[0] * (n + 1) for _ in range(m + 1)]
+    if max(m, n) > MAX_INPUT_LINES:
+        return DiffResult(
+            changed_lines=[],
+            added_lines=[],
+            modified_lines=[],
+            removed_lines_count=0,
+            comparison_available=False,
+            comparison_note=f"Source file exceeds maximum diff line limit ({MAX_INPUT_LINES} lines). Comparison skipped.",
+        )
 
-    for i in range(m):
-        for j in range(n):
-            if previous_hashes[i] == current_hashes[j]:
-                dp[i + 1][j + 1] = dp[i][j] + 1
-            else:
-                dp[i + 1][j + 1] = max(dp[i + 1][j], dp[i][j + 1])
+    # Memory-efficient LCS: 1. Trim common prefix in O(1) space
+    p_start = 0
+    while (
+        p_start < m
+        and p_start < n
+        and previous_hashes[p_start] == current_hashes[p_start]
+    ):
+        p_start += 1
 
-    # Backtrack to reconstruct shortest edit script
-    i, j = m, n
-    edits: list[tuple[str, Optional[int], Optional[int]]] = []
-    while i > 0 or j > 0:
-        if i > 0 and j > 0 and previous_hashes[i - 1] == current_hashes[j - 1]:
-            edits.append(("equal", i - 1, j - 1))
-            i -= 1
-            j -= 1
-        elif j > 0 and (i == 0 or dp[i][j - 1] >= dp[i - 1][j]):
-            edits.append(("insert", None, j - 1))
-            j -= 1
-        else:
-            edits.append(("delete", i - 1, None))
-            i -= 1
+    # 2. Trim common suffix in O(1) space
+    p_end = 0
+    while (
+        p_end < (m - p_start)
+        and p_end < (n - p_start)
+        and previous_hashes[m - 1 - p_end] == current_hashes[n - 1 - p_end]
+    ):
+        p_end += 1
 
-    edits.reverse()
+    prefix_edits: list[tuple[str, Optional[int], Optional[int]]] = [
+        ("equal", k, k) for k in range(p_start)
+    ]
+    suffix_edits: list[tuple[str, Optional[int], Optional[int]]] = [
+        ("equal", m - p_end + k, n - p_end + k) for k in range(p_end)
+    ]
+
+    mid_prev = previous_hashes[p_start : m - p_end]
+    mid_curr = current_hashes[p_start : n - p_end]
+
+    # 3. Check bounded search space on trimmed middle to guarantee safe allocation
+    if len(mid_prev) * len(mid_curr) > MAX_DIFF_MATRIX_CELLS:
+        return DiffResult(
+            changed_lines=[],
+            added_lines=[],
+            modified_lines=[],
+            removed_lines_count=0,
+            comparison_available=False,
+            comparison_note="Source diff exceeds safe comparison complexity limit. Comparison skipped.",
+        )
+
+    # 4. Compute shortest edit script in O(min(m, n)) space using Hirschberg's algorithm
+    mid_edits = _hirschberg(mid_prev, mid_curr, p_start, p_start)
+    edits = prefix_edits + mid_edits + suffix_edits
 
     # Group contiguous blocks of delete and insert operations into modified, added, removed
     added_lines: list[int] = []

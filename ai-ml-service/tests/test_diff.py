@@ -302,3 +302,71 @@ def test_privacy_invariant_no_raw_source_in_result():
     hashes = compute_line_hashes(curr)
     for h in hashes:
         assert canary_marker not in h
+
+
+def test_large_file_exceeding_input_lines_limit_graceful_fallback():
+    """Verify input exceeding MAX_INPUT_LINES falls back gracefully without memory exhaustion."""
+    from app.diff import MAX_INPUT_LINES
+
+    large_prev_hashes = [f"hash_{i}" for i in range(MAX_INPUT_LINES + 5)]
+    curr_code = "print('hello')\n"
+
+    res = diff_line_hashes(large_prev_hashes, curr_code)
+    assert res.comparison_available is False
+    assert res.changed_lines == []
+    assert res.added_lines == []
+    assert res.modified_lines == []
+    assert res.removed_lines_count == 0
+    assert "exceeds maximum diff line limit" in res.comparison_note
+
+
+def test_large_diff_exceeding_matrix_cells_graceful_fallback():
+    """Verify completely disjoint large diffs exceeding MAX_DIFF_MATRIX_CELLS fall back safely."""
+    from app.diff import MAX_DIFF_MATRIX_CELLS
+
+    # 1100 unique lines vs 1100 unique lines with 0 common prefix/suffix
+    # 1100 * 1100 = 1,210,000 > 1,000,000
+    prev_hashes = [f"prev_unique_hash_{i}" for i in range(1100)]
+    curr_code = "\n".join(f"curr_unique_line_{i} = {i}" for i in range(1100))
+
+    res = diff_line_hashes(prev_hashes, curr_code)
+    assert res.comparison_available is False
+    assert res.changed_lines == []
+    assert res.removed_lines_count == 0
+    assert "safe comparison complexity limit" in res.comparison_note
+
+
+def test_large_file_efficient_diff_with_prefix_suffix_trimming():
+    """Verify 3,000-line file with an isolated modification diffs in O(1) memory via trimming."""
+    lines_prev = [f"val_{i} = {i}" for i in range(3000)]
+    lines_curr = list(lines_prev)
+    lines_curr[1499] = "val_1499 = 999999"  # 1500th line (1-based)
+
+    prev_hashes = compute_line_hashes("\n".join(lines_prev))
+    curr_code = "\n".join(lines_curr)
+
+    res = diff_line_hashes(prev_hashes, curr_code)
+    assert res.comparison_available is True
+    assert len(res.changed_lines) == 1
+    assert res.changed_lines[0].line == 1500
+    assert res.modified_lines == [1500]
+    assert res.added_lines == []
+    assert res.removed_lines_count == 0
+
+
+def test_repeated_lines_complex_edit_script():
+    """Verify complex repeated identical lines are handled deterministically without misalignment."""
+    # Pattern: A, B, A, B, A -> A, C, B, A, B, D, A
+    prev = "A\nB\nA\nB\nA"
+    curr = "A\nC\nB\nA\nB\nD\nA"
+
+    prev_hashes = compute_line_hashes(prev)
+    res = diff_line_hashes(prev_hashes, curr)
+
+    assert res.comparison_available is True
+    # Line 2 ('C') added, Line 6 ('D') added
+    assert res.added_lines == [2, 6]
+    assert res.modified_lines == []
+    assert res.removed_lines_count == 0
+    assert [cl.line for cl in res.changed_lines] == [2, 6]
+

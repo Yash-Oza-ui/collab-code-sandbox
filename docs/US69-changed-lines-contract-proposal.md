@@ -63,11 +63,32 @@ Replaces `{ "line": int, "content": str }` with:
 ```
 
 ### New Response Fields
-| Field | Type | Required | Description |
-|---|---|---|---|
-| `removed_lines_count` | integer (>= 0) | Yes | Count of lines deleted since the previous normal run. Cannot be highlighted in current editor. |
-| `comparison_available` | boolean | Yes | `true` if an earlier normal run existed and diff was computed; `false` otherwise. |
-| `comparison_note` | string or null | Yes | Explanatory note, e.g. `"No earlier normal run to compare."` or `"1 line removed."`. |
+| Field | Type | Schema Status | Service Behavior | Description |
+|---|---|---|---|---|
+| `removed_lines_count` | integer (>= 0) | Optional (backward-compatible) | Always populated | Count of lines deleted since the previous normal run. Cannot be highlighted in current editor. |
+| `comparison_available` | boolean | Optional (backward-compatible) | Always populated | `true` if an earlier normal run existed and diff was computed; `false` otherwise. |
+| `comparison_note` | string or null | Optional (backward-compatible) | Always populated | Explanatory note, e.g. `"No earlier normal run to compare."` or `"1 line removed."`. |
+
+> **Backward Compatibility Note:** In `docs/schemas/slowdown-response.json`, these three fields are optional in `"required"` to ensure existing responses on `main` remain strictly valid during phased deployment. The US-69 implementation in `ai-ml-service` always returns them.
+
+---
+
+## Diffing Complexity & Memory Safety (Hirschberg Algorithm)
+
+- **Prefix/Suffix Trimming:** Unchanged leading and trailing lines are trimmed in $O(N)$ time and $O(1)$ memory prior to diffing.
+- **Hirschberg's Algorithm:** The trimmed core uses Hirschberg's divide-and-conquer LCS algorithm to compute the shortest edit script in $O(\min(m, n))$ space (linear memory), preventing unbounded dynamic programming matrix allocation.
+- **Safety Caps:**
+  - `MAX_INPUT_LINES = 10,000` (max raw lines in input files)
+  - `MAX_DIFF_MATRIX_CELLS = 1,000,000` (max trimmed search space)
+  - Files exceeding these bounds gracefully return `comparison_available: false` with an explanatory `comparison_note` and empty highlights, ensuring the service never crashes or exhausts memory.
+
+---
+
+## Upstream Integration & Open Mode Status
+
+- **Pair Mode:** Full end-to-end support. Line highlights apply to the shared editor with `module_id: null`.
+- **Open Mode (Upstream Dependency):** `execution-service` (`RunController.java`) currently passes only `runSpec.getFiles().get(0).getContent()` as `current_run.code`. To avoid inventing synthetic module identifiers, the AI/ML service emits `module_id: null` for primary module runs. The pure `diff_modules_changed_lines()` engine in `app/diff.py` is ready to consume multi-module inputs once `execution-service` adds multi-file dispatch in a future sprint.
+- **Contract Approval:** Submitted as PR #238 (`docs/US-69-changed-lines-contract`) under review by Digvijay Parmar (@Digvijay-Parmar).
 
 ---
 

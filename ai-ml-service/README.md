@@ -433,14 +433,17 @@ The comparison always targets the **most recent** earlier normal run matching th
   - When a room is closed or deleted, `DELETE /v1/rooms/{room_id}/state` completely purges all stored measurements and line hashes for that room.
   - Deleting one room has zero effect on any other room.
 
-#### Pure Deterministic Diff Algorithm (LCS)
+#### Pure Deterministic Diff Algorithm (Hirschberg Linear-Space LCS)
 Line comparison is implemented in `app/diff.py` as an independently testable, pure function:
-1. **Current Source Line Numbering:** Line numbers returned in `changed_lines` are **1-based** and refer strictly to the **current source version** visible in the user's editor.
-2. **Deterministic LCS Edit Script:** Uses a Longest Common Subsequence (LCS) algorithm on SHA-256 hashes. It handles repeated identical lines, insertions, deletions, replacements, and Unicode characters deterministically without heuristic autojunk quirks.
-3. **Representation of Removed Lines:** Lines that were deleted since the last normal run no longer exist in the current editor and therefore cannot be highlighted. Instead, their count is returned via `removed_lines_count` and noted in `comparison_note` (e.g., `"1 line removed."`).
-4. **No-Earlier-Normal-Run Handling:** If a run is flagged but no earlier normal run with line hashes exists for that `input_hash`, `changed_lines` is returned as empty `[]`, `comparison_available` is `false`, and `comparison_note` explains `"No earlier normal run to compare."`. The entire file is never highlighted.
-5. **Unflagged Runs:** For normal, unflagged runs (`is_slowdown: false`), no highlight is calculated or exposed (`changed_lines: []`, `comparison_available: false`). The run's line hashes are stored as the latest normal version.
-6. **Zero AI Dependency:** The changed-line calculation is a purely deterministic statistical diff. It requires **no external LLM calls** and functions identically when `consent: false` or `ai_enabled: false`. Optional AI explanations (US-68) remain gated separately.
+1. **Memory-Bounded Hirschberg LCS:** Employs Hirschberg's divide-and-conquer LCS algorithm to compute the edit script in $O(\min(m, n))$ linear memory rather than allocating an $O(m \times n)$ full dynamic programming table.
+2. **Prefix and Suffix Trimming:** Unchanged leading and trailing lines are trimmed in $O(N)$ time with zero extra memory before running LCS on the modified core hunk.
+3. **Safe Comparison Limits & Graceful Fallback:** Input lines are bounded by `MAX_INPUT_LINES = 10,000` and trimmed search space is capped at `MAX_DIFF_MATRIX_CELLS = 1,000,000`. If a comparison exceeds these safe limits, it gracefully returns `comparison_available: false` with an explanatory note and empty highlights, ensuring the service never exhausts memory or crashes.
+4. **Current Source Line Numbering:** Line numbers returned in `changed_lines` are **1-based** and refer strictly to the **current source version** visible in the user's editor.
+5. **Deterministic Edit Script:** Uses cryptographic line hashes (SHA-256) over UTF-8 encoded text. It handles repeated identical lines, insertions, deletions, replacements, and Unicode characters deterministically without heuristic autojunk quirks.
+6. **Representation of Removed Lines:** Lines that were deleted since the last normal run no longer exist in the current editor and therefore cannot be highlighted. Instead, their count is returned via `removed_lines_count` and noted in `comparison_note` (e.g., `"1 line removed."`).
+7. **No-Earlier-Normal-Run Handling:** If a run is flagged but no earlier normal run with line hashes exists for that `input_hash`, `changed_lines` is returned as empty `[]`, `comparison_available` is `false`, and `comparison_note` explains `"No earlier normal run to compare."`. The entire file is never highlighted.
+8. **Unflagged Runs:** For normal, unflagged runs (`is_slowdown: false`), no highlight is calculated or exposed (`changed_lines: []`, `comparison_available: false`). The run's line hashes are stored as the latest normal version.
+9. **Zero AI Dependency:** The changed-line calculation is a purely deterministic statistical diff. It requires **no external LLM calls** and functions identically when `consent: false` or `ai_enabled: false`. Optional AI explanations (US-68) remain gated separately.
 
 #### Open Mode & Per-Module Support
 - Each item in `changed_lines` supports an optional `module_id` string (`{ "line": 2, "module_id": "mod_entry" }`).

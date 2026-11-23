@@ -496,3 +496,95 @@ def test_integration_us69_room_cleanup(response_schema):
     # Line hashes must be purged
     assert store.get_last_normal_line_hashes(room_id, input_hash) is None
 
+
+def test_integration_module_id_null_when_unspecified(response_schema):
+    """Verify changed_lines never invents or hallucinates module_id when upstream provides none."""
+    client = TestClient(app)
+    room_id = "room-module-null-check"
+    input_hash = "1" * 64
+
+    # Seed baseline runs
+    for i in range(3):
+        client.post(
+            "/v1/analyses/slowdown",
+            json={
+                "request_id": f"seed-mod-{i}",
+                "room_id": room_id,
+                "analysis_id": f"seed-mod-ana-{i}",
+                "request_type": "slowdown",
+                "language": "python",
+                "consent": False,
+                "ai_enabled": False,
+                "input_hash": input_hash,
+                "current_run": {
+                    "execution_time_ms": 100.0,
+                    "peak_memory_mb": 10.0,
+                    "code": "x = 1\ny = 2\n",
+                },
+            },
+        )
+
+    # Slowdown run with modified line 2
+    resp = client.post(
+        "/v1/analyses/slowdown",
+        json={
+            "request_id": "slow-mod-req",
+            "room_id": room_id,
+            "analysis_id": "slow-mod-ana",
+            "request_type": "slowdown",
+            "language": "python",
+            "consent": False,
+            "ai_enabled": False,
+            "input_hash": input_hash,
+            "current_run": {
+                "execution_time_ms": 1200.0,
+                "peak_memory_mb": 10.0,
+                "code": "x = 1\ny = 999\n",
+            },
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    _assert_schema_conformance(data, response_schema)
+    assert data["is_slowdown"] is True
+    assert len(data["changed_lines"]) == 1
+    # module_id MUST be null (None) because execution-service did not supply a module
+    assert data["changed_lines"][0]["line"] == 2
+    assert data["changed_lines"][0]["module_id"] is None
+
+
+def test_integration_contract_backward_compatibility_and_schema_validation(response_schema):
+    """Verify that both legacy pre-US-69 and new US-69 responses conform to the official contract."""
+    # 1. Legacy pre-US-69 shape (without US-69 specific fields)
+    legacy_payload = {
+        "request_id": "req-leg-001",
+        "analysis_id": "ana-leg-001",
+        "task": "slowdown",
+        "input_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "is_slowdown": False,
+        "slowdown_factor": 1.0,
+        "baseline": {"median_ms": 100.0, "mad_ms": 0.0, "sample_count": 2},
+        "changed_lines": [],
+        "message": "Recorded run measurements. Baseline establishing.",
+        "ai_step": {"status": "skipped", "error_code": None, "explanation": None},
+    }
+    _assert_schema_conformance(legacy_payload, response_schema)
+
+    # 2. Official example files validate against their respective schemas
+    base_dir = Path(__file__).resolve().parent.parent.parent.parent
+    ex_slowdown_path = base_dir / "docs" / "examples" / "v2-analysis-slowdown-response.json"
+    with open(ex_slowdown_path, "r", encoding="utf-8") as f:
+        ex_slowdown = json.load(f)
+    _assert_schema_conformance(ex_slowdown, response_schema)
+
+    # 3. WebSocket message example against analysis-result.json
+    ws_schema_path = base_dir / "docs" / "schemas" / "analysis-result.json"
+    if ws_schema_path.exists():
+        with open(ws_schema_path, "r", encoding="utf-8") as f:
+            ws_schema = json.load(f)
+        ex_ws_path = base_dir / "docs" / "examples" / "v2-analysis-result-slowdown.json"
+        with open(ex_ws_path, "r", encoding="utf-8") as f:
+            ex_ws = json.load(f)
+        _assert_schema_conformance(ex_ws, ws_schema)
+
+
