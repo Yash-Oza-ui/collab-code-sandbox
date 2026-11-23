@@ -343,3 +343,156 @@ def test_integration_invalid_threshold_overrides_return_422():
     )
     assert resp_inf.status_code == 422
     assert resp_inf.json()["error"]["code"] == "INVALID_REQUEST"
+
+
+# ============================================================================
+# US-69 End-to-End Integration Tests
+# ============================================================================
+
+
+def test_integration_us69_highlighted_changed_lines(response_schema):
+    """Verify US-69 end-to-end highlighting of changed lines on a flagged run."""
+    client = TestClient(app)
+    room_id = "Zq8-Lw2Ef6Th0Yx4Rn7JbA"
+    input_hash = "d4e5f6a1b2c30718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90"
+    code_baseline = "a = 10\nb = 20\nprint(a + b)"
+
+    # Seed 3 normal baseline runs
+    for i in range(1, 4):
+        resp = client.post(
+            "/v1/analyses/slowdown",
+            json={
+                "request_id": f"seed-req-{i}",
+                "room_id": room_id,
+                "analysis_id": f"seed-ana-{i}",
+                "request_type": "slowdown",
+                "language": "python",
+                "consent": False,
+                "ai_enabled": False,
+                "input_hash": input_hash,
+                "current_run": {
+                    "execution_time_ms": 100.0,
+                    "peak_memory_mb": 10.0,
+                    "code": code_baseline,
+                },
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        _assert_schema_conformance(data, response_schema)
+        assert data["is_slowdown"] is False
+
+    # Submit 10x slower run with modified line 2: b = 50
+    code_slow = "a = 10\nb = 50\nprint(a + b)"
+    resp_slow = client.post(
+        "/v1/analyses/slowdown",
+        json={
+            "request_id": "slow-req-01",
+            "room_id": room_id,
+            "analysis_id": "slow-ana-01",
+            "request_type": "slowdown",
+            "language": "python",
+            "consent": False,
+            "ai_enabled": False,
+            "input_hash": input_hash,
+            "current_run": {
+                "execution_time_ms": 1000.0,
+                "peak_memory_mb": 10.0,
+                "code": code_slow,
+            },
+        },
+    )
+    assert resp_slow.status_code == 200
+    data_slow = resp_slow.json()
+    _assert_schema_conformance(data_slow, response_schema)
+
+    assert data_slow["is_slowdown"] is True
+    assert data_slow["slowdown_factor"] == pytest.approx(10.0, rel=1e-2)
+    assert data_slow["comparison_available"] is True
+    assert data_slow["removed_lines_count"] == 0
+
+    # Line 2 highlighted
+    assert len(data_slow["changed_lines"]) == 1
+    assert data_slow["changed_lines"][0]["line"] == 2
+    assert "content" not in data_slow["changed_lines"][0]
+
+
+def test_integration_us69_no_earlier_normal_run(response_schema):
+    """Verify flagged run without earlier normal line hashes returns empty highlights."""
+    client = TestClient(app)
+    room_id = "Zq8-Lw2Ef6Th0Yx4Rn7JbA"
+    input_hash = "e5f6a1b2c3d40718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90"
+
+    # Pre-populate store with measurements only (no line hashes)
+    store = get_slowdown_store()
+    for _ in range(3):
+        store.record_measurement(room_id, input_hash, 100.0, 10.0)
+
+    # Flagged run (1200ms) with code
+    resp = client.post(
+        "/v1/analyses/slowdown",
+        json={
+            "request_id": "no-prev-req",
+            "room_id": room_id,
+            "analysis_id": "no-prev-ana",
+            "request_type": "slowdown",
+            "language": "python",
+            "consent": False,
+            "ai_enabled": False,
+            "input_hash": input_hash,
+            "current_run": {
+                "execution_time_ms": 1200.0,
+                "peak_memory_mb": 10.0,
+                "code": "a = 1\nb = 2",
+            },
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    _assert_schema_conformance(data, response_schema)
+
+    assert data["is_slowdown"] is True
+    assert data["changed_lines"] == []
+    assert data["comparison_available"] is False
+    assert "No earlier normal run to compare." in data["comparison_note"]
+    assert "No earlier normal run to compare." in data["message"]
+
+
+def test_integration_us69_room_cleanup(response_schema):
+    """Verify DELETE /v1/rooms/{room_id}/state purges line hashes."""
+    client = TestClient(app)
+    room_id = "room-cleanup-integ"
+    input_hash = "f6a1b2c3d4e50718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90"
+    code = "x = 10\nprint(x)"
+
+    for i in range(3):
+        client.post(
+            "/v1/analyses/slowdown",
+            json={
+                "request_id": f"clean-req-{i}",
+                "room_id": room_id,
+                "analysis_id": f"clean-ana-{i}",
+                "request_type": "slowdown",
+                "language": "python",
+                "consent": False,
+                "ai_enabled": False,
+                "input_hash": input_hash,
+                "current_run": {
+                    "execution_time_ms": 100.0,
+                    "peak_memory_mb": 10.0,
+                    "code": code,
+                },
+            },
+        )
+
+    store = get_slowdown_store()
+    assert store.get_last_normal_line_hashes(room_id, input_hash) is not None
+
+    # Call room cleanup endpoint
+    del_resp = client.delete(f"/v1/rooms/{room_id}/state")
+    assert del_resp.status_code == 200
+    assert del_resp.json()["status"] == "cleared"
+
+    # Line hashes must be purged
+    assert store.get_last_normal_line_hashes(room_id, input_hash) is None
+

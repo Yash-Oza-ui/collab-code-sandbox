@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field, field_validator
 from app.cache import compute_cache_key, get_analysis_cache
 from app.config import settings
 from app.counters import get_total_usage, record_fallback
+from app.diff import compute_line_hashes, diff_line_hashes
 from app.limiter import get_room_rate_limiter
 from app.llm.client import (
     AIDisabledError,
@@ -103,10 +104,10 @@ class BaselineMetrics(BaseModel):
 
 
 class ChangedLineItem(BaseModel):
-    """Line-by-line diff item."""
+    """Line-by-line diff item pointing to the current source version (FR37.3, US-69)."""
 
-    line: int
-    content: str
+    line: int = Field(..., ge=1, description="1-based line number in the current source code")
+    module_id: Optional[str] = Field(default=None, description="Open mode module identifier")
 
 
 class SlowdownAIStep(BaseModel):
@@ -138,6 +139,9 @@ class SlowdownAnalysisResponse(BaseModel):
     slowdown_factor: float
     baseline: BaselineMetrics
     changed_lines: list[ChangedLineItem] = Field(default_factory=list)
+    removed_lines_count: int = Field(default=0, ge=0)
+    comparison_available: bool = False
+    comparison_note: Optional[str] = None
     message: str
     ai_step: SlowdownAIStep
 
@@ -148,12 +152,13 @@ class SlowdownAnalysisResponse(BaseModel):
 
 
 class SlowdownStore:
-    """Thread-safe, room-scoped in-memory store for execution measurements.
+    """Thread-safe, room-scoped in-memory store for execution measurements and line hashes.
 
-    Invariants (NFR8.2, FR37.4, US-52):
-    - Stores ONLY numeric metrics: execution_time_ms, peak_memory_mb, and timestamp.
+    Invariants (NFR8.2, FR37.4, US-52, US-69):
+    - Stores numeric metrics: execution_time_ms, peak_memory_mb, and timestamp.
+    - Stores cryptographic SHA-256 line hashes of the most recent normal run for diffing.
     - Keyed strictly by (room_id, input_hash).
-    - NEVER stores source code, stdin, stdout, stderr, prompts, or complete run records.
+    - NEVER stores raw source code, line strings, diff text, stdin, stdout, stderr, prompts, or secrets.
     - Completely purged on DELETE /v1/rooms/{room_id}/state (US-56, FR32).
     - Deleting one room has zero effect on any other room.
     """
@@ -162,6 +167,9 @@ class SlowdownStore:
         self._lock = threading.Lock()
         # Structure: {room_id: {input_hash: [ {"execution_time_ms": float, "peak_memory_mb": float, "timestamp": float}, ... ]}}
         self._rooms: dict[str, dict[str, list[dict[str, Any]]]] = {}
+        # Structure: {room_id: {input_hash: [sha256_hex_hash, ...]}}
+        # Holds ONLY cryptographic digests for the most recent normal run (NFR8.2, AC2).
+        self._normal_line_hashes: dict[str, dict[str, list[str]]] = {}
         self._key_locks: dict[tuple[str, str], threading.Lock] = {}
         self._max_history = max_history_per_hash or getattr(
             settings, "SLOWDOWN_MAX_HISTORY", 100
@@ -182,14 +190,22 @@ class SlowdownStore:
             measurements = room_data.get(input_hash, [])
             return [dict(m) for m in measurements]
 
+    def get_last_normal_line_hashes(self, room_id: str, input_hash: str) -> Optional[list[str]]:
+        """Return a copy of the most recent normal run's line hashes for this room and input hash."""
+        with self._lock:
+            room_hashes = self._normal_line_hashes.get(room_id, {})
+            hashes = room_hashes.get(input_hash)
+            return list(hashes) if hashes is not None else None
+
     def record_measurement(
         self,
         room_id: str,
         input_hash: str,
         execution_time_ms: float,
         peak_memory_mb: float,
+        line_hashes: Optional[list[str]] = None,
     ) -> None:
-        """Record a single normal execution measurement."""
+        """Record a single normal execution measurement and optional line hashes."""
         with self._lock:
             if room_id not in self._rooms:
                 self._rooms[room_id] = {}
@@ -207,19 +223,39 @@ class SlowdownStore:
             if len(history) > self._max_history:
                 history.pop(0)
 
+            if line_hashes is not None:
+                if room_id not in self._normal_line_hashes:
+                    self._normal_line_hashes[room_id] = {}
+                self._normal_line_hashes[room_id][input_hash] = list(line_hashes)
+
+    def record_normal_line_hashes(
+        self,
+        room_id: str,
+        input_hash: str,
+        line_hashes: list[str],
+    ) -> None:
+        """Update the normal line hashes without adding a measurement record."""
+        with self._lock:
+            if room_id not in self._normal_line_hashes:
+                self._normal_line_hashes[room_id] = {}
+            self._normal_line_hashes[room_id][input_hash] = list(line_hashes)
+
     def clear_room(self, room_id: str) -> bool:
-        """Purge all measurements and key locks for a specific room. Idempotent."""
+        """Purge all measurements, line hashes, and key locks for a specific room. Idempotent."""
         with self._lock:
             self._key_locks = {
                 k: v for k, v in self._key_locks.items() if k[0] != room_id
             }
-            return self._rooms.pop(room_id, None) is not None
+            removed_rooms = self._rooms.pop(room_id, None) is not None
+            removed_hashes = self._normal_line_hashes.pop(room_id, None) is not None
+            return removed_rooms or removed_hashes
 
     def clear_all(self) -> None:
-        """Clear all room measurements across the service (used for test teardown)."""
+        """Clear all room measurements and line hashes across the service (used for test teardown)."""
         with self._lock:
             self._key_locks.clear()
             self._rooms.clear()
+            self._normal_line_hashes.clear()
 
 
 _store_instance: Optional[SlowdownStore] = None
@@ -389,6 +425,8 @@ def detect_slowdown(
     input_hash: str,
     execution_time_ms: float,
     peak_memory_mb: float,
+    code: Optional[str] = None,
+    module_id: Optional[str] = None,
     consent: Optional[bool] = None,
     ai_enabled: Optional[bool] = None,
     factor_threshold: Optional[float] = None,
@@ -413,11 +451,10 @@ def detect_slowdown(
       Condition 2 (current_runtime >= factor_threshold * median) strictly requires an 8x fold increase,
       completely preventing false alarms on minor variance.
 
-    Deferred Scope Note (FR37.3, US-69):
-    changed_lines is intentionally returned as an empty list ([]) under US-68.
-    Because ai-ml-service strictly maintains metadata-only storage (NFR8.2) and does
-    not persist raw source code across runs in SlowdownStore, code diffing against
-    the last normal run is assigned to US-69 (Sprint 5).
+    Changed-Line Highlighting (FR37.3, US-69):
+    When a run is flagged as a slowdown (is_slowdown=True), changed_lines identifies 1-based
+    added/modified lines in the current code compared to the line hashes of the most recent
+    normal run for the same input_hash. Raw code is never stored or returned (NFR8.2, AC2).
 
     Returns a dict ready to construct SlowdownAnalysisResponse.
     """
@@ -438,14 +475,22 @@ def detect_slowdown(
     if store is None:
         store = get_slowdown_store()
 
+    current_line_hashes = compute_line_hashes(code) if code is not None else None
+
     with store.get_lock(room_id, input_hash):
         earlier_runs = store.get_history(room_id, input_hash)
         baseline_median, baseline_mad, sample_count, abs_devs = calculate_baseline(earlier_runs)
 
         # 1. Check if history is sufficient
         if sample_count < min_samples:
-            # Record current run into history as a normal baseline point
-            store.record_measurement(room_id, input_hash, execution_time_ms, peak_memory_mb)
+            # Record current run into history as a normal baseline point and normal line hashes
+            store.record_measurement(
+                room_id,
+                input_hash,
+                execution_time_ms,
+                peak_memory_mb,
+                line_hashes=current_line_hashes,
+            )
             all_runs = store.get_history(room_id, input_hash)
             new_median, new_mad, new_count, _ = calculate_baseline(all_runs)
 
@@ -478,6 +523,9 @@ def detect_slowdown(
                     sample_count=new_count,
                 ),
                 "changed_lines": [],
+                "removed_lines_count": 0,
+                "comparison_available": False,
+                "comparison_note": None,
                 "message": f"Recorded run measurements. Baseline establishing ({new_count} of {min_samples} minimum samples collected).",
                 "ai_step": ai_step,
             }
@@ -535,14 +583,46 @@ def detect_slowdown(
                 explanation=None,
             )
 
-        # 4. Message and storage update
+        # 4. Changed lines comparison and storage update (FR37.3, US-69)
         if is_slowdown:
             # Abnormal run is NOT recorded into normal baseline history to avoid baseline poisoning
             display_factor = round(raw_factor, 1)
-            message = f"Execution runtime was {display_factor}x slower than normal baseline."
+
+            # Retrieve the most recent normal run's line hashes for this room and input_hash
+            prev_normal_hashes = store.get_last_normal_line_hashes(room_id, input_hash)
+
+            # Perform pure line-hash diff
+            diff_res = diff_line_hashes(
+                previous_hashes=prev_normal_hashes,
+                current_code=code or "",
+                module_id=module_id,
+            )
+
+            changed_lines = [
+                ChangedLineItem(line=item.line, module_id=item.module_id)
+                for item in diff_res.changed_lines
+            ]
+            removed_lines_count = diff_res.removed_lines_count
+            comparison_available = diff_res.comparison_available
+            comparison_note = diff_res.comparison_note
+
+            if comparison_available:
+                message = f"Execution runtime was {display_factor}x slower than normal baseline."
+            else:
+                message = f"Execution runtime was {display_factor}x slower than normal baseline. {comparison_note}"
         else:
-            # Normal run is recorded into the historical baseline
-            store.record_measurement(room_id, input_hash, execution_time_ms, peak_memory_mb)
+            # Normal run is recorded into the historical baseline and updates normal line hashes
+            store.record_measurement(
+                room_id,
+                input_hash,
+                execution_time_ms,
+                peak_memory_mb,
+                line_hashes=current_line_hashes,
+            )
+            changed_lines = []
+            removed_lines_count = 0
+            comparison_available = False
+            comparison_note = None
             message = "Execution runtime is within normal parameters."
 
         return {
@@ -553,7 +633,10 @@ def detect_slowdown(
                 mad_ms=round(baseline_mad, 1),
                 sample_count=sample_count,
             ),
-            "changed_lines": [],
+            "changed_lines": changed_lines,
+            "removed_lines_count": removed_lines_count,
+            "comparison_available": comparison_available,
+            "comparison_note": comparison_note,
             "message": message,
             "ai_step": ai_step,
         }

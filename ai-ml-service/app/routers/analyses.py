@@ -659,6 +659,7 @@ async def analyze_slowdown(
         input_hash=payload.input_hash,
         execution_time_ms=payload.current_run.execution_time_ms,
         peak_memory_mb=payload.current_run.peak_memory_mb,
+        code=payload.current_run.code,
         consent=payload.consent,
         ai_enabled=payload.ai_enabled,
         factor_threshold=factor_threshold,
@@ -694,6 +695,9 @@ async def analyze_slowdown(
         slowdown_factor=result["slowdown_factor"],
         baseline=result["baseline"],
         changed_lines=result.get("changed_lines", []),
+        removed_lines_count=result.get("removed_lines_count", 0),
+        comparison_available=result.get("comparison_available", False),
+        comparison_note=result.get("comparison_note"),
         message=result["message"],
         ai_step=ai_step,
     )
