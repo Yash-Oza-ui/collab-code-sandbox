@@ -473,6 +473,8 @@ export interface AwarenessWsConnection {
   join: (displayName: string, ownerToken?: string) => void
   switchDoc?: (newDocId: string, newDoc?: Y.Doc) => void
   requestEditAccess: () => boolean
+  getModuleDoc?: (id: string) => Y.Doc | undefined
+  isModuleSynced?: (id: string) => boolean
   destroy: () => void
 }
 
@@ -539,6 +541,7 @@ export function connectAwarenessWs(
   let currentActiveDoc: Y.Doc | undefined = doc
   let lastJoinedMsg: JoinedMessage | null = null
   const moduleSockets = new Map<string, WebSocket>()
+  const syncedModuleIds = new Set<string>()
   // Production RoomPage does not supply moduleDocs. Own inactive module docs here
   // so every approved Open-mode module can participate in Yjs resynchronization.
   const managedModuleDocs = new Map<string, Y.Doc>()
@@ -546,6 +549,7 @@ export function connectAwarenessWs(
   const allModuleDocs = () => new Map([...managedModuleDocs, ...(moduleDocs ?? new Map<string, Y.Doc>())])
   const moduleUpdateHandlers = new Map<string, (update: Uint8Array, origin: unknown) => void>()
   const closeModuleSocket = (id: string) => {
+    syncedModuleIds.delete(id)
     const socket = moduleSockets.get(id)
     if (!socket) return
     const moduleDoc = getModuleDoc(id)
@@ -560,6 +564,7 @@ export function connectAwarenessWs(
     if (socket.readyState === WS_OPEN || socket.readyState === WS_CONNECTING) socket.close()
   }
   const closeModuleSockets = () => {
+    syncedModuleIds.clear()
     for (const id of [...moduleSockets.keys()]) closeModuleSocket(id)
   }
 
@@ -592,6 +597,7 @@ export function connectAwarenessWs(
         const replies = handleIncomingSyncFrame(moduleDoc, bytes, socket, {
           replyWithReverseSyncStep1: !reverseSyncSent,
         })
+        syncedModuleIds.add(id)
         if (replies.length > 1) reverseSyncSent = true
         for (const reply of replies) if (socket.readyState === WS_OPEN) sendBinary(socket, reply)
       }
@@ -742,6 +748,7 @@ export function connectAwarenessWs(
   let onDocUpdate: ((update: Uint8Array, origin: unknown) => void) | null = null
 
   const closeDocumentSocket = () => {
+    syncedModuleIds.delete(activeDocId || 'main')
     closeModuleSockets()
     if (onDocAwarenessUpdate) {
       awareness.off('update', onDocAwarenessUpdate)
@@ -931,6 +938,7 @@ export function connectAwarenessWs(
 
         if (messageType === MESSAGE_SYNC) {
           if (currentActiveDoc && docWs) {
+            syncedModuleIds.add(activeDocId || 'main')
             const allowReverse = !hasSentReverseSync
             const replies = handleIncomingSyncFrame(currentActiveDoc, uint8, docWs, {
               replyWithReverseSyncStep1: allowReverse,
@@ -1207,6 +1215,8 @@ export function connectAwarenessWs(
     join,
     switchDoc,
     requestEditAccess,
+    getModuleDoc,
+    isModuleSynced: (id: string) => syncedModuleIds.has(id),
     destroy,
   }
 }
