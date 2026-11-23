@@ -799,7 +799,7 @@ All paths are under `/v1/rooms/{room_id}/modules`. "Who" is who may call it. Eac
 | Transfer owner | `POST /v1/rooms/{room_id}/modules/{module_id}/transfer` | **owner** (FR21.4) | `{ "to_member_id": "m_4b19d2" }` | `200` module object |
 | Grant write | `POST /v1/rooms/{room_id}/modules/{module_id}/writers` | **owner or Host** (FR22.1) | `{ "member_id": "m_4b19d2" }` | `200` module object |
 | Revoke write | `DELETE /v1/rooms/{room_id}/modules/{module_id}/writers/{member_id}` | **owner or Host** (FR22.1) | — | `200` module object |
-| Save version | `POST /v1/rooms/{room_id}/modules/{module_id}/save` | owner or writer | `{ "text": "…" }` (see V2.24) | `200` module object with `version`, `saved_by`, `saved_by_name`, `saved_at`, `dirty: false` (see V2.24) |
+| Save version | `POST /v1/rooms/{room_id}/modules/{module_id}/save` | owner or writer | `{ "text": "…" }` (see V2.24) | `200` module object with `version`, `saved_by`, `saved_at`, `dirty: false` (see V2.24) |
 
 A `PATCH` carries **exactly one** of `name`, `runnable` or `is_entry`; the caller allowed depends on the field (owner for `name` and `runnable`, Host for `is_entry`, as the rows show). Sending zero or more than one of these fields is `INVALID_REQUEST`. Module **targets** (`owner_member_id`, `to_member_id`, `member_id`, the `writers` path segment) are always public `member_id`s, never `session_id`s.
 
@@ -1262,6 +1262,7 @@ All use the error envelope of section 7. For module calls on sync-service, `requ
 | `RUN_NOT_ALLOWED` | 403 | execution-service | The caller may not run (FR41.4). `error.reason` says why (below). |
 | `NOT_OWNER` | 403 | sync-service | An action only the Host may do, without a valid owner token. Same envelope as the owner check (section 8). |
 | `NOT_MODULE_OWNER` | 403 | sync-service | The caller is not the module's owner (rename, delete, transfer, set runnable; FR21.4), or neither its owner nor the Host (grant or revoke write access; FR22.1). |
+| `NOT_MODULE_WRITER` | 403 | sync-service | The caller is neither the module's owner nor in its `writers` list when saving (FR24.1, US-45). |
 | `NOT_RUNNER` | 403 | execution-service | Share by a session that did not run it (V2.10). |
 | `MODULE_NOT_FOUND` | 404 | sync-service, execution-service | The module id does not exist in this room. |
 | `ROOM_NOT_FOUND` | 404 | sync-service, execution-service | The room does not exist. Also the answer of the owner check for an unknown room; this replaces the v1 rule (section 8) that treated an unknown room like a wrong token (difference 5). |
@@ -1386,6 +1387,7 @@ The relay decides from the **first two bytes** of a binary frame and never parse
 | `ROOM_NOT_FOUND` | 404 | both | V2.12 |
 | `NOT_OWNER` | 403 | sync-service | §8, V2.6 |
 | `NOT_MODULE_OWNER` | 403 | sync-service | V2.6 |
+| `NOT_MODULE_WRITER` | 403 | sync-service | V2.24 |
 | `NAME_TAKEN` | 409 | sync-service | V2.6 |
 | `LIMIT_REACHED` | 409 | sync-service | V2.6 |
 | `SESSION_NOT_FOUND` | 404 | sync-service | V2.6, V2.11 |
@@ -2019,6 +2021,44 @@ In Open mode, a module's owner or a member in `writers` (US-43) manually saves t
 POST http://localhost:8081/v1/rooms/{room_id}/modules/{module_id}/save
 Content-Type: application/json
 X-Session-Id: <caller-session-id>
+```
+
+Request body (`docs/examples/v2-module-save-request.json`):
+
+```json
+{
+  "text": "def solve(x):\n    return x * 2\n"
+}
+```
+
+Response `200 OK` (`docs/examples/v2-module-save-response.json`) — also pushed to all joined control sessions as `module-updated` (`deleted: false`):
+
+```json
+{
+  "module_id": "mod_9Qx7mBvA2nR0",
+  "name": "solver.py",
+  "owner_member_id": "m_7a3c9f",
+  "writers": ["m_4b19d2"],
+  "runnable": true,
+  "is_entry": false,
+  "version": 5,
+  "pending": false,
+  "dirty": false,
+  "saved_by": {
+    "member_id": "m_4b19d2",
+    "display_name": "Ada"
+  },
+  "saved_at": "2026-11-24T01:20:00Z"
+}
+```
+
+### 2. Rules, dirty flag, and errors
+
+1. **Permission:** Only `owner_member_id` or a member in `writers` (on a non-pending module) may save. Anyone else — including the Host without write access and an Observer — is refused with `403 NOT_MODULE_WRITER`.
+2. **Refusals:** Unknown `module_id` returns `404 MODULE_NOT_FOUND`; Pair mode, pending module, or missing/non-string `text` returns `422 INVALID_REQUEST`; oversized `text` returns `409 LIMIT_REACHED` (US-63, V2.12).
+3. **Monotonic versions:** Each save increments `version` (`1, 2, 3, …`, never reused), stores the exact `text`, and records `saved_by` (`{ member_id, display_name }`) and `saved_at` (RFC 3339 UTC). Saving twice in a row with no edits is harmless and creates a new version.
+4. **Dirty indicator (`dirty`):** Starts `false`. When `sync-service` relays an accepted Yjs sync change frame on the module's document socket (CR13 — without parsing CRDT content), it sets `dirty: true` and broadcasts `module-updated` if `dirty` changed from `false` to `true`. Saving clears `dirty` to `false` and broadcasts `module-updated`. Because the relay does not inspect CRDT text, undoing back to the saved text may keep `dirty: true` until the next save.
+5. **Privacy & lifecycle:** Saved text is never logged (NFR8.2) and is deleted with the room (`Room.clearSensitiveState()`, FR32 / US-56).
 
 ## US-56: Internal room-ended notification (Proposed — awaiting execution-service and AI-ML owners)
 
@@ -2089,7 +2129,7 @@ Success returns `200 OK` and `{"room_id":"Zq8-Lw2Ef6Th0Yx4Rn7JbA","status":"clea
 | v2 (edit access) | Nov 2026 | V2.21 added (US-36): `PATCH /v1/rooms/{room_id}/members/{member_id}/edit-access` gives or takes back edit access in Pair mode (FR19.1). Edit access controls apply only in Pair mode (Open mode refuses with `422 INVALID_REQUEST`). Host access cannot be changed (`422`) and Observers cannot have edit access (`422`). Broadcasts updated roster on change. |
 | v2 (edit request) | 20 Nov 2026 | V2.22 added (US-38): control-socket `request-edit-access` / `edit-access-requested` / `edit-access-responded` / `edit-access-request-cleared` and Host-only `POST /v1/rooms/{room_id}/edit-requests/{member_id}/approve` and `/decline` in Pair mode (FR19.3). Reuses `RoomService.setEditAccess` (V2.21). Edit requests removed from V2.15 undecided list. |
 | v2 (audit log) | 22 Nov 2026 | V2.23 added (US-58): `GET /v1/rooms/{room_id}/audit-log` and control-socket `audit-entry` push for role, edit access, module write access, and run permission changes (FR34). Bounded in-memory store; deleted with room; server-written only. Audit log removed from V2.15 undecided list. |
-| v2 (save module) | 24 Nov 2026 | V2.24 added (US-45): `POST /v1/rooms/{room_id}/modules/{module_id}/save` body `{ "text" }`, `saved_by` / `saved_by_name` / `saved_at` / `dirty` fields on module objects and `module-updated` (FR24.1, FR24.2). |
+| v2 (save module) | 24 Nov 2026 | V2.24 added (US-45): `POST /v1/rooms/{room_id}/modules/{module_id}/save` body `{ "text" }`, `saved_by` / `saved_at` / `dirty` fields on module objects and `module-updated`, and `NOT_MODULE_WRITER` in V2.12 (FR24.1, FR24.2). |
 
 ### Runner infrastructure error (v1 proposal addition)
 
