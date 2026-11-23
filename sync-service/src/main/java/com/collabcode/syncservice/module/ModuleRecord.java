@@ -1,4 +1,3 @@
-
 package com.collabcode.syncservice.module;
 
 import java.util.Set;
