@@ -9,6 +9,7 @@ import {
   type Awareness,
 } from 'y-protocols/awareness'
 import { DEFAULT_SYNC_WS_URL, getClientConfig } from './config'
+import type { AuditLogEntry } from './auditLogApi'
 
 export const COLLAB_SESSION_ID_KEY = 'collab_session_id'
 
@@ -389,6 +390,37 @@ export interface ModuleUpdatedMessage {
   [key: string]: unknown
 }
 
+export interface EditAccessRequestedMessage {
+  type: 'edit-access-requested'
+  member_id: string
+  display_name: string
+  requested_at: string
+}
+
+export interface EditAccessRespondedMessage {
+  type: 'edit-access-responded'
+  member_id: string
+  approved: boolean
+  message: string
+}
+
+export interface EditAccessRequestClearedMessage {
+  type: 'edit-access-request-cleared'
+  member_id: string
+  reason: string
+}
+
+export interface ControlErrorMessage {
+  type: 'error'
+  code: string
+  message: string
+}
+
+export interface AuditEntryMessage {
+  type: 'audit-entry'
+  entry: AuditLogEntry
+}
+
 export interface ConnectAwarenessWsOptions {
   roomId: string
   displayName?: string
@@ -419,6 +451,11 @@ export interface ConnectAwarenessWsOptions {
   onAnalysisResult?: (msg: AnalysisResultMessage) => void
   /** A module was created, approved, updated or deleted in Open mode (V2.6, US-39). */
   onModuleUpdated?: (msg: ModuleUpdatedMessage) => void
+  onEditAccessRequested?: (msg: EditAccessRequestedMessage) => void
+  onEditAccessResponded?: (msg: EditAccessRespondedMessage) => void
+  onEditAccessRequestCleared?: (msg: EditAccessRequestClearedMessage) => void
+  onControlError?: (msg: ControlErrorMessage) => void
+  onAuditEntry?: (msg: AuditEntryMessage) => void
   onError?: (event: Event) => void
   onClose?: (event: CloseEvent) => void
   onDocError?: (event: Event) => void
@@ -435,6 +472,7 @@ export interface AwarenessWsConnection {
   moduleSockets: ReadonlyMap<string, WebSocket>
   join: (displayName: string, ownerToken?: string) => void
   switchDoc?: (newDocId: string, newDoc?: Y.Doc) => void
+  requestEditAccess: () => boolean
   destroy: () => void
 }
 
@@ -470,6 +508,11 @@ export function connectAwarenessWs(
     onRunResult,
     onAnalysisResult,
     onModuleUpdated,
+    onEditAccessRequested,
+    onEditAccessResponded,
+    onEditAccessRequestCleared,
+    onControlError,
+    onAuditEntry,
     onError,
     onClose,
     onDocError,
@@ -484,6 +527,7 @@ export function connectAwarenessWs(
       controlWs: null,
       docWs: null,
       moduleSockets: new Map(),
+      requestEditAccess: () => false,
       join: () => {},
       destroy: () => {},
     }
@@ -972,6 +1016,16 @@ export function connectAwarenessWs(
             onAnalysisResult?.(msg as AnalysisResultMessage)
           } else if (msg.type === 'module-updated') {
             onModuleUpdated?.(msg as ModuleUpdatedMessage)
+          } else if (msg.type === 'edit-access-requested') {
+            onEditAccessRequested?.(msg as EditAccessRequestedMessage)
+          } else if (msg.type === 'edit-access-responded') {
+            onEditAccessResponded?.(msg as EditAccessRespondedMessage)
+          } else if (msg.type === 'edit-access-request-cleared') {
+            onEditAccessRequestCleared?.(msg as EditAccessRequestClearedMessage)
+          } else if (msg.type === 'error') {
+            onControlError?.(msg as ControlErrorMessage)
+          } else if (msg.type === 'audit-entry') {
+            onAuditEntry?.(msg as AuditEntryMessage)
           }
         } catch {
           // ignore non-json control frames
@@ -1132,6 +1186,16 @@ export function connectAwarenessWs(
     }
   }
 
+  const requestEditAccess = (): boolean => {
+    if (isDestroyed || !controlWs || controlWs.readyState !== WS_OPEN) return false
+    try {
+      controlWs.send(JSON.stringify({ type: 'request-edit-access' }))
+      return true
+    } catch {
+      return false
+    }
+  }
+
   return {
     get controlWs() {
       return controlWs
@@ -1142,6 +1206,7 @@ export function connectAwarenessWs(
     moduleSockets,
     join,
     switchDoc,
+    requestEditAccess,
     destroy,
   }
 }

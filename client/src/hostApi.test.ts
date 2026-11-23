@@ -7,6 +7,9 @@ import {
   removeMember,
   setEditAccess,
   setAiSwitch,
+  approveEditRequest,
+  declineEditRequest,
+  listEditRequests,
   type HostCallContext,
 } from './hostApi'
 
@@ -198,5 +201,99 @@ describe('US-59 Host AI switch API', () => {
   it('surfaces the NOT_OWNER result to a non-Host', async () => {
     expect(await setAiSwitch(ctx(failJson(403, 'NOT_OWNER')), true))
       .toMatchObject({ ok: false, status: 403, code: 'NOT_OWNER' })
+  })
+  const editReqCtx = { roomId: 'room-1', sessionId: 'sess-1', ownerToken: 'tok-1' }
+  it('listEditRequests sends GET with Host headers and parses the array response', async () => {
+    const fetchFn = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => [
+        { member_id: 'm_bob', display_name: 'Bob', requested_at: '2026-11-22T10:00:00Z' },
+      ],
+    })
+    const result = await listEditRequests({ ...editReqCtx, fetchFn })
+
+    expect(fetchFn).toHaveBeenCalledWith(
+      expect.stringMatching(/\/v1\/rooms\/room-1\/edit-requests$/),
+      expect.objectContaining({
+        method: 'GET',
+        headers: { 'X-Session-Id': 'sess-1', 'X-Owner-Token': 'tok-1' },
+      }),
+    )
+    expect(result).toEqual({
+      ok: true,
+      data: [{ member_id: 'm_bob', display_name: 'Bob', requested_at: '2026-11-22T10:00:00Z' }],
+    })
+  })
+
+  it('approveEditRequest sends POST /approve with Host headers', async () => {
+    const fetchFn = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        member_id: 'm_bob',
+        display_name: 'Bob',
+        role: 'participant',
+        permissions: { can_edit: true, can_run: true },
+      }),
+    })
+    const result = await approveEditRequest({ ...editReqCtx, fetchFn }, 'm_bob')
+
+    expect(fetchFn).toHaveBeenCalledWith(
+      expect.stringMatching(/\/v1\/rooms\/room-1\/edit-requests\/m_bob\/approve$/),
+      expect.objectContaining({
+        method: 'POST',
+        headers: { 'X-Session-Id': 'sess-1', 'X-Owner-Token': 'tok-1' },
+      }),
+    )
+    expect(result).toEqual({
+      ok: true,
+      data: {
+        member_id: 'm_bob',
+        display_name: 'Bob',
+        role: 'participant',
+        permissions: { can_edit: true, can_run: true },
+      },
+    })
+  })
+
+  it('declineEditRequest sends POST /decline and maps NOT_OWNER, MEMBER_NOT_FOUND, INVALID_REQUEST', async () => {
+    const fetchFn = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ member_id: 'm_bob', status: 'declined' }),
+      })
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 403,
+        json: async () => ({ error: { code: 'NOT_OWNER', message: 'Forbidden' } }),
+      })
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 404,
+        json: async () => ({ error: { code: 'MEMBER_NOT_FOUND', message: 'Member not found in this room.' } }),
+      })
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 422,
+        json: async () => ({ error: { code: 'INVALID_REQUEST', message: 'Edit-access requests apply only in Pair mode.' } }),
+      })
+
+    const okRes = await declineEditRequest({ ...editReqCtx, fetchFn }, 'm_bob')
+    expect(okRes).toEqual({ ok: true, data: { member_id: 'm_bob' } })
+
+    const notOwner = await declineEditRequest({ ...editReqCtx, fetchFn }, 'm_bob')
+    expect(notOwner.ok).toBe(false)
+    if (!notOwner.ok) expect(notOwner.error).toBe('Only the Host can do this.')
+
+    const notFound = await declineEditRequest({ ...editReqCtx, fetchFn }, 'm_bob')
+    expect(notFound.ok).toBe(false)
+    if (!notFound.ok) expect(notFound.error).toBe('That person is no longer in the room.')
+
+    const invalid = await declineEditRequest({ ...editReqCtx, fetchFn }, 'm_bob')
+    expect(invalid.ok).toBe(false)
+    if (!invalid.ok) expect(invalid.error).toBe('Edit-access requests apply only in Pair mode.')
   })
 })
