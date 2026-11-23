@@ -73,8 +73,14 @@ import {
 } from './auditLogApi'
 import { getRoomIdFromPath } from './roomId'
 import { useRoomDoc } from './roomDoc'
-import { parseRunResultFrame, runNotAllowedMessage } from './runCode'
+import { getEntryFileName, parseRunResultFrame, runNotAllowedMessage } from './runCode'
 import type { RunResponseData, SupportedLanguage } from './runCode'
+import {
+  createZipBlob,
+  triggerZipDownload,
+  EXPORT_ZIP_FILENAME,
+  type ExportZipFileEntry,
+} from './exportZip'
 import { pickUserColor, USER_COLORS } from './userColor'
 import { config } from './config'
 
@@ -522,7 +528,7 @@ export default function RoomPage(props: RoomPageProps = {}) {
         roomId,
         doc,
         docId: propDocId,
-        moduleDocs,
+        moduleDocs: moduleDocs ?? moduleDocsRef.current,
         resolveDocId,
         awareness,
         syncWsUrl: wsOptions?.syncWsUrl,
@@ -1598,6 +1604,60 @@ export default function RoomPage(props: RoomPageProps = {}) {
       }
     : null
 
+  const [isExporting, setIsExporting] = useState(false)
+  const [exportError, setExportError] = useState<string | null>(null)
+
+  const approvedWorkspaceModules = workspaceModules.filter((m) => !m.pending)
+  const isOpenModeEmpty = roomMode?.mode === 'open' && approvedWorkspaceModules.length === 0
+
+  const handleExportZip = useCallback(async () => {
+    if (joinStatus !== 'joined') return
+    setExportError(null)
+    setIsExporting(true)
+    try {
+      const mode = roomMode?.mode ?? 'pair'
+      const lang = workspaceLanguage ?? currentLanguage ?? 'python'
+
+      let files: ExportZipFileEntry[] = []
+      if (mode === 'pair') {
+        const entryName = getEntryFileName(lang)
+        const activeDoc = getActiveDoc() ?? docRef.current
+        const content = activeDoc?.getText('monaco').toString() ?? ''
+        files = [{ name: entryName, content }]
+      } else {
+        const approved = workspaceModules.filter((m) => !m.pending)
+        if (approved.length === 0) {
+          setIsExporting(false)
+          return
+        }
+        files = approved.map((m) => {
+          const mDoc = connRef.current?.getModuleDoc?.(m.module_id) ?? getModuleDoc(m.module_id)
+          return {
+            name: m.name,
+            content: mDoc.getText('monaco').toString(),
+          }
+        })
+      }
+
+      const blob = createZipBlob(files, lang)
+      triggerZipDownload(blob, EXPORT_ZIP_FILENAME)
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err)
+      setExportError(msg)
+    } finally {
+      setIsExporting(false)
+    }
+  }, [
+    joinStatus,
+    roomMode,
+    workspaceLanguage,
+    currentLanguage,
+    getActiveDoc,
+    docRef,
+    workspaceModules,
+    getModuleDoc,
+  ])
+
   if (isInvalidRoomId) {
     return (
       <div className="room-page">
@@ -1707,6 +1767,45 @@ export default function RoomPage(props: RoomPageProps = {}) {
           >
             ⚠️ {docError}
           </span>
+        )}
+        {joinStatus === 'joined' && (
+          <div className="room-export-container" data-testid="room-export-container">
+            <button
+              type="button"
+              className="room-export-button"
+              data-testid="room-export-button"
+              onClick={() => void handleExportZip()}
+              disabled={isOpenModeEmpty || isExporting}
+              title={
+                isOpenModeEmpty
+                  ? 'No modules to export'
+                  : roomMode?.mode === 'open'
+                    ? 'Exports the live text as you see it now; the saved version may be older.'
+                    : 'Export the room file as a zip archive'
+              }
+            >
+              {isExporting ? 'Exporting...' : 'Export Zip'}
+            </button>
+            {roomMode?.mode === 'open' && (
+              <span
+                className={`room-export-note${isOpenModeEmpty ? ' empty' : ''}`}
+                data-testid="room-export-note"
+                title="Exports the live text as you see it now; the saved version may be older."
+              >
+                {isOpenModeEmpty ? 'No modules to export' : 'Exports live text; saved version may be older'}
+              </span>
+            )}
+            {exportError && (
+              <span
+                className="room-export-error-badge"
+                data-testid="room-export-error"
+                role="alert"
+                style={{ color: '#ef4444', fontSize: '0.825rem' }}
+              >
+                ⚠️ {exportError}
+              </span>
+            )}
+          </div>
         )}
         {joinStatus === 'joined' && (
           <button
