@@ -1097,9 +1097,12 @@ Data minimization rule: Every call sends only the relevant code section or funct
    - The factor threshold is configurable via `settings.SLOWDOWN_FACTOR_THRESHOLD` (default 8.0, per FR37.2 and DR3).
 
 4. **Code Diff Highlighting (FR37.3, US-69):**
-   - When a regression is detected, the service compares the current code against the source code of the **last normal (non-slowdown) run** for the same `input_hash`.
-   - Changed lines are extracted using standard line-by-line diff (`difflib`) and returned in `changed_lines` with 1-based line numbers and line content:
-     `[ { "line": 2, "content": "    time.sleep(1.4)" } ]`.
+   - When a regression is detected, the service compares the current code against the line hashes of the **last normal (non-slowdown) run** for the same `input_hash`.
+   - Changed lines are identified using deterministic line hash comparison (LCS) and returned in `changed_lines` with 1-based line numbers and optional `module_id` for Open mode:
+     `[ { "line": 2 } ]`.
+   - Raw source code or line contents are **never** returned or persisted in room-scoped measurement memory (NFR8.2, AC2).
+   - Removed lines cannot be highlighted in the current editor; their count is returned via `removed_lines_count`.
+   - When an earlier normal run exists and diff comparison succeeds, `comparison_available` is `true`. When no earlier normal run exists, `changed_lines` is empty, `comparison_available` is `false`, and `comparison_note` contains `"No earlier normal run to compare."`.
 
 5. **Room-Scoped Memory Lifecycle (FR37.4, FR32, US-56, CR11):**
    - Measurements, baselines, and code snapshots for Task 2 are held in room-scoped in-memory storage (`room_histories[room_id][input_hash]`).
@@ -1145,10 +1148,12 @@ Data minimization rule: Every call sends only the relevant code section or funct
   },
   "changed_lines": [
     {
-      "line": 2,
-      "content": "    time.sleep(1.4)"
+      "line": 2
     }
   ],
+  "removed_lines_count": 0,
+  "comparison_available": true,
+  "comparison_note": null,
   "message": "Execution runtime was 14.2x slower than normal baseline.",
   "ai_step": {
     "status": "ok",
@@ -1173,6 +1178,9 @@ Data minimization rule: Every call sends only the relevant code section or funct
     "sample_count": 8
   },
   "changed_lines": [],
+  "removed_lines_count": 0,
+  "comparison_available": false,
+  "comparison_note": null,
   "message": "Execution runtime is within normal parameters.",
   "ai_step": {
     "status": "ok",
@@ -1197,6 +1205,9 @@ Data minimization rule: Every call sends only the relevant code section or funct
     "sample_count": 2
   },
   "changed_lines": [],
+  "removed_lines_count": 0,
+  "comparison_available": false,
+  "comparison_note": null,
   "message": "Recorded run measurements. Baseline establishing (2 of 3 minimum samples collected).",
   "ai_step": {
     "status": "skipped",
@@ -1222,10 +1233,12 @@ Data minimization rule: Every call sends only the relevant code section or funct
   },
   "changed_lines": [
     {
-      "line": 2,
-      "content": "    time.sleep(1.4)"
+      "line": 2
     }
   ],
+  "removed_lines_count": 0,
+  "comparison_available": true,
+  "comparison_note": null,
   "message": "Execution runtime was 14.2x slower than normal baseline.",
   "ai_step": {
     "status": "skipped",
@@ -1701,10 +1714,12 @@ The request contains all common fields from §16 plus:
     },
     "changed_lines": [
       {
-        "line": 2,
-        "content": "    time.sleep(1.4)"
+        "line": 2
       }
     ],
+    "removed_lines_count": 0,
+    "comparison_available": true,
+    "comparison_note": null,
     "explanation": "Runtime regression caused by newly introduced blocking sleep call on line 2."
   },
   "message": "Execution runtime was 14.2x slower than normal baseline."

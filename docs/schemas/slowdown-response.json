@@ -24,13 +24,16 @@
       "items": {
         "type": "object",
         "properties": {
-          "line": { "type": "integer" },
-          "content": { "type": "string" }
+          "line": { "type": "integer", "minimum": 1 },
+          "module_id": { "type": ["string", "null"] }
         },
-        "required": ["line", "content"],
+        "required": ["line"],
         "additionalProperties": false
       }
     },
+    "removed_lines_count": { "type": "integer", "minimum": 0 },
+    "comparison_available": { "type": "boolean" },
+    "comparison_note": { "type": ["string", "null"] },
     "message": { "type": "string" },
     "ai_step": {
       "type": "object",
@@ -64,6 +67,9 @@
     "slowdown_factor",
     "baseline",
     "changed_lines",
+    "removed_lines_count",
+    "comparison_available",
+    "comparison_note",
     "message",
     "ai_step"
   ],

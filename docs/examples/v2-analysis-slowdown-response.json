@@ -12,10 +12,12 @@
   },
   "changed_lines": [
     {
-      "line": 2,
-      "content": "    time.sleep(1.4)"
+      "line": 2
     }
   ],
+  "removed_lines_count": 0,
+  "comparison_available": true,
+  "comparison_note": null,
   "message": "Execution runtime was 14.2x slower than normal baseline.",
   "ai_step": {
     "status": "ok",
