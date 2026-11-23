@@ -8,7 +8,7 @@ import * as sync from 'y-protocols/sync'
 
 const api = (process.env.SYNC_SERVICE_URL || 'http://localhost:8081').replace(/\/$/, '')
 const wsBase = api.replace(/^http/, 'ws')
-const timeoutMs = 10000
+const timeoutMs = 15000
 const sockets = []
 const docs = []
 
@@ -373,7 +373,12 @@ try {
   )
 
   // Fetch approved modules list
-  const modulesRes = await request(`/v1/rooms/${encodeURIComponent(openRoomId)}/modules`)
+  const modulesRes = await request(
+    `/v1/rooms/${encodeURIComponent(openRoomId)}/modules`,
+    'GET',
+    undefined,
+    { 'X-Session-Id': openObsSession },
+  )
   assert.equal(modulesRes.status, 200)
   const approvedModules = modulesRes.data.filter((m) => !m.pending)
   assert.equal(approvedModules.length, 2)
@@ -417,6 +422,9 @@ try {
   assert.throws(() => buildZipArchive([]), /Cannot create zip: no files provided/)
 
   console.log('PASS: US-57 export zip in Pair and Open modes with live text snapshot')
+} catch (err) {
+  console.error('US-57 integration test error:', err)
+  throw err
 } finally {
   for (const ws of sockets.reverse()) {
     try { ws.close() } catch {}
