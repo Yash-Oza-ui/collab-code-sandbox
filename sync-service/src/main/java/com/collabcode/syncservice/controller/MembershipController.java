@@ -101,17 +101,24 @@ public class MembershipController {
             return HostGuard.error(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_REQUEST", "A Host cannot be removed.");
         }
 
-        // Records the block FIRST (so a racing reconnect is already refused), then
-        // drops the member from the roster (RoomService, under its lock).
-        Member removed = roomService.removeMember(roomId, memberId);
+        // ONE step (US-42, FR21.5): under the module lock, record the block FIRST
+        // (so a racing reconnect is already refused) and drop the member from the
+        // roster (US-28), then give every module they owned to the current Host,
+        // revoke their writer access and delete their pending requests (US-40/43).
+        // No approve, grant or list can run in between.
+        ModuleService.MemberRemovalResult removal = moduleService.removeMemberAndReassignModules(
+                roomId, memberId, () -> roomService.removeMember(roomId, memberId));
+        Member removed = removal.removed();
         if (removed == null) {
             // Removed by another request between the lookup and here.
             return HostGuard.error(HttpStatus.NOT_FOUND, "MEMBER_NOT_FOUND", "Member not found in this room.");
         }
 
-        // Drop any pending module requests created by the removed member (US-40)
-        List<com.collabcode.syncservice.module.ModuleRecord> removedPending = moduleService.removePendingRequestsForMember(roomId, memberId);
-        for (com.collabcode.syncservice.module.ModuleRecord pendingMod : removedPending) {
+        // Everyone sees the new owner / writer list (T-17 decision 7).
+        for (com.collabcode.syncservice.module.ModuleRecord module : removal.transferred()) {
+            controlHandler.broadcastModuleUpdated(roomId, RoomMessages.moduleUpdated(module, false));
+        }
+        for (com.collabcode.syncservice.module.ModuleRecord pendingMod : removal.removedPending()) {
             controlHandler.broadcastModuleUpdated(roomId, RoomMessages.moduleUpdated(pendingMod, true));
         }
 

@@ -210,6 +210,97 @@ public class ModuleService {
         return removed;
     }
 
+    /**
+     * US-42: Transfer approved modules owned by a Host-removed member to the
+     * current Host, and remove the former member from every approved module's
+     * writer list. Returns changed modules for module-updated broadcasts.
+     */
+    public synchronized List<ModuleRecord> transferOwnedModules(
+            String roomId, String removedMemberId, String hostMemberId) {
+        Room room = requireOpenRoom(roomId);
+        if (removedMemberId == null || removedMemberId.isBlank()
+                || hostMemberId == null || hostMemberId.isBlank()
+                || removedMemberId.equals(hostMemberId)) {
+            throw new IllegalArgumentException("INVALID_MEMBER_ID");
+        }
+        Member host = room.getMembers().get(hostMemberId);
+        if (host == null || host.getRole() != Role.HOST) {
+            throw new IllegalArgumentException("HOST_NOT_FOUND");
+        }
+        Map<String, ModuleRecord> modules = byRoom.get(roomId);
+        if (modules == null) {
+            return List.of();
+        }
+        List<ModuleRecord> updated = new java.util.ArrayList<>();
+        for (ModuleRecord module : modules.values()) {
+            if (module.pending()) {
+                continue;
+            }
+            boolean changed = false;
+            if (removedMemberId.equals(module.ownerMemberId())) {
+                module.transferOwnership(hostMemberId);
+                changed = true;
+            }
+            if (module.removeWriter(removedMemberId)) {
+                changed = true;
+            }
+            if (changed) {
+                updated.add(module);
+            }
+        }
+        updated.sort(Comparator.comparing(ModuleRecord::moduleId));
+        return updated;
+    }
+
+    /** Outcome of the single US-42 removal step. {@code removed} is null if the member was unknown. */
+    public record MemberRemovalResult(Member removed,
+                                      List<ModuleRecord> transferred,
+                                      List<ModuleRecord> removedPending) {}
+
+    /**
+     * US-42 (FR21.5, FR21.3): remove a member and settle everything they hold in
+     * the module workspace in ONE step.
+     *
+     * <p>The roster removal ({@code removeFromRoom}, the US-28
+     * {@code RoomService.removeMember} path) runs while this service's lock is held,
+     * followed in the same critical section by the ownership transfer to the
+     * current Host, the writer revocation and the pending-request cleanup. Every
+     * module operation (approve, grant/revoke, list, ...) is synchronized on this
+     * service, so none of them can observe the member gone from the room while
+     * still owning or writing a module, or the reverse.
+     *
+     * <p>Lock order is always ModuleService -> RoomService; RoomService never
+     * calls into ModuleService, so this cannot deadlock.
+     *
+     * <p>The current Host is resolved before anything changes, so a missing Host
+     * fails the whole step without a half-done removal.
+     */
+    public synchronized MemberRemovalResult removeMemberAndReassignModules(
+            String roomId, String memberId, java.util.function.Supplier<Member> removeFromRoom) {
+        Room room = rooms.get(roomId);
+        boolean hasModules = room != null && !room.isClosed() && room.getMode() == RoomMode.OPEN;
+        String hostMemberId = null;
+        if (hasModules) {
+            hostMemberId = room.getMembers().values().stream()
+                    .filter(m -> m.getRole() == Role.HOST && !m.getMemberId().equals(memberId))
+                    .map(Member::getMemberId)
+                    .findFirst()
+                    .orElseThrow(() -> new IllegalStateException("HOST_NOT_FOUND"));
+        }
+
+        Member removed = removeFromRoom.get();
+        if (removed == null) {
+            return new MemberRemovalResult(null, List.of(), List.of());
+        }
+
+        // Pair mode has no modules: nothing to transfer (FR21.5 applies to Open mode).
+        List<ModuleRecord> transferred = hasModules
+                ? transferOwnedModules(roomId, memberId, hostMemberId)
+                : List.of();
+        List<ModuleRecord> removedPending = removePendingRequestsForMember(roomId, memberId);
+        return new MemberRemovalResult(removed, transferred, removedPending);
+    }
+
     /** Returns pending module requests awaiting Host approval (US-40). */
     public synchronized List<ModuleRecord> listPending(String roomId, Member requester) {
         requireOpenRoom(roomId);
