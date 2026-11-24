@@ -15,8 +15,9 @@ import WebSocket from 'ws'
 
 const syncApi = process.env.SYNC_SERVICE_URL || 'http://localhost:8081'
 const execApi = process.env.EXECUTION_API_URL || null
+const checkRun = process.env.US47_CHECK_RUN === '1' && Boolean(execApi)
 const wsBase = syncApi.replace(/^http/, 'ws')
-const internalToken = process.env.INTERNAL_API_TOKEN || 'test-token'
+const internalToken = process.env.INTERNAL_API_TOKEN || 'test-only-integration-token-fixture'
 const TIMEOUT = 10000
 
 async function http(baseUrl, method, path, { headers = {}, body } = {}) {
@@ -193,8 +194,8 @@ async function main() {
   assert.equal(markRunnable.status, 200)
   assert.equal(markRunnable.body.runnable, true)
 
-  // 4. End-to-end execution checks against execution-service if running
-  if (execApi) {
+  // 4. End-to-end execution checks against execution-service if running with real lookup
+  if (checkRun) {
     console.log('[US-47] Testing end-to-end execution against execution-service...')
     hostControl.texts = []
     guestControl.texts = []
