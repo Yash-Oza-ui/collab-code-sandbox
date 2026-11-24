@@ -388,8 +388,8 @@ public class DocumentHandler extends AbstractWebSocketHandler {
         }
 
         // Mark Open-mode module dirty on an accepted Yjs sync update frame (US-45, FR24.2)
-        if (!isAwareness && bytes.length >= 2 && bytes[0] == 0 && bytes[1] == 2
-                && docId != null && moduleService.markDirty(roomId, docId)) {
+        if (!isAwareness && isDocumentChange(bytes)
+             && docId != null && moduleService.markDirty(roomId, docId)) {
             ModuleRecord dirtyModule = moduleService.find(roomId, docId);
             if (dirtyModule != null) {
                 String updatedJson = objectMapper.writeValueAsString(RoomMessages.moduleUpdated(dirtyModule, false));
