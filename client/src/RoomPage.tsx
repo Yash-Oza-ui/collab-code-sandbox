@@ -1373,7 +1373,7 @@ export default function RoomPage(props: RoomPageProps = {}) {
         setWorkspaceError(res.error)
       }
     },
-    [roomId, wsOptions?.syncWsUrl, wsOptions?.sessionId, wsOptions?.fetchFn, getModuleDoc],
+    [roomId, wsOptions, getModuleDoc],
   )
 
   const handleRequestModule = useCallback(

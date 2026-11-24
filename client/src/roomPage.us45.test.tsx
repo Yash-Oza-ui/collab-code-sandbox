@@ -8,18 +8,17 @@ import RoomPage from './RoomPage'
 
 vi.mock('@monaco-editor/react', async () => {
   const React = await import('react')
-  return {
-    default: ({ options, onMount }: any) => {
-      React.useEffect(() => {
-        onMount?.({
-          getModel: () => ({}),
-          updateOptions: vi.fn(),
-          deltaDecorations: vi.fn().mockReturnValue([]),
-        })
-      }, [])
-      return <div data-testid="mock-monaco" data-readonly={String(Boolean(options?.readOnly))} />
-    },
+  function MockMonacoEditor({ options, onMount }: any) {
+    React.useEffect(() => {
+      onMount?.({
+        getModel: () => ({}),
+        updateOptions: vi.fn(),
+        deltaDecorations: vi.fn().mockReturnValue([]),
+      })
+    }, [])
+    return <div data-testid="mock-monaco" data-readonly={String(Boolean(options?.readOnly))} />
   }
+  return { default: MockMonacoEditor }
 })
 
 vi.mock('y-monaco', () => ({

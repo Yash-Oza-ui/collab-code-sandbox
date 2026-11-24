@@ -85,13 +85,21 @@ async function run() {
   const readerCtrl = await connectControl(roomId, readerSession, 'Reader')
 
   // Host creates solver.py (Host owns it)
+  // Host creates solver.py (Host owns it) and approves it
   const createSolver = await jsonReq(`/v1/rooms/${roomId}/modules`, {
     method: 'POST',
-    headers: { 'X-Session-Id': hostSession, 'X-Owner-Token': ownerToken },
+    headers: { 'X-Session-Id': hostSession },
     body: JSON.stringify({ name: 'solver.py' }),
   })
-  assert.equal(createSolver.status, 201)
+  assert.equal(createSolver.status, 202)
   const solverId = createSolver.data.module_id
+
+  const approveSolver = await jsonReq(`/v1/rooms/${roomId}/modules/${solverId}/approve`, {
+    method: 'POST',
+    headers: { 'X-Session-Id': hostSession, 'X-Owner-Token': ownerToken },
+    body: JSON.stringify({}),
+  })
+  assert.equal(approveSolver.status, 200)
 
   // Writer requests helper.py and Host approves with Writer as owner (so Host does NOT have write access)
   const reqHelper = await jsonReq(`/v1/rooms/${roomId}/modules`, {
