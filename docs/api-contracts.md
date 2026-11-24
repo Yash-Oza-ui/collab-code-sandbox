@@ -772,9 +772,17 @@ The shape returned by the module endpoints and carried by `module-updated`:
   "runnable": true,
   "is_entry": false,
   "version": 4,
-  "pending": false
+  "pending": false,
+  "dirty": false,
+  "saved_by": {
+    "member_id": "m_4b19d2",
+    "display_name": "Ada"
+  },
+  "saved_at": "2026-11-24T01:20:00Z"
 }
 ```
+
+Before the first save, a module has `version: 0`, `saved_by: null`, `saved_at: null`, `dirty: false`.
 
 `owner_member_id` and `writers` are **public `member_id`s** (V2.3), never `session_id`s. `writers` is the list of members granted write access besides the owner. `pending` is `true` while a create request awaits Host approval. While it is pending, `owner_member_id` is the requester; the approval confirms it or sets another member (FR21.2).
 
@@ -828,6 +836,12 @@ Every module change is pushed to the room as a `module-updated` control message 
   "is_entry": false,
   "version": 4,
   "pending": false,
+  "dirty": false,
+  "saved_by": {
+    "member_id": "m_4b19d2",
+    "display_name": "Ada"
+  },
+  "saved_at": "2026-11-24T01:20:00Z",
   "deleted": false
 }
 ```
@@ -1443,7 +1457,6 @@ A malformed `audience` (V2.10) is also `INVALID_MESSAGE`. The new internal calls
 **Not decided in version 2.** These are listed so that nobody assumes they are covered:
 
 - Host controls other than modules, the Observer role (V2.17), remove / re-admit / regenerate link (V2.18), Run control (V2.20) and Pair edit access (V2.21) have no message or endpoint yet: join approval (FR9.3), the AI switch (FR35.1), transferring the Host role (FR31.1), export (FR33) and deleting a room (FR32). They need a contract entry before the stories that build them.
-- Reassigning the modules a removed member owned, and pruning a retired `member_id` from `writers` (V2.6, V2.18). Deferred to US-42.
 - What a run does with a module that has never been saved (FR24.1, FR25.1).
 - A joiner syncs from a connected writer: a read-only peer's sync step 2 is dropped (V2.12). If no writer is connected, a late joiner receives nothing. To be checked when the relay is built.
 - More than one file in a Pair mode `inline` source. Version 2 allows exactly one (FR18).
@@ -1543,8 +1556,9 @@ Rules:
 1. The Host cannot remove themselves and cannot remove another Host — either is `422 INVALID_REQUEST`.
 2. An unknown `member_id` is `404 MEMBER_NOT_FOUND`.
 3. The block holds until the Host re-admits that member (below) or regenerates the link.
-
-4. **Ownership and access cleanup on removal (US-42, FR21.5).** As part of the same atomic removal step, every module owned by the removed member is reassigned to the current Host by setting `owner_member_id` to the Host's `member_id`. The Host keeps ownership until an explicit transfer (US-41); ownership never returns automatically to the removed member. The removed member's `member_id` is removed from the `writers` list of every module, and their pending module requests are deleted. Send `module-updated` for every changed module. No request or run may observe a module without exactly one owner. A voluntary leave or temporary disconnect does not transfer ownership; only Host removal does. Pair mode has no modules, so nothing changes there.
+4. **Ownership and access cleanup on removal (US-42, FR21.5).** As part of the same atomic removal step, every module owned by the removed member is reassigned to the current Host by setting `owner_member_id` to the Host's `member_id`. The Host keeps ownership until an explicit transfer (US-41); ownership never returns automatically to the removed member. The removed member's `member_id` is removed from the `writers` list of every module, and their pending module requests are deleted. Send `module-updated` for every changed module (`docs/examples/v2-module-updated-owner-transfer.json`). Pair mode has no modules, so nothing changes there.
+5. **One step.** Steps 1–3 above and the cleanup in rule 4 run as a single step under the server's module lock. A module request that races the removal — a Host approval (US-40), an ownership transfer (US-41), a write-access grant or revoke (US-43), or a module list — runs either completely before it or completely after it, so no request or run can see the member gone from the room while still owning or writing a module, or a module with zero or two owners (FR21.3).
+6. **Leaving is not removal.** FR21.5 names removal only. A member who leaves on their own, closes the tab, or is disconnected keeps their modules and write access, so they find them again when they come back; only a Host removal moves ownership.
 
 ### List removed members
 
@@ -2055,9 +2069,9 @@ Response `200 OK` (`docs/examples/v2-module-save-response.json`) — also pushed
 ### 2. Rules, dirty flag, and errors
 
 1. **Permission:** Only `owner_member_id` or a member in `writers` (on a non-pending module) may save. Anyone else — including the Host without write access and an Observer — is refused with `403 NOT_MODULE_WRITER`.
-2. **Refusals:** Unknown `module_id` returns `404 MODULE_NOT_FOUND`; Pair mode, pending module, or missing/non-string `text` returns `422 INVALID_REQUEST`; oversized `text` returns `409 LIMIT_REACHED` (US-63, V2.12).
+2. **Refusals:** Missing or malformed `X-Session-Id` returns `422 INVALID_REQUEST`; an unknown `X-Session-Id` returns `404 SESSION_NOT_FOUND` (V2.6, V2.11). Unknown `module_id` returns `404 MODULE_NOT_FOUND`; Pair mode, pending module, or missing/non-string `text` returns `422 INVALID_REQUEST`; oversized `text` (UTF-8 byte length checked against `app.room.limits.max-module-size-bytes`) returns `409 LIMIT_REACHED` (US-63, V2.12).
 3. **Monotonic versions:** Each save increments `version` (`1, 2, 3, …`, never reused), stores the exact `text`, and records `saved_by` (`{ member_id, display_name }`) and `saved_at` (RFC 3339 UTC). Saving twice in a row with no edits is harmless and creates a new version.
-4. **Dirty indicator (`dirty`):** Starts `false`. When `sync-service` relays an accepted Yjs sync change frame on the module's document socket (CR13 — without parsing CRDT content), it sets `dirty: true` and broadcasts `module-updated` if `dirty` changed from `false` to `true`. Saving clears `dirty` to `false` and broadcasts `module-updated`. Because the relay does not inspect CRDT text, undoing back to the saved text may keep `dirty: true` until the next save.
+4. **Dirty indicator (`dirty`):** Starts `false`. Everyone who can see the module list sees the dot. When `sync-service` forwards an accepted update frame (first two bytes `0 2`) for the module's document (CR13 — without parsing CRDT content, and excluding `0 1` sync step 2), it sets `dirty: true` and broadcasts `module-updated` if `dirty` changed from `false` to `true`. Saving clears `dirty` to `false` and broadcasts `module-updated`. Because the relay does not inspect CRDT text, undoing back to the saved text may keep `dirty: true` until the next save; also, an edit that arrives after the client read the text but before the save is processed is cleared by the save, so the dot can disappear while the live text is newer than the saved one.
 5. **Privacy & lifecycle:** Saved text is never logged (NFR8.2) and is deleted with the room (`Room.clearSensitiveState()`, FR32 / US-56).
 
 ## US-56: Internal room-ended notification (Proposed — awaiting execution-service and AI-ML owners)
@@ -2129,6 +2143,8 @@ Success returns `200 OK` and `{"room_id":"Zq8-Lw2Ef6Th0Yx4Rn7JbA","status":"clea
 | v2 (edit access) | Nov 2026 | V2.21 added (US-36): `PATCH /v1/rooms/{room_id}/members/{member_id}/edit-access` gives or takes back edit access in Pair mode (FR19.1). Edit access controls apply only in Pair mode (Open mode refuses with `422 INVALID_REQUEST`). Host access cannot be changed (`422`) and Observers cannot have edit access (`422`). Broadcasts updated roster on change. |
 | v2 (edit request) | 20 Nov 2026 | V2.22 added (US-38): control-socket `request-edit-access` / `edit-access-requested` / `edit-access-responded` / `edit-access-request-cleared` and Host-only `POST /v1/rooms/{room_id}/edit-requests/{member_id}/approve` and `/decline` in Pair mode (FR19.3). Reuses `RoomService.setEditAccess` (V2.21). Edit requests removed from V2.15 undecided list. |
 | v2 (audit log) | 22 Nov 2026 | V2.23 added (US-58): `GET /v1/rooms/{room_id}/audit-log` and control-socket `audit-entry` push for role, edit access, module write access, and run permission changes (FR34). Bounded in-memory store; deleted with room; server-written only. Audit log removed from V2.15 undecided list. |
+=======
+| v2 (module owner on removal) | 23 Nov 2026 | V2.18 rules 4–6 (US-42, FR21.5): Host removal moves the removed member's modules to the current Host, revokes their write access and deletes their pending requests in the same single step as the removal; a racing approval, transfer, grant or list sees either all or none of it. Leaving or disconnecting keeps ownership. Example `v2-module-updated-owner-transfer.json`. Module reassignment removed from the V2.15 undecided list. |
 | v2 (save module) | 24 Nov 2026 | V2.24 added (US-45): `POST /v1/rooms/{room_id}/modules/{module_id}/save` body `{ "text" }`, `saved_by` / `saved_at` / `dirty` fields on module objects and `module-updated`, and `NOT_MODULE_WRITER` in V2.12 (FR24.1, FR24.2). |
 
 ### Runner infrastructure error (v1 proposal addition)

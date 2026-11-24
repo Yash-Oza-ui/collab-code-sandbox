@@ -29,18 +29,21 @@ public final class ModuleRecord {
     public String name() { return name; }
     public String ownerMemberId() { return ownerMemberId; }
     public Set<String> writers() { return writers; }
+
     public synchronized boolean addWriter(String memberId) {
         if (memberId == null || memberId.isBlank()) {
             return false;
         }
         return writers.add(memberId);
     }
+
     public synchronized boolean removeWriter(String memberId) {
         if (memberId == null) {
             return false;
         }
         return writers.remove(memberId);
     }
+
     public boolean runnable() { return runnable; }
     public void setRunnable(boolean runnable) { this.runnable = runnable; }
     public boolean isEntry() { return isEntry; }
@@ -60,7 +63,20 @@ public final class ModuleRecord {
         }
     }
 
+    /**
+     * US-42: Transfer ownership of an existing module.
+     * Does not change its pending status, content,
+     * writers, runnable status, entry status or version.
+     */
+    public synchronized void transferOwnership(String newOwnerMemberId) {
+        if (newOwnerMemberId == null || newOwnerMemberId.isBlank()) {
+            throw new IllegalArgumentException("INVALID_OWNER");
+        }
+        this.ownerMemberId = newOwnerMemberId;
+    }
+
     public boolean canEdit(String memberId) {
-        return !pending && memberId != null && (ownerMemberId.equals(memberId) || writers.contains(memberId));
+        return !pending && memberId != null
+                && (ownerMemberId.equals(memberId) || writers.contains(memberId));
     }
 }
