@@ -151,6 +151,7 @@ async function main() {
   await waitFor(firstOfType(guestCtl, 'joined'), 'guest joined')
   const hostDoc = await connectDoc(roomId, hostSession)
   const guestDoc = await connectDoc(roomId, guestSession)
+  await sleep(150)
 
   // 1. A normal update from the participant is rejected and not forwarded.
   guestDoc.socket.send(canonicalUpdate)
@@ -204,6 +205,7 @@ async function main() {
   const peerId = (await waitFor(firstOfType(peer2Ctl, 'joined'), 'peer2 joined')).member_id
   const host2Doc = await connectDoc(room2, host2)
   const peer2Doc = await connectDoc(room2, peer2)
+  await sleep(150)
 
   peer2Doc.socket.send(canonicalUpdate)
   await waitFor(() => host2Doc.binaries.find((b) => sameBytes(b, canonicalUpdate)), 'peer edit reaches host (access on)')
