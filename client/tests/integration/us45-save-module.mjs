@@ -188,7 +188,7 @@ async function run() {
   // Pair mode -> 422 INVALID_REQUEST
   const createPair = await jsonReq('/v1/rooms', {
     method: 'POST',
-    body: JSON.stringify({ mode: 'pair', preset: 'debug_together', language: 'python' }),
+    body: JSON.stringify({ mode: 'pair', preset: 'debug_together' }),
   })
   assert.equal(createPair.status, 201)
   const pairHost = randomUUID()
