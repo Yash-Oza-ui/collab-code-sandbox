@@ -192,7 +192,7 @@ async function run() {
   })
   assert.equal(createPair.status, 201)
   const pairHost = randomUUID()
-  await connectControl(createPair.data.room_id, pairHost, 'Host', createPair.data.owner_token)
+  const pairCtrl = await connectControl(createPair.data.room_id, pairHost, 'Host', createPair.data.owner_token)
   const pairSave = await jsonReq(`/v1/rooms/${createPair.data.room_id}/modules/mod_any/save`, {
     method: 'POST',
     headers: { 'X-Session-Id': pairHost },
@@ -204,7 +204,9 @@ async function run() {
   hostCtrl.ws.close()
   writerCtrl.ws.close()
   readerCtrl.ws.close()
+  pairCtrl.ws.close()
   console.log('US-45 integration test passed!')
+  process.exit(0)
 }
 
 run().catch((err) => {
