@@ -387,6 +387,9 @@ export interface ModuleUpdatedMessage {
   version?: number
   pending?: boolean
   deleted?: boolean
+  dirty?: boolean
+  saved_by?: { member_id: string; display_name: string } | null
+  saved_at?: string | null
   [key: string]: unknown
 }
 

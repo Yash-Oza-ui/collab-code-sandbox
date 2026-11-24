@@ -1,6 +1,7 @@
 package com.collabcode.syncservice.handler;
 
 import com.collabcode.syncservice.module.ModuleService;
+import com.collabcode.syncservice.module.ModuleRecord;
 import com.collabcode.syncservice.room.Member;
 import com.collabcode.syncservice.room.Role;
 import com.collabcode.syncservice.room.Room;
@@ -8,6 +9,7 @@ import com.collabcode.syncservice.room.RoomMode;
 import com.collabcode.syncservice.room.RoomRegistry;
 import com.collabcode.syncservice.room.RoomService;
 import com.collabcode.syncservice.room.RoomStore;
+import com.collabcode.syncservice.room.RoomMessages;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -385,6 +387,22 @@ public class DocumentHandler extends AbstractWebSocketHandler {
             }
         }
 
+        // Mark Open-mode module dirty on an accepted Yjs sync update frame (US-45, FR24.2)
+        if (!isAwareness && isDocumentChange(bytes)
+             && docId != null && moduleService.markDirty(roomId, docId)) {
+            ModuleRecord dirtyModule = moduleService.find(roomId, docId);
+            if (dirtyModule != null) {
+                String updatedJson = objectMapper.writeValueAsString(RoomMessages.moduleUpdated(dirtyModule, false));
+                for (WebSocketSession ctrlSession : controlRegistry.getJoinedControlSessions(roomId)) {
+                    if (ctrlSession != null && ctrlSession.isOpen()) {
+                        synchronized (ctrlSession) {
+                            ctrlSession.sendMessage(new TextMessage(updatedJson));
+                        }
+                    }
+                }
+            }
+        }
+        
         // Echo awareness frames back to the sender (lone-client heartbeat)
         if (isAwareness) {
             sendBinaryBytes(session, bytes);

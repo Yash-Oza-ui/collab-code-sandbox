@@ -15,6 +15,8 @@ export interface WorkspacePanelProps {
   onRequestModule?: (name: string) => Promise<void> | void
   onApproveModule?: (moduleId: string, ownerMemberId?: string) => Promise<void> | void
   onDeclineModule?: (moduleId: string) => Promise<void> | void
+  onSaveModule?: (moduleId: string) => void
+  savingModuleId?: string | null
   onToggleRunnable?: (moduleId: string, runnable: boolean) => Promise<void> | void
   onSetEntry?: (moduleId: string) => Promise<void> | void
   onGrantWriteAccess?: (moduleId: string, memberId: string) => Promise<void> | void
@@ -47,6 +49,8 @@ export default function WorkspacePanel({
   isCreating = false,
   roster = [],
   myMemberId,
+  onSaveModule,
+  savingModuleId,
 }: WorkspacePanelProps) {
   const [newModuleName, setNewModuleName] = useState('')
   const [requestModuleName, setRequestModuleName] = useState('')
@@ -144,6 +148,16 @@ export default function WorkspacePanel({
                     aria-current={isActive ? 'true' : undefined}
                   >
                     <span className="module-name">{m.name}</span>
+                    {m.dirty && (
+                      <span
+                        className="module-dirty-dot"
+                        data-testid={`dirty-dot-${m.module_id}`}
+                        aria-label="Unsaved changes"
+                        title="Unsaved changes"
+                      >
+                        ●
+                      </span>
+                    )}
                     <span
                       className={`module-badge ${isRunnable ? 'runnable-badge' : 'non-runnable-badge'}`}
                       data-testid={`runnable-badge-${m.module_id}`}
@@ -177,6 +191,19 @@ export default function WorkspacePanel({
 
                 {!m.pending && (
                   <div className="module-controls" data-testid={`module-controls-${m.module_id}`}>
+                    {!isObserver &&
+                      (isOwner || (Boolean(myMemberId) && (m.writers ?? []).includes(myMemberId!))) &&
+                      onSaveModule && (
+                        <button
+                          type="button"
+                          data-testid={`save-module-${m.module_id}`}
+                          className="module-save-btn"
+                          disabled={savingModuleId === m.module_id}
+                          onClick={() => onSaveModule(m.module_id)}
+                        >
+                          {savingModuleId === m.module_id ? 'Saving...' : 'Save'}
+                        </button>
+                      )}
                     {isOwner && onToggleRunnable && (
                       <button
                         type="button"

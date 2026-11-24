@@ -125,6 +125,16 @@ public final class RoomMessages {
         payload.put("is_entry", module.isEntry());
         payload.put("version", module.version());
         payload.put("pending", module.pending());
+        payload.put("dirty", module.dirty());
+        if (module.savedByMemberId() != null) {
+            Map<String, Object> savedBy = new LinkedHashMap<>();
+            savedBy.put("member_id", module.savedByMemberId());
+            savedBy.put("display_name", module.savedByDisplayName());
+            payload.put("saved_by", savedBy);
+        } else {
+            payload.put("saved_by", null);
+        }
+        payload.put("saved_at", module.savedAt() != null ? module.savedAt().toString() : null);
         payload.put("deleted", deleted);
         return payload;
     }

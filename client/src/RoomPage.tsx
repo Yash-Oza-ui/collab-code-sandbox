@@ -13,6 +13,7 @@ import {
   approveModule,
   createModule,
   declineModule,
+  saveModule,
   grantWriteAccess,
   listModules,
   listPendingModules,
@@ -194,6 +195,7 @@ export default function RoomPage(props: RoomPageProps = {}) {
   const activeModuleIdRef = useRef<string | null>(propDocId ?? null)
   const [workspaceError, setWorkspaceError] = useState<string | null>(null)
   const [isCreatingModule, setIsCreatingModule] = useState(false)
+  const [savingModuleId, setSavingModuleId] = useState<string | null>(null)
   const [workspaceLanguage, setWorkspaceLanguage] = useState<string | undefined>(undefined)
   const [role, setRole] = useState<string | null>(null)
   const [myMemberId, setMyMemberId] = useState<string | null>(null)
@@ -1341,6 +1343,39 @@ export default function RoomPage(props: RoomPageProps = {}) {
     [roomId, workspaceLanguage, wsOptions?.fetchFn, wsOptions?.syncWsUrl, getModuleDoc, bindEditorToDoc],
   )
 
+  const handleSaveModule = useCallback(
+    async (moduleId: string) => {
+      if (!roomId) return
+      setWorkspaceError(null)
+      setSavingModuleId(moduleId)
+      const currentSessionId =
+        sessionIdRef.current ?? wsOptions?.sessionId ?? getCollabSessionId()
+      const syncBase = wsOptions?.syncWsUrl
+        ? wsOptions.syncWsUrl.replace(/^ws/, 'http').replace(/\/ws\/rooms.*$/, '')
+        : undefined
+      const text = getModuleDoc(moduleId).getText('monaco').toString()
+      const res = await saveModule(
+        {
+          roomId,
+          sessionId: currentSessionId,
+          baseUrl: syncBase,
+          fetchFn: wsOptions?.fetchFn,
+        },
+        moduleId,
+        text,
+      )
+      setSavingModuleId(null)
+      if (res.ok) {
+        setWorkspaceModules((prev) =>
+          prev.map((m) => (m.module_id === moduleId ? { ...m, ...res.data } : m)),
+        )
+      } else {
+        setWorkspaceError(res.error)
+      }
+    },
+    [roomId, wsOptions, getModuleDoc],
+  )
+
   const handleRequestModule = useCallback(
     async (name: string) => {
       if (!roomId) return
@@ -1881,6 +1916,8 @@ export default function RoomPage(props: RoomPageProps = {}) {
           isCreating={isCreatingModule}
           roster={roster}
           myMemberId={myMemberId}
+          onSaveModule={handleSaveModule}
+          savingModuleId={savingModuleId}
         />
       )}
       <section className="room-participants" aria-label="Room participants">
