@@ -1,7 +1,10 @@
 package com.collabcode.syncservice.internal;
 
+import com.collabcode.syncservice.module.ModuleRecord;
+import com.collabcode.syncservice.module.ModuleService;
 import com.collabcode.syncservice.room.Member;
 import com.collabcode.syncservice.room.Room;
+import com.collabcode.syncservice.room.RoomMode;
 import com.collabcode.syncservice.room.RoomRegistry;
 import com.collabcode.syncservice.room.RoomService;
 import com.collabcode.syncservice.room.RoomStore;
@@ -76,13 +79,23 @@ public class InternalMessageController {
     private final RoomStore roomStore;
     private final RoomService roomService;
     private final RunRecordStore runRecordStore;
+    private final ModuleService moduleService;
 
     public InternalMessageController(
             RoomRegistry registry,
             ObjectMapper objectMapper,
             RoomStore roomStore,
             RoomService roomService) {
-        this(registry, objectMapper, roomStore, roomService, null);
+        this(registry, objectMapper, roomStore, roomService, null, null);
+    }
+
+    public InternalMessageController(
+            RoomRegistry registry,
+            ObjectMapper objectMapper,
+            RoomStore roomStore,
+            RoomService roomService,
+            RunRecordStore runRecordStore) {
+        this(registry, objectMapper, roomStore, roomService, runRecordStore, null);
     }
 
     @Autowired
@@ -91,12 +104,14 @@ public class InternalMessageController {
             ObjectMapper objectMapper,
             RoomStore roomStore,
             RoomService roomService,
-            @Autowired(required = false) RunRecordStore runRecordStore) {
+            @Autowired(required = false) RunRecordStore runRecordStore,
+            @Autowired(required = false) ModuleService moduleService) {
         this.registry = registry;
         this.objectMapper = objectMapper;
         this.roomStore = roomStore;
         this.roomService = roomService;
         this.runRecordStore = runRecordStore;
+        this.moduleService = moduleService;
     }
 
     /**
@@ -147,6 +162,187 @@ public class InternalMessageController {
         resp.put("ai_enabled", room.isAiEnabled());
 
         return ResponseEntity.ok(resp);
+    }
+
+    /**
+     * Snapshot read for saved source execution (T-17 V2.8, US-47, US-48).
+     *
+     * POST /internal/rooms/{roomId}/snapshot
+     * Header: X-Internal-Token: <token>
+     * Body: { "source": { "kind": "saved", "target": "module"|"entry", ... } }
+     */
+    @PostMapping(value = "/rooms/{roomId}/snapshot",
+                 produces = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<Map<String, Object>> getSnapshot(
+            @PathVariable String roomId,
+            @RequestHeader(value = "X-Internal-Token", required = false) String token,
+            @RequestBody(required = false) Map<String, Object> body) {
+
+        // 1. Auth check (V2.8, V2.14)
+        if (internalApiToken == null || internalApiToken.isBlank() || !internalApiToken.equals(token)) {
+            log.warn("Internal endpoint: unauthorized snapshot lookup for room={}", roomId);
+            return error(HttpStatus.UNAUTHORIZED, "UNAUTHORIZED",
+                    "Missing or invalid internal token.", null);
+        }
+
+        // 2. Room existence and mode check
+        Room room = roomStore != null ? roomStore.get(roomId) : null;
+        if (room == null || room.isClosed()) {
+            return error(HttpStatus.NOT_FOUND, "ROOM_NOT_FOUND",
+                    "Room not found: " + roomId, null);
+        }
+        if (room.getMode() != RoomMode.OPEN) {
+            return error(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_REQUEST",
+                    "Saved snapshots are only supported in Open mode rooms.", null);
+        }
+
+        // 3. Body validation
+        if (body == null) {
+            return error(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_REQUEST",
+                    "Field 'source' is missing or invalid.", null);
+        }
+
+        Map<String, Object> sourceMap = null;
+        if (body.get("source") instanceof Map<?, ?> sm) {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> typed = (Map<String, Object>) sm;
+            sourceMap = typed;
+        } else if ("saved".equals(body.get("kind"))) {
+            sourceMap = body;
+        }
+
+        if (sourceMap == null) {
+            return error(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_REQUEST",
+                    "Field 'source' is missing or invalid.", null);
+        }
+
+        String kind = (String) sourceMap.get("kind");
+        if (!"saved".equals(kind)) {
+            return error(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_REQUEST",
+                    "Source kind must be 'saved'.", null);
+        }
+
+        String target = (String) sourceMap.get("target");
+        if (!"module".equals(target) && !"entry".equals(target)) {
+            return error(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_REQUEST",
+                    "Target must be 'module' or 'entry'.", null);
+        }
+
+        if (moduleService == null) {
+            return error(HttpStatus.SERVICE_UNAVAILABLE, "ROOM_SERVICE_UNAVAILABLE",
+                    "Module service is unavailable.", null);
+        }
+
+        if ("module".equals(target)) {
+            String moduleId = (String) sourceMap.get("module_id");
+            if (moduleId == null || moduleId.isBlank()) {
+                return error(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_REQUEST",
+                        "Field 'module_id' is required when target is 'module'.", null);
+            }
+
+            ModuleRecord module = moduleService.find(roomId, moduleId);
+            if (module == null || module.pending()) {
+                return error(HttpStatus.NOT_FOUND, "MODULE_NOT_FOUND",
+                        "Module not found: " + moduleId, null);
+            }
+            if (!module.runnable()) {
+                return error(HttpStatus.UNPROCESSABLE_ENTITY, "MODULE_NOT_RUNNABLE",
+                        "Module '" + module.name() + "' is not marked runnable.", null);
+            }
+            if (module.version() == 0 || module.savedAt() == null) {
+                return error(HttpStatus.UNPROCESSABLE_ENTITY, "MODULE_NOT_SAVED",
+                        "Module '" + module.name() + "' has never been saved. Save it first.", null);
+            }
+
+            Map<String, Object> moduleEntry = buildSnapshotModule(room, module);
+            Map<String, Object> resp = new LinkedHashMap<>();
+            resp.put("room_id", roomId);
+            resp.put("entry", module.name());
+            resp.put("modules", List.of(moduleEntry));
+            return ResponseEntity.ok(resp);
+        } else {
+            // target: "entry"
+            ModuleRecord entryModule = moduleService.findEntryModule(roomId);
+            if (entryModule == null) {
+                return error(HttpStatus.UNPROCESSABLE_ENTITY, "NO_ENTRY_FILE",
+                        "No entry file is set.", null);
+            }
+            if (entryModule.version() == 0 || entryModule.savedAt() == null) {
+                return error(HttpStatus.UNPROCESSABLE_ENTITY, "MODULE_NOT_SAVED",
+                        "Module '" + entryModule.name() + "' has never been saved. Save it first.", null);
+            }
+
+            Object moduleIdsObj = sourceMap.get("module_ids");
+            List<ModuleRecord> modulesToInclude = new ArrayList<>();
+            modulesToInclude.add(entryModule);
+
+            if ("all".equals(moduleIdsObj)) {
+                List<ModuleRecord> allApproved = moduleService.getApprovedModules(roomId);
+                for (ModuleRecord m : allApproved) {
+                    if (m.version() == 0 || m.savedAt() == null) {
+                        return error(HttpStatus.UNPROCESSABLE_ENTITY, "MODULE_NOT_SAVED",
+                                "Module '" + m.name() + "' has never been saved. Save it first.", null);
+                    }
+                    if (!m.moduleId().equals(entryModule.moduleId())) {
+                        modulesToInclude.add(m);
+                    }
+                }
+            } else if (moduleIdsObj instanceof List<?> idList) {
+                for (Object idObj : idList) {
+                    if (!(idObj instanceof String mid) || mid.isBlank()) {
+                        return error(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_REQUEST",
+                                "Field 'module_ids' must contain non-blank strings.", null);
+                    }
+                    ModuleRecord m = moduleService.find(roomId, mid);
+                    if (m == null || m.pending()) {
+                        return error(HttpStatus.NOT_FOUND, "MODULE_NOT_FOUND",
+                                "Module not found: " + mid, null);
+                    }
+                    if (m.version() == 0 || m.savedAt() == null) {
+                        return error(HttpStatus.UNPROCESSABLE_ENTITY, "MODULE_NOT_SAVED",
+                                "Module '" + m.name() + "' has never been saved. Save it first.", null);
+                    }
+                    if (!m.moduleId().equals(entryModule.moduleId()) && !modulesToInclude.contains(m)) {
+                        modulesToInclude.add(m);
+                    }
+                }
+            } else {
+                return error(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_REQUEST",
+                        "Field 'module_ids' must be 'all' or a list of module IDs.", null);
+            }
+
+            List<Map<String, Object>> moduleList = modulesToInclude.stream()
+                    .map(m -> buildSnapshotModule(room, m))
+                    .toList();
+
+            Map<String, Object> resp = new LinkedHashMap<>();
+            resp.put("room_id", roomId);
+            resp.put("entry", entryModule.name());
+            resp.put("modules", moduleList);
+            return ResponseEntity.ok(resp);
+        }
+    }
+
+    private static Map<String, Object> buildSnapshotModule(Room room, ModuleRecord module) {
+        Member ownerMember = room.getMembers().get(module.ownerMemberId());
+        String ownerDisplayName = ownerMember != null ? ownerMember.getDisplayName() : module.ownerMemberId();
+        Map<String, Object> owner = new LinkedHashMap<>();
+        owner.put("member_id", module.ownerMemberId());
+        owner.put("display_name", ownerDisplayName);
+
+        Map<String, Object> savedBy = new LinkedHashMap<>();
+        savedBy.put("member_id", module.savedByMemberId());
+        savedBy.put("display_name", module.savedByDisplayName());
+
+        Map<String, Object> modEntry = new LinkedHashMap<>();
+        modEntry.put("module_id", module.moduleId());
+        modEntry.put("name", module.name());
+        modEntry.put("content", module.savedText());
+        modEntry.put("version", module.version());
+        modEntry.put("owner", owner);
+        modEntry.put("saved_by", savedBy);
+        modEntry.put("saved_at", module.savedAt() != null ? module.savedAt().toString() : null);
+        return modEntry;
     }
 
     /**

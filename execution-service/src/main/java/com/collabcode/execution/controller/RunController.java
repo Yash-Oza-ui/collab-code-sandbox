@@ -182,6 +182,8 @@ public class RunController {
                 throw new ModuleNotFoundException(req.getRequest_id(), e.getMessage());
             } catch (ModuleNotRunnableException e) {
                 throw new ModuleNotRunnableException(req.getRequest_id(), e.getMessage());
+            } catch (ModuleNotSavedException e) {
+                throw new ModuleNotSavedException(req.getRequest_id(), e.getMessage());
             } catch (NoEntryFileException e) {
                 throw new NoEntryFileException(req.getRequest_id(), e.getMessage());
             }

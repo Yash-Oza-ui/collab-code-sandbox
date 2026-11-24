@@ -192,6 +192,22 @@ public class GlobalExceptionHandler {
     }
 
     /**
+     * 422 – Module not saved (US-47, FR24.1, FR25.1).
+     */
+    @ExceptionHandler(ModuleNotSavedException.class)
+    public ResponseEntity<Map<String, Object>> handleModuleNotSaved(
+            ModuleNotSavedException ex) {
+
+        return errorResponse(
+                HttpStatus.UNPROCESSABLE_ENTITY,
+                ex.getRequestId(),
+                "MODULE_NOT_SAVED",
+                ex.getMessage(),
+                null
+        );
+    }
+
+    /**
      * 422 – No entry file set (T-17 V2.12).
      */
     @ExceptionHandler(NoEntryFileException.class)

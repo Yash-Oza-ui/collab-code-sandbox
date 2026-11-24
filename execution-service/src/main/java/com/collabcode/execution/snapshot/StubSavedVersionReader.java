@@ -1,7 +1,11 @@
 package com.collabcode.execution.snapshot;
 
+import com.collabcode.execution.exception.ModuleNotFoundException;
+import com.collabcode.execution.exception.ModuleNotRunnableException;
+import com.collabcode.execution.exception.ModuleNotSavedException;
 import com.collabcode.execution.exception.RoomServiceUnavailableException;
 import com.collabcode.execution.model.SavedSource;
+import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -14,6 +18,7 @@ import java.util.List;
  * Returns ROOM_SERVICE_UNAVAILABLE (503) when simulated failure is active.
  */
 @Component
+@Profile("stub-permissions | stub-snapshot")
 public class StubSavedVersionReader implements SavedVersionReader {
 
     private volatile boolean available = true;
@@ -47,6 +52,15 @@ public class StubSavedVersionReader implements SavedVersionReader {
 
         if ("module".equalsIgnoreCase(source.getTarget())) {
             String modId = source.getModule_id() != null ? source.getModule_id() : "mod_default";
+            if (modId.contains("not_runnable")) {
+                throw new ModuleNotRunnableException(null, "Module '" + modId + "' is not marked runnable.");
+            }
+            if (modId.contains("not_saved") || modId.contains("never_saved")) {
+                throw new ModuleNotSavedException(null, "Module '" + modId + "' has never been saved. Save it first.");
+            }
+            if (modId.contains("not_found")) {
+                throw new ModuleNotFoundException(null, "Module '" + modId + "' not found.");
+            }
             SnapshotModule mod = new SnapshotModule(
                     modId,
                     "main.py",

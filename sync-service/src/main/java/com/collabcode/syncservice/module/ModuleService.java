@@ -607,4 +607,30 @@ public class ModuleService {
         random.nextBytes(bytes);
         return "mod_" + Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
     }
+
+    /** Returns all approved (non-pending) modules for an open room. */
+    public synchronized List<ModuleRecord> getApprovedModules(String roomId) {
+        requireOpenRoom(roomId);
+        Map<String, ModuleRecord> modules = byRoom.get(roomId);
+        if (modules == null) {
+            return List.of();
+        }
+        return modules.values().stream()
+                .filter(m -> !m.pending())
+                .sorted(Comparator.comparing(ModuleRecord::moduleId))
+                .toList();
+    }
+
+    /** Returns the entry module for an open room, or null if none is designated. */
+    public synchronized ModuleRecord findEntryModule(String roomId) {
+        requireOpenRoom(roomId);
+        Map<String, ModuleRecord> modules = byRoom.get(roomId);
+        if (modules == null) {
+            return null;
+        }
+        return modules.values().stream()
+                .filter(m -> !m.pending() && m.isEntry())
+                .findFirst()
+                .orElse(null);
+    }
 }
