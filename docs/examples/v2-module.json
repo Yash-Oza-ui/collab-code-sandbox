@@ -6,5 +6,11 @@
   "runnable": true,
   "is_entry": false,
   "version": 4,
-  "pending": false
+  "pending": false,
+  "dirty": false,
+  "saved_by": {
+    "member_id": "m_4b19d2",
+    "display_name": "Ada"
+  },
+  "saved_at": "2026-11-24T01:20:00Z"
 }
