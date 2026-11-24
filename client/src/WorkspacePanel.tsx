@@ -224,17 +224,6 @@ export default function WorkspacePanel({
                         Set as entry
                       </button>
                     )}
-                    {(isOwner || (myMemberId !== null && (m.writers ?? []).includes(myMemberId!))) && onSaveModule && (
-                      <button
-                        type="button"
-                        data-testid={`save-module-${m.module_id}`}
-                        className="module-save-btn"
-                        disabled={savingModuleId === m.module_id}
-                        onClick={() => onSaveModule(m.module_id)}
-                      >
-                        {savingModuleId === m.module_id ? 'Saving...' : 'Save'}
-                      </button>
-                    )}
                   </div>
                 )}
 
