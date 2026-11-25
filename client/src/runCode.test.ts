@@ -8,6 +8,7 @@ import {
   getLanguageOption,
   isLanguageSupported,
   parseRunResultFrame,
+  shareRun,
   validateRunResponse,
 } from './runCode'
 
@@ -640,5 +641,99 @@ describe('parseRunResultFrame (US-08, T-17 section 3.6)', () => {
     expect(parseRunResultFrame(frame, 'some-other-room').valid).toBe(false)
     expect(parseRunResultFrame({ ...frame, stdout: undefined }, 'room-demo-01').valid).toBe(false)
     expect(parseRunResultFrame(null, 'room-demo-01').valid).toBe(false)
+  })
+})
+
+describe('shareRun (US-49 / T-17 V2.10)', () => {
+  const requestId = 'd7a2f5c8-1e39-4b60-a4c2-9f8e1d7b3a06'
+  const sessionId = '2f8d6b14-9c03-4e7a-b5d1-6a0e3c9f7d28'
+
+  it('successfully shares a private run result (200 OK)', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ request_id: requestId, visibility: 'room' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    )
+
+    const result = await shareRun({
+      executionApiUrl: 'http://localhost:8082',
+      requestId,
+      sessionId,
+      fetchFn,
+    })
+
+    expect(result.ok).toBe(true)
+    expect(result.status).toBe(200)
+    expect(result.data?.visibility).toBe('room')
+    expect(fetchFn).toHaveBeenCalledWith(
+      'http://localhost:8082/v1/runs/d7a2f5c8-1e39-4b60-a4c2-9f8e1d7b3a06/share',
+      expect.objectContaining({
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: sessionId }),
+      }),
+    )
+  })
+
+  it('handles NOT_RUNNER (403) from execution-service', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          request_id: requestId,
+          error: { code: 'NOT_RUNNER', message: 'Only the runner may share this run result.' },
+        }),
+        { status: 403, headers: { 'Content-Type': 'application/json' } },
+      ),
+    )
+
+    const result = await shareRun({
+      executionApiUrl: 'http://localhost:8082',
+      requestId,
+      sessionId,
+      fetchFn,
+    })
+
+    expect(result.ok).toBe(false)
+    expect(result.status).toBe(403)
+    expect(result.code).toBe('NOT_RUNNER')
+    expect(result.error).toBe('Only the runner may share this run result.')
+  })
+
+  it('handles RUN_NOT_FOUND (404) from execution-service', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          request_id: requestId,
+          error: { code: 'RUN_NOT_FOUND', message: 'Run was not found or has expired.' },
+        }),
+        { status: 404, headers: { 'Content-Type': 'application/json' } },
+      ),
+    )
+
+    const result = await shareRun({
+      executionApiUrl: 'http://localhost:8082',
+      requestId,
+      sessionId,
+      fetchFn,
+    })
+
+    expect(result.ok).toBe(false)
+    expect(result.status).toBe(404)
+    expect(result.code).toBe('RUN_NOT_FOUND')
+  })
+
+  it('handles network failure gracefully', async () => {
+    const fetchFn = vi.fn().mockRejectedValue(new Error('Network error'))
+
+    const result = await shareRun({
+      executionApiUrl: 'http://localhost:8082',
+      requestId,
+      sessionId,
+      fetchFn,
+    })
+
+    expect(result.ok).toBe(false)
+    expect(result.code).toBe('NETWORK_ERROR')
   })
 })

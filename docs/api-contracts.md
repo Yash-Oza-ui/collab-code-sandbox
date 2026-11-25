@@ -1207,7 +1207,7 @@ Response `200`:
 ```
 
 - execution-service compares the `session_id` with the session that ran it. A different session, or a session that is no longer in the room, gets `403 NOT_RUNNER`. A `request_id` it does not know, or no longer holds, gets `404 RUN_NOT_FOUND`.
-- If the result is already `room`, the answer is `200` and nothing is sent again.
+- If the result is already `room` (e.g. In Pair mode where every result has `visibility: "room"` by default under FR4.5, or a run that was already shared), the answer is `200` with `{"request_id": "<request_id>", "visibility": "room"}` and nothing is sent again. Sharing twice is harmless: the second call changes nothing and does not send the result twice.
 - Otherwise `visibility` becomes `room`, and execution-service sends to the whole room, in this order, the `run-result` (with `visibility: "room"`) and every `analysis-result` already produced for that run (NFR9). Nobody else has to approve (FR27). Sharing does not run the code again.
 - Analysis messages produced after the share go to the room, because they follow the run's current audience (CR08).
 - execution-service keeps each run's result and analysis messages while the run record exists (FR29, FR32; retention is FR15, still Provisional) so that a share can be sent.

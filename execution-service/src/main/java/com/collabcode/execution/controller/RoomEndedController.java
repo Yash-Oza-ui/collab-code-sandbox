@@ -1,5 +1,6 @@
 package com.collabcode.execution.controller;
 
+import com.collabcode.execution.store.RunResultStore;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
@@ -25,17 +26,24 @@ public class RoomEndedController {
     private final String token;
     private final String aiUrl;
     private final HttpClient http;
+    private final RunResultStore runResultStore;
 
     @Autowired
     public RoomEndedController(@Value("${app.internal.token:}") String token,
-                               @Value("${app.ai-ml-service.url:http://localhost:8000}") String aiUrl) {
-        this(token, aiUrl, HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build());
+                               @Value("${app.ai-ml-service.url:http://localhost:8000}") String aiUrl,
+                               @Autowired(required = false) RunResultStore runResultStore) {
+        this(token, aiUrl, HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build(), runResultStore);
     }
 
     RoomEndedController(String token, String aiUrl, HttpClient http) {
+        this(token, aiUrl, http, null);
+    }
+
+    RoomEndedController(String token, String aiUrl, HttpClient http, RunResultStore runResultStore) {
         this.token = token;
         this.aiUrl = aiUrl.replaceAll("/+$", "");
         this.http = http;
+        this.runResultStore = runResultStore;
     }
 
     @PostMapping("/internal/rooms/{roomId}/ended")
@@ -55,7 +63,10 @@ public class RoomEndedController {
             return ResponseEntity.unprocessableEntity().body(Map.of("error", "INVALID_REQUEST"));
         }
         try {
-            // Repeated DELETE is harmless; execution-service has no persistent per-room run store.
+            if (runResultStore != null) {
+                runResultStore.deleteByRoom(roomId);
+            }
+            // Repeated DELETE is harmless; execution-service cleans up in-memory run store and forwards to ai-ml-service.
             HttpRequest request = HttpRequest.newBuilder(URI.create(aiUrl + "/v1/rooms/" + roomId + "/state"))
                     .timeout(Duration.ofSeconds(3))
                     .header("X-Internal-Token", token)

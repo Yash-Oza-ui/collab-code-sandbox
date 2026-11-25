@@ -128,6 +128,38 @@ public class GlobalExceptionHandler {
     }
 
     /**
+     * 403 – Share requested by a session that did not run it or is no longer in the room (T-17 V2.10, V2.12).
+     */
+    @ExceptionHandler(NotRunnerException.class)
+    public ResponseEntity<Map<String, Object>> handleNotRunner(
+            NotRunnerException ex) {
+
+        return errorResponse(
+                HttpStatus.FORBIDDEN,
+                ex.getRequestId(),
+                "NOT_RUNNER",
+                ex.getMessage(),
+                null
+        );
+    }
+
+    /**
+     * 404 – Run not found or no longer held (T-17 V2.10, V2.12).
+     */
+    @ExceptionHandler(RunNotFoundException.class)
+    public ResponseEntity<Map<String, Object>> handleRunNotFound(
+            RunNotFoundException ex) {
+
+        return errorResponse(
+                HttpStatus.NOT_FOUND,
+                ex.getRequestId(),
+                "RUN_NOT_FOUND",
+                ex.getMessage(),
+                null
+        );
+    }
+
+    /**
      * 503 – Permission lookup or snapshot read from sync-service failed (T-17 V2.8, V2.11, V2.12).
      */
     @ExceptionHandler(RoomServiceUnavailableException.class)

@@ -43,15 +43,24 @@ public class AnalysisService {
     private final ObjectMapper objectMapper;
     private final HttpClient httpClient;
     private final ExecutorService executorService;
+    private final com.collabcode.execution.store.RunResultStore runResultStore;
 
     @Autowired
     public AnalysisService(
             AnalysisProperties properties,
             RoomBroadcastService broadcastService,
-            ObjectMapper objectMapper) {
+            ObjectMapper objectMapper,
+            @Autowired(required = false) com.collabcode.execution.store.RunResultStore runResultStore) {
         this(properties, broadcastService, objectMapper, HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(Math.max(1, properties.getTimeoutSeconds())))
-                .build(), Executors.newCachedThreadPool());
+                .build(), Executors.newCachedThreadPool(), runResultStore);
+    }
+
+    public AnalysisService(
+            AnalysisProperties properties,
+            RoomBroadcastService broadcastService,
+            ObjectMapper objectMapper) {
+        this(properties, broadcastService, objectMapper, null);
     }
 
     public AnalysisService(
@@ -60,11 +69,22 @@ public class AnalysisService {
             ObjectMapper objectMapper,
             HttpClient httpClient,
             ExecutorService executorService) {
+        this(properties, broadcastService, objectMapper, httpClient, executorService, null);
+    }
+
+    public AnalysisService(
+            AnalysisProperties properties,
+            RoomBroadcastService broadcastService,
+            ObjectMapper objectMapper,
+            HttpClient httpClient,
+            ExecutorService executorService,
+            com.collabcode.execution.store.RunResultStore runResultStore) {
         this.properties = properties;
         this.broadcastService = broadcastService;
         this.objectMapper = objectMapper;
         this.httpClient = httpClient;
         this.executorService = executorService;
+        this.runResultStore = runResultStore;
     }
 
     /**
@@ -294,7 +314,7 @@ public class AnalysisService {
                 );
 
                 if (emitted.compareAndSet(false, true)) {
-                    broadcastService.broadcastAnalysisResult(roomId, sessionId, visibility, message);
+                    emitAnalysisMessage(requestId, roomId, sessionId, visibility, message);
                 }
                 return message;
             }
@@ -373,10 +393,36 @@ public class AnalysisService {
         );
 
         if (emitted.compareAndSet(false, true)) {
-            broadcastService.broadcastAnalysisResult(roomId, sessionId, visibility, message);
+            emitAnalysisMessage(requestId, roomId, sessionId, visibility, message);
         }
 
         return message;
+    }
+
+    private void emitAnalysisMessage(
+            String requestId,
+            String roomId,
+            String sessionId,
+            String initialVisibility,
+            AnalysisResultMessage message) {
+        if (runResultStore != null) {
+            runResultStore.addAnalysisMessage(requestId, message);
+        }
+        String effectiveVisibility = initialVisibility;
+        if (runResultStore != null) {
+            String current = runResultStore.getVisibility(requestId);
+            if (current != null) {
+                effectiveVisibility = current;
+            }
+        }
+        if ("room".equalsIgnoreCase(effectiveVisibility)) {
+            broadcastService.broadcastAnalysisResult(roomId, null, "room", message);
+            if (runResultStore != null) {
+                runResultStore.get(requestId).ifPresent(r -> r.getRoomBroadcastAnalysisIds().add(message.getAnalysis_id()));
+            }
+        } else {
+            broadcastService.broadcastAnalysisResult(roomId, sessionId, "private", message);
+        }
     }
 
     private String mapTaskToEndpoint(String task) {

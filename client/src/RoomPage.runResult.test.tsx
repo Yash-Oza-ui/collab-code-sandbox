@@ -231,6 +231,24 @@ describe('RoomPage run-result delivery (US-08)', () => {
     expect(container!.querySelectorAll('[data-testid="run-stdout"]').length).toBe(1)
   })
 
+  it('updates visibility from private to room when shared frame arrives for the same request_id (US-49)', async () => {
+    await joinAs('Bob')
+    expect(q('run-output-preview')).toBeNull()
+
+    // Private run result arrives
+    await act(async () =>
+      controlSocket()?.receive(runResultFrame({ request_id: '99999999-9999-4999-8999-999999999999', visibility: 'private' })),
+    )
+    expect(q('run-output-visibility')?.textContent).toBe('Private')
+
+    // Same run is shared to room: visibility updates to 'Shared to room' without adding duplicate
+    await act(async () =>
+      controlSocket()?.receive(runResultFrame({ request_id: '99999999-9999-4999-8999-999999999999', visibility: 'room' })),
+    )
+    expect(q('run-output-visibility')?.textContent).toBe('Shared to room')
+    expect(container!.querySelectorAll('[data-testid="run-stdout"]').length).toBe(1)
+  })
+
   it('ignores a run-result for another room and a malformed run-result', async () => {
     await joinAs('Bob')
 

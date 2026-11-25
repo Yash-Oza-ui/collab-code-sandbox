@@ -320,4 +320,124 @@ describe('RunOutputPanel (T-11 / US-08)', () => {
       expect(el?.textContent).toContain('Time complexity estimated as O(n^2).')
     })
   })
+
+  describe('Run visibility and sharing (US-49 / FR27)', () => {
+    const privateResult: RunResponseData = {
+      request_id: '00000000-0000-4000-8000-000000000049',
+      room_id: 'room-us49',
+      language: 'python',
+      stdout: 'private output\n',
+      stderr: '',
+      exit_code: 0,
+      execution_time_ms: 25,
+      peak_memory_mb: 5.2,
+      timed_out: false,
+      oom_killed: false,
+      failure_kind: null,
+      output_truncated: false,
+      message: null,
+      compile_time_ms: null,
+      runner: { member_id: 'm_runner', display_name: 'Lin' },
+      ran_at: '2026-11-25T10:00:00.000Z',
+      visibility: 'private',
+    }
+
+    const roomResult: RunResponseData = {
+      ...privateResult,
+      visibility: 'room',
+    }
+
+    it('renders "Shared to room" badge and no share button for room visibility result', async () => {
+      container = document.createElement('div')
+      document.body.appendChild(container)
+      root = createRoot(container)
+      await act(async () => {
+        root?.render(
+          <RunOutputPanel
+            result={roomResult}
+            currentViewerMemberId="m_runner"
+            onShareRun={vi.fn()}
+          />,
+        )
+      })
+
+      const visEl = container.querySelector('[data-testid="run-output-visibility"]')
+      expect(visEl?.textContent).toBe('Shared to room')
+      expect(container.querySelector('[data-testid="share-run-btn"]')).toBeNull()
+    })
+
+    it('renders "Private" badge and "Share to room" button for runner viewing private result', async () => {
+      container = document.createElement('div')
+      document.body.appendChild(container)
+      root = createRoot(container)
+      const onShare = vi.fn().mockResolvedValue(undefined)
+
+      await act(async () => {
+        root?.render(
+          <RunOutputPanel
+            result={privateResult}
+            currentViewerMemberId="m_runner"
+            onShareRun={onShare}
+          />,
+        )
+      })
+
+      const visEl = container.querySelector('[data-testid="run-output-visibility"]')
+      expect(visEl?.textContent).toBe('Private')
+
+      const shareBtn = container.querySelector<HTMLButtonElement>('[data-testid="share-run-btn"]')
+      expect(shareBtn).not.toBeNull()
+      expect(shareBtn?.textContent).toBe('Share to room')
+
+      // Click button
+      await act(async () => {
+        shareBtn?.click()
+      })
+      expect(onShare).toHaveBeenCalledTimes(1)
+    })
+
+    it('does NOT render "Share to room" button when viewer is not the runner', async () => {
+      container = document.createElement('div')
+      document.body.appendChild(container)
+      root = createRoot(container)
+
+      await act(async () => {
+        root?.render(
+          <RunOutputPanel
+            result={privateResult}
+            currentViewerMemberId="m_other_user"
+            onShareRun={vi.fn()}
+          />,
+        )
+      })
+
+      expect(container.querySelector('[data-testid="share-run-btn"]')).toBeNull()
+    })
+
+    it('displays error notice when onShareRun fails', async () => {
+      container = document.createElement('div')
+      document.body.appendChild(container)
+      root = createRoot(container)
+      const onShare = vi.fn().mockRejectedValue(new Error('Share failed'))
+
+      await act(async () => {
+        root?.render(
+          <RunOutputPanel
+            result={privateResult}
+            currentViewerMemberId="m_runner"
+            onShareRun={onShare}
+          />,
+        )
+      })
+
+      const shareBtn = container.querySelector<HTMLButtonElement>('[data-testid="share-run-btn"]')
+      await act(async () => {
+        shareBtn?.click()
+      })
+
+      const errEl = container.querySelector('[data-testid="run-share-error"]')
+      expect(errEl).not.toBeNull()
+      expect(errEl?.textContent).toBe('Could not share run result. Try again.')
+    })
+  })
 })
