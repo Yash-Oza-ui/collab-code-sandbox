@@ -416,7 +416,7 @@ public class AnalysisService {
             }
         }
         if ("room".equalsIgnoreCase(effectiveVisibility)) {
-            broadcastService.broadcastAnalysisResult(roomId, null, "room", message);
+            broadcastService.broadcastAnalysisResult(roomId, sessionId, "room", message);
             if (runResultStore != null) {
                 runResultStore.get(requestId).ifPresent(r -> r.getRoomBroadcastAnalysisIds().add(message.getAnalysis_id()));
             }
