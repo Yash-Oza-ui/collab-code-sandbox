@@ -1024,7 +1024,7 @@ Response `200`. `entry` is the file the run starts from (for `target: "module"` 
 }
 ```
 
-Errors (the envelope of section 7, `request_id` `null`): `401 UNAUTHORIZED`, `404 ROOM_NOT_FOUND`, `404 MODULE_NOT_FOUND`, `422 MODULE_NOT_RUNNABLE`, `422 NO_ENTRY_FILE`. execution-service returns the same code and HTTP status to the client, with the run's `request_id`. If sync-service cannot be reached, the run is not started and the client gets `503 ROOM_SERVICE_UNAVAILABLE` (V2.11). A module that has never been saved is not decided here (V2.15).
+Errors (the envelope of section 7, `request_id` `null`): `401 UNAUTHORIZED`, `404 ROOM_NOT_FOUND`, `404 MODULE_NOT_FOUND`, `422 MODULE_NOT_RUNNABLE`, `422 MODULE_NOT_SAVED`, `422 NO_ENTRY_FILE`. execution-service returns the same code and HTTP status to the client, with the run's `request_id`. If sync-service cannot be reached, the run is not started and the client gets `503 ROOM_SERVICE_UNAVAILABLE` (V2.11). A module that has never been saved is refused with `422 MODULE_NOT_SAVED` (US-47, FR25.1, FR25.2), telling the person to save first.
 
 ## V2.9 Run result (decision 9) — Proposed
 
@@ -1281,6 +1281,7 @@ All use the error envelope of section 7. For module calls on sync-service, `requ
 | `MODULE_NOT_FOUND` | 404 | sync-service, execution-service | The module id does not exist in this room. |
 | `ROOM_NOT_FOUND` | 404 | sync-service, execution-service | The room does not exist. Also the answer of the owner check for an unknown room; this replaces the v1 rule (section 8) that treated an unknown room like a wrong token (difference 5). |
 | `MODULE_NOT_RUNNABLE` | 422 | execution-service | `target: "module"` on a module that is not marked runnable (FR20.2, FR25.2). |
+| `MODULE_NOT_SAVED` | 422 | sync-service, execution-service | `target: "module"` or entry on a module that has never been saved (FR24.1, FR25.1). The refusal tells the person to save first. |
 | `NO_ENTRY_FILE` | 422 | execution-service | `target: "entry"` while no entry file is set (FR25.3). |
 | `NAME_TAKEN` | 409 | sync-service | A module name that is already used in the workspace (V2.6, DR4). Not the display-name case of `join-refused` (V2.3), which is a socket message and not an HTTP error. |
 | `LIMIT_REACHED` | 409 | sync-service | A limit on the number of modules or the size of a module (NFR15). The message names the limit and the value comes from configuration (DR3). The limit on people is `join-refused` with `ROOM_FULL`. |
@@ -1318,6 +1319,17 @@ The envelope gets one optional field, `error.reason`. It is present only on `RUN
   "error": {
     "code": "MODULE_NOT_RUNNABLE",
     "message": "Module 'main.py' is not marked runnable.",
+    "retry_after_seconds": null
+  }
+}
+```
+
+```json
+{
+  "request_id": "c41e7b09-5d62-4a83-8f17-2b9a6e0d3c54",
+  "error": {
+    "code": "MODULE_NOT_SAVED",
+    "message": "Module 'solver.py' has never been saved. Save it first.",
     "retry_after_seconds": null
   }
 }
@@ -1396,6 +1408,7 @@ The relay decides from the **first two bytes** of a binary frame and never parse
 | `RUN_NOT_FOUND` | 404 | execution-service | V2.10 |
 | `ROOM_SERVICE_UNAVAILABLE` | 503 | execution-service | V2.11 |
 | `MODULE_NOT_RUNNABLE` | 422 | execution-service | V2.8 |
+| `MODULE_NOT_SAVED` | 422 | sync-service, execution-service | V2.8, V2.12 |
 | `NO_ENTRY_FILE` | 422 | execution-service | V2.8 |
 | `MODULE_NOT_FOUND` | 404 | both | V2.6, V2.8 |
 | `ROOM_NOT_FOUND` | 404 | both | V2.12 |
@@ -1457,7 +1470,7 @@ A malformed `audience` (V2.10) is also `INVALID_MESSAGE`. The new internal calls
 **Not decided in version 2.** These are listed so that nobody assumes they are covered:
 
 - Host controls other than modules, the Observer role (V2.17), remove / re-admit / regenerate link (V2.18), Run control (V2.20) and Pair edit access (V2.21) have no message or endpoint yet: join approval (FR9.3), the AI switch (FR35.1), transferring the Host role (FR31.1), export (FR33) and deleting a room (FR32). They need a contract entry before the stories that build them.
-- What a run does with a module that has never been saved (FR24.1, FR25.1).
+- What a run does with a module that has never been saved (FR24.1, FR25.1): closed by US-47 — refused with 422 MODULE_NOT_SAVED, telling the person to save first.
 - A joiner syncs from a connected writer: a read-only peer's sync step 2 is dropped (V2.12). If no writer is connected, a late joiner receives nothing. To be checked when the relay is built.
 - More than one file in a Pair mode `inline` source. Version 2 allows exactly one (FR18).
 
@@ -2143,9 +2156,8 @@ Success returns `200 OK` and `{"room_id":"Zq8-Lw2Ef6Th0Yx4Rn7JbA","status":"clea
 | v2 (edit access) | Nov 2026 | V2.21 added (US-36): `PATCH /v1/rooms/{room_id}/members/{member_id}/edit-access` gives or takes back edit access in Pair mode (FR19.1). Edit access controls apply only in Pair mode (Open mode refuses with `422 INVALID_REQUEST`). Host access cannot be changed (`422`) and Observers cannot have edit access (`422`). Broadcasts updated roster on change. |
 | v2 (edit request) | 20 Nov 2026 | V2.22 added (US-38): control-socket `request-edit-access` / `edit-access-requested` / `edit-access-responded` / `edit-access-request-cleared` and Host-only `POST /v1/rooms/{room_id}/edit-requests/{member_id}/approve` and `/decline` in Pair mode (FR19.3). Reuses `RoomService.setEditAccess` (V2.21). Edit requests removed from V2.15 undecided list. |
 | v2 (audit log) | 22 Nov 2026 | V2.23 added (US-58): `GET /v1/rooms/{room_id}/audit-log` and control-socket `audit-entry` push for role, edit access, module write access, and run permission changes (FR34). Bounded in-memory store; deleted with room; server-written only. Audit log removed from V2.15 undecided list. |
-=======
-| v2 (module owner on removal) | 23 Nov 2026 | V2.18 rules 4–6 (US-42, FR21.5): Host removal moves the removed member's modules to the current Host, revokes their write access and deletes their pending requests in the same single step as the removal; a racing approval, transfer, grant or list sees either all or none of it. Leaving or disconnecting keeps ownership. Example `v2-module-updated-owner-transfer.json`. Module reassignment removed from the V2.15 undecided list. |
 | v2 (save module) | 24 Nov 2026 | V2.24 added (US-45): `POST /v1/rooms/{room_id}/modules/{module_id}/save` body `{ "text" }`, `saved_by` / `saved_at` / `dirty` fields on module objects and `module-updated`, and `NOT_MODULE_WRITER` in V2.12 (FR24.1, FR24.2). |
+| v2 (saved module run) | 24 Nov 2026 | Added MODULE_NOT_SAVED (422) for never-saved modules (US-47, FR25.1, FR25.2). |
 
 ### Runner infrastructure error (v1 proposal addition)
 
