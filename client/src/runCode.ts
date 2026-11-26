@@ -625,3 +625,65 @@ export async function executeRun(options: ExecuteRunOptions): Promise<RunResult>
     }
   }
 }
+
+/** Options for sharing a private run result (T-17 V2.10, FR27, US-49). */
+export interface ShareRunOptions {
+  executionApiUrl?: string
+  requestId: string
+  sessionId: string
+  fetchFn?: typeof fetch
+}
+
+/** Result of POST /v1/runs/{request_id}/share. */
+export interface ShareRunResult {
+  ok: boolean
+  status?: number
+  code?: string
+  error?: string
+  data?: {
+    request_id: string
+    visibility: string
+  }
+}
+
+/**
+ * Shares a private run result with the room via execution-service (T-17 V2.10, FR27).
+ *
+ * Allowed to the runner only.
+ */
+export async function shareRun({
+  executionApiUrl,
+  requestId,
+  sessionId,
+  fetchFn = fetch,
+}: ShareRunOptions): Promise<ShareRunResult> {
+  const baseUrl = (executionApiUrl || config.executionApiUrl).replace(/\/+$/, '')
+  const url = `${baseUrl}/v1/runs/${encodeURIComponent(requestId)}/share`
+  try {
+    const res = await fetchFn(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sessionId }),
+    })
+    const body = await res.json().catch(() => null)
+    if (!res.ok) {
+      return {
+        ok: false,
+        status: res.status,
+        code: body?.error?.code || 'SHARE_FAILED',
+        error: body?.error?.message || 'Could not share run result.',
+      }
+    }
+    return {
+      ok: true,
+      status: res.status,
+      data: body,
+    }
+  } catch {
+    return {
+      ok: false,
+      code: 'NETWORK_ERROR',
+      error: 'Failed to communicate with execution service.',
+    }
+  }
+}

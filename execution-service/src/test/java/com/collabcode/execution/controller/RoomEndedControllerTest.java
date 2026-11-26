@@ -40,6 +40,31 @@ class RoomEndedControllerTest {
     }
 
     @Test
+    void cleansUpInMemRunResultStoreWhenRoomEnds() throws Exception {
+        HttpServer fakeAi = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        fakeAi.createContext("/v1/rooms/roomClear/state", exchange -> {
+            exchange.sendResponseHeaders(200, -1);
+            exchange.close();
+        });
+        fakeAi.start();
+        try {
+            com.collabcode.execution.store.RunResultStore store = new com.collabcode.execution.store.RunResultStore();
+            String reqId = "11111111-1111-4111-8111-111111111111";
+            store.save(new com.collabcode.execution.store.StoredRun(reqId, "roomClear", "sess-1", "private", new com.collabcode.execution.model.RunResponse(), java.time.Instant.now()));
+            assertThat(store.get(reqId)).isPresent();
+
+            RoomEndedController c = new RoomEndedController("secret",
+                    "http://127.0.0.1:" + fakeAi.getAddress().getPort(), HttpClient.newHttpClient(), store);
+            Map<String, Object> valid = Map.of("room_id", "roomClear", "reason", "closed");
+            assertThat(c.roomEnded("roomClear", "secret", valid).getStatusCode().value()).isEqualTo(200);
+
+            assertThat(store.get(reqId)).isEmpty();
+        } finally {
+            fakeAi.stop(0);
+        }
+    }
+
+    @Test
     void remoteFailureIsReportedAs503ForSyncRetry() throws Exception {
         HttpServer fakeAi = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         fakeAi.createContext("/v1/rooms/roomY/state", exchange -> {

@@ -74,7 +74,7 @@ import {
 } from './auditLogApi'
 import { getRoomIdFromPath } from './roomId'
 import { useRoomDoc } from './roomDoc'
-import { getEntryFileName, parseRunResultFrame, runNotAllowedMessage } from './runCode'
+import { getEntryFileName, parseRunResultFrame, runNotAllowedMessage, shareRun } from './runCode'
 import type { RunResponseData, SupportedLanguage } from './runCode'
 import {
   createZipBlob,
@@ -439,11 +439,20 @@ export default function RoomPage(props: RoomPageProps = {}) {
   )
 
   const showRunResult = useCallback((data: RunResponseData) => {
+    setRunOutput((prev) => {
+      if (prev && prev.request_id === data.request_id) {
+        if (prev.visibility !== data.visibility && data.visibility === 'room') {
+          return { ...prev, visibility: 'room' }
+        }
+        return prev
+      }
+      return data
+    })
     const shown = shownRunIdsRef.current
-    if (shown.includes(data.request_id)) return
-    shown.push(data.request_id)
-    if (shown.length > 50) shown.shift()
-    setRunOutput(data)
+    if (!shown.includes(data.request_id)) {
+      shown.push(data.request_id)
+      if (shown.length > 50) shown.shift()
+    }
   }, [])
 
   useEffect(() => {
@@ -2219,6 +2228,20 @@ export default function RoomPage(props: RoomPageProps = {}) {
             result={displayRunOutput}
             analysisResult={analysisResults[displayRunOutput.request_id] ?? null}
             currentViewerMemberId={myMemberId ?? undefined}
+            onShareRun={async () => {
+              const sessionId = sessionIdRef.current
+              if (!sessionId || !displayRunOutput) return
+              const res = await shareRun({
+                executionApiUrl: wsOptions?.executionApiUrl,
+                requestId: displayRunOutput.request_id,
+                sessionId,
+                fetchFn: wsOptions?.fetchFn,
+              })
+              if (!res.ok) {
+                throw new Error(res.error || 'Could not share run result')
+              }
+              setRunOutput((prev) => (prev && prev.request_id === displayRunOutput.request_id ? { ...prev, visibility: 'room' } : prev))
+            }}
             onSaveTestCase={async (testCase) => {
               const sessionId = sessionIdRef.current
               if (!roomId || !sessionId) throw new Error('Not joined to a room')

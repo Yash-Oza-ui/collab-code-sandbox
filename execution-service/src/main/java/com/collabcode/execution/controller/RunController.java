@@ -60,6 +60,7 @@ public class RunController {
     private final SavedVersionReader savedVersionReader;
     private final ExecutionLimitsProperties limitsProperties;
     private final com.collabcode.execution.analysis.AnalysisService analysisService;
+    private final com.collabcode.execution.store.RunResultStore runResultStore;
 
     @org.springframework.beans.factory.annotation.Autowired
     public RunController(
@@ -69,7 +70,8 @@ public class RunController {
             PermissionLookupService permissionLookupService,
             SavedVersionReader savedVersionReader,
             ExecutionLimitsProperties limitsProperties,
-            @org.springframework.beans.factory.annotation.Autowired(required = false) com.collabcode.execution.analysis.AnalysisService analysisService) {
+            @org.springframework.beans.factory.annotation.Autowired(required = false) com.collabcode.execution.analysis.AnalysisService analysisService,
+            @org.springframework.beans.factory.annotation.Autowired(required = false) com.collabcode.execution.store.RunResultStore runResultStore) {
         this.codeRunner = codeRunner;
         this.broadcastService = broadcastService;
         this.runQueueGate = runQueueGate;
@@ -77,6 +79,18 @@ public class RunController {
         this.savedVersionReader = savedVersionReader;
         this.limitsProperties = limitsProperties;
         this.analysisService = analysisService;
+        this.runResultStore = runResultStore != null ? runResultStore : new com.collabcode.execution.store.RunResultStore();
+    }
+
+    public RunController(
+            CodeRunner codeRunner,
+            RoomBroadcastService broadcastService,
+            RunQueueGate runQueueGate,
+            PermissionLookupService permissionLookupService,
+            SavedVersionReader savedVersionReader,
+            ExecutionLimitsProperties limitsProperties,
+            com.collabcode.execution.analysis.AnalysisService analysisService) {
+        this(codeRunner, broadcastService, runQueueGate, permissionLookupService, savedVersionReader, limitsProperties, analysisService, null);
     }
 
     public RunController(
@@ -86,7 +100,7 @@ public class RunController {
             PermissionLookupService permissionLookupService,
             SavedVersionReader savedVersionReader,
             ExecutionLimitsProperties limitsProperties) {
-        this(codeRunner, broadcastService, runQueueGate, permissionLookupService, savedVersionReader, limitsProperties, null);
+        this(codeRunner, broadcastService, runQueueGate, permissionLookupService, savedVersionReader, limitsProperties, null, null);
     }
 
     @PostMapping("/runs")
@@ -208,6 +222,16 @@ public class RunController {
         // --- Build response with Decision 9 fields & output cap enforcement ---
         RunResponse response = buildResponse(req, result, lookup, snapshot, ranAt);
 
+        // --- Store run result in memory for sharing and analysis follow-up (T-17 V2.10, FR27) ---
+        runResultStore.save(new com.collabcode.execution.store.StoredRun(
+                req.getRequest_id(),
+                req.getRoom_id(),
+                req.getSession_id(),
+                response.getVisibility(),
+                response,
+                Instant.now()
+        ));
+
         // --- Broadcast to room or targeted session through sync-service (FR4.5, V2.10) ---
         broadcastService.broadcast(req.getRoom_id(), req.getSession_id(), response);
 
@@ -217,6 +241,63 @@ public class RunController {
         }
 
         return ResponseEntity.ok(response);
+    }
+
+    /**
+     * Share a private run result with the room (T-17 V2.10, FR27).
+     *
+     * POST /v1/runs/{requestId}/share
+     * Body: { "session_id": "<uuid>" }
+     *
+     * Allowed only to the runner while the session remains active in the room.
+     * Transitions visibility to "room", broadcasts the run result to the room,
+     * and forwards any analysis messages already produced.
+     */
+    @PostMapping("/runs/{requestId}/share")
+    public ResponseEntity<Map<String, Object>> shareRun(
+            @PathVariable("requestId") String requestId,
+            @RequestBody(required = false) Map<String, Object> body) {
+
+        if (requestId == null || !requestId.matches(RunRequest.UUID_V4_REGEX)) {
+            throw new InvalidRequestException(null, "Field 'request_id' is missing or invalid.");
+        }
+
+        if (body == null || !body.containsKey("session_id")) {
+            throw new InvalidRequestException(requestId, "Field 'session_id' is missing or invalid.");
+        }
+        Object rawSessionId = body.get("session_id");
+        if (!(rawSessionId instanceof String sessionId) || !sessionId.matches(RunRequest.UUID_V4_REGEX)) {
+            throw new InvalidRequestException(requestId, "Field 'session_id' is missing or invalid.");
+        }
+
+        com.collabcode.execution.store.StoredRun run = runResultStore.get(requestId)
+                .orElseThrow(() -> new RunNotFoundException(requestId, "Run '" + requestId + "' was not found or has expired."));
+
+        if (!sessionId.equals(run.getSessionId())) {
+            throw new NotRunnerException(requestId, "Only the runner may share this run result.");
+        }
+
+        try {
+            PermissionLookupResult lookup = permissionLookupService.lookup(run.getRoomId(), sessionId);
+            if (lookup == null) {
+                throw new NotRunnerException(requestId, "Session is no longer in the room.");
+            }
+        } catch (RunNotAllowedException | RoomNotFoundException e) {
+            throw new NotRunnerException(requestId, "Session is no longer in the room.");
+        }
+
+        com.collabcode.execution.store.StoredRun.ShareResult shareResult = run.share();
+        if (shareResult.isNewlyShared()) {
+            broadcastService.broadcast(run.getRoomId(), null, run.getRunResponse());
+            for (com.collabcode.execution.analysis.AnalysisResultMessage analysisMsg : shareResult.getAnalysisMessagesToBroadcast()) {
+                broadcastService.broadcastAnalysisResult(run.getRoomId(), null, "room", analysisMsg);
+            }
+        }
+
+        Map<String, Object> resp = new LinkedHashMap<>();
+        resp.put("request_id", requestId);
+        resp.put("visibility", "room");
+        return ResponseEntity.ok(resp);
     }
 
     private void triggerAsyncAnalysis(

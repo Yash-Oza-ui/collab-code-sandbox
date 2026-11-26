@@ -14,6 +14,7 @@ export interface RunOutputPanelProps {
   analysisResult?: AnalysisResultMessage | null
   onSaveTestCase?: (value: SavedTestCandidate) => Promise<void>
   currentViewerMemberId?: string
+  onShareRun?: () => Promise<void>
 }
 
 function formatRanAt(ranAt: string): string {
@@ -22,15 +23,19 @@ function formatRanAt(ranAt: string): string {
 }
 
 /**
- * Output of one run (T-11, US-08, US-50 / FR26).
+ * Output of one run (T-11, US-08, US-50 / FR26, US-49 / FR27).
  *
  * Shows the result for the person who pressed Run and, through the `run-result` frame,
  * for every participant in the room. Labels every shown result with runner display name
  * and local time (with raw timestamp in tooltip). In Open mode, labels the saved
  * versions that were run. Member IDs are never rendered.
+ *
+ * In Open mode, a result is private to the runner by default. The runner can share
+ * the result with the room via the "Share to room" button.
  */
-export default function RunOutputPanel({ result, analysisResult, onSaveTestCase, currentViewerMemberId }: RunOutputPanelProps) {
+export default function RunOutputPanel({ result, analysisResult, onSaveTestCase, currentViewerMemberId, onShareRun }: RunOutputPanelProps) {
   const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
+  const [shareState, setShareState] = useState<'idle' | 'sharing' | 'error'>('idle')
   const analysis = analysisResult?.task === 'failing_input' ? analysisResult.result : undefined
   const originalInput = typeof analysis?.original_input === 'string' ? analysis.original_input : null
   const minimizedInput = typeof analysis?.minimized_input === 'string' ? analysis.minimized_input : null
@@ -56,6 +61,18 @@ export default function RunOutputPanel({ result, analysisResult, onSaveTestCase,
       setSaveState('error')
     }
   }
+
+  const handleShare = async () => {
+    if (!onShareRun) return
+    setShareState('sharing')
+    try {
+      await onShareRun()
+      setShareState('idle')
+    } catch {
+      setShareState('error')
+    }
+  }
+
   const runnerName = result.runner?.display_name
   const noOutput = !result.stdout && !result.stderr
 
@@ -99,6 +116,30 @@ export default function RunOutputPanel({ result, analysisResult, onSaveTestCase,
             : ''}
           {result.execution_time_ms.toFixed(0)} ms, {result.peak_memory_mb.toFixed(1)} MB
         </span>
+        {result.visibility && (
+          <span
+            className={`run-output-visibility run-output-visibility-${result.visibility}`}
+            data-testid="run-output-visibility"
+          >
+            {result.visibility === 'private' ? 'Private' : 'Shared to room'}
+          </span>
+        )}
+        {result.visibility === 'private' && ownsRun && onShareRun && (
+          <button
+            type="button"
+            className="share-run-btn"
+            data-testid="share-run-btn"
+            onClick={handleShare}
+            disabled={shareState === 'sharing'}
+          >
+            {shareState === 'sharing' ? 'Sharing…' : 'Share to room'}
+          </button>
+        )}
+        {shareState === 'error' && (
+          <span className="run-share-error" data-testid="run-share-error" role="alert">
+            Could not share run result. Try again.
+          </span>
+        )}
       </div>
 
       {result.saved_versions && result.saved_versions.length > 0 && (
