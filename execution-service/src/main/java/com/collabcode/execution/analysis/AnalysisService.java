@@ -406,20 +406,21 @@ public class AnalysisService {
             String initialVisibility,
             AnalysisResultMessage message) {
         if (runResultStore != null) {
-            runResultStore.addAnalysisMessage(requestId, message);
-        }
-        String effectiveVisibility = initialVisibility;
-        if (runResultStore != null) {
-            String current = runResultStore.getVisibility(requestId);
-            if (current != null) {
-                effectiveVisibility = current;
+            Optional<com.collabcode.execution.store.StoredRun> optRun = runResultStore.get(requestId);
+            if (optRun.isPresent()) {
+                com.collabcode.execution.store.StoredRun run = optRun.get();
+                com.collabcode.execution.store.StoredRun.AnalysisBroadcastAction action = run.registerAnalysisMessage(message);
+                if (action == com.collabcode.execution.store.StoredRun.AnalysisBroadcastAction.BROADCAST_ROOM) {
+                    broadcastService.broadcastAnalysisResult(roomId, sessionId, "room", message);
+                } else if (action == com.collabcode.execution.store.StoredRun.AnalysisBroadcastAction.BROADCAST_PRIVATE) {
+                    broadcastService.broadcastAnalysisResult(roomId, sessionId, "private", message);
+                }
+                return;
             }
         }
-        if ("room".equalsIgnoreCase(effectiveVisibility)) {
+
+        if ("room".equalsIgnoreCase(initialVisibility)) {
             broadcastService.broadcastAnalysisResult(roomId, sessionId, "room", message);
-            if (runResultStore != null) {
-                runResultStore.get(requestId).ifPresent(r -> r.getRoomBroadcastAnalysisIds().add(message.getAnalysis_id()));
-            }
         } else {
             broadcastService.broadcastAnalysisResult(roomId, sessionId, "private", message);
         }

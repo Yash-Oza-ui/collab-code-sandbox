@@ -286,22 +286,10 @@ public class RunController {
             throw new NotRunnerException(requestId, "Session is no longer in the room.");
         }
 
-        if ("room".equalsIgnoreCase(run.getVisibility())) {
-            Map<String, Object> resp = new LinkedHashMap<>();
-            resp.put("request_id", requestId);
-            resp.put("visibility", "room");
-            return ResponseEntity.ok(resp);
-        }
-
-        run.setVisibility("room");
-        if (run.getRunResponse() != null) {
-            run.getRunResponse().setVisibility("room");
-        }
-
-        broadcastService.broadcast(run.getRoomId(), null, run.getRunResponse());
-
-        for (com.collabcode.execution.analysis.AnalysisResultMessage analysisMsg : run.getAnalysisMessages()) {
-            if (run.getRoomBroadcastAnalysisIds().add(analysisMsg.getAnalysis_id())) {
+        com.collabcode.execution.store.StoredRun.ShareResult shareResult = run.share();
+        if (shareResult.isNewlyShared()) {
+            broadcastService.broadcast(run.getRoomId(), null, run.getRunResponse());
+            for (com.collabcode.execution.analysis.AnalysisResultMessage analysisMsg : shareResult.getAnalysisMessagesToBroadcast()) {
                 broadcastService.broadcastAnalysisResult(run.getRoomId(), null, "room", analysisMsg);
             }
         }

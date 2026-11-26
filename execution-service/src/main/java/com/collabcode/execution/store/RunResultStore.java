@@ -75,12 +75,17 @@ public class RunResultStore {
         }
     }
 
-    public void addAnalysisMessage(String requestId, AnalysisResultMessage message) {
-        if (requestId == null || message == null) return;
+    public StoredRun.AnalysisBroadcastAction registerAnalysisMessage(String requestId, AnalysisResultMessage message) {
+        if (requestId == null || message == null) return StoredRun.AnalysisBroadcastAction.NONE;
         StoredRun run = runsByRequestId.get(requestId);
         if (run != null) {
-            run.addAnalysisMessage(message);
+            return run.registerAnalysisMessage(message);
         }
+        return StoredRun.AnalysisBroadcastAction.NONE;
+    }
+
+    public void addAnalysisMessage(String requestId, AnalysisResultMessage message) {
+        registerAnalysisMessage(requestId, message);
     }
 
     public String getVisibility(String requestId) {

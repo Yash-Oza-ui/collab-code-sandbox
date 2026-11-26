@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
 import java.util.Collections;
+import java.util.List;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -90,5 +91,110 @@ class RunResultStoreTest {
 
         assertThat(run.getRoomBroadcastAnalysisIds().add("ana-1")).isTrue();
         assertThat(run.getRoomBroadcastAnalysisIds().add("ana-1")).isFalse();
+    }
+
+    @Test
+    @DisplayName("Concurrency: Simultaneous share calls result in exactly one newlyShared winner")
+    void storedRun_concurrentShareCalls_onlyOneWinsNewlyShared() throws Exception {
+        String reqId = "11111111-1111-4111-8111-111111111111";
+        StoredRun run = new StoredRun(reqId, "room-1", "sess-1", "private", new RunResponse(), Instant.now());
+        store.save(run);
+
+        int threadCount = 20;
+        java.util.concurrent.ExecutorService executor = java.util.concurrent.Executors.newFixedThreadPool(threadCount);
+        java.util.concurrent.CountDownLatch readyLatch = new java.util.concurrent.CountDownLatch(threadCount);
+        java.util.concurrent.CountDownLatch startLatch = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.atomic.AtomicInteger newlySharedWins = new java.util.concurrent.atomic.AtomicInteger(0);
+
+        List<java.util.concurrent.Future<?>> futures = new java.util.ArrayList<>();
+        for (int i = 0; i < threadCount; i++) {
+            futures.add(executor.submit(() -> {
+                readyLatch.countDown();
+                try {
+                    startLatch.await();
+                    StoredRun.ShareResult res = run.share();
+                    if (res.isNewlyShared()) {
+                        newlySharedWins.incrementAndGet();
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }));
+        }
+
+        readyLatch.await();
+        startLatch.countDown();
+        for (java.util.concurrent.Future<?> f : futures) {
+            f.get(5, java.util.concurrent.TimeUnit.SECONDS);
+        }
+        executor.shutdown();
+
+        assertThat(newlySharedWins.get()).isEqualTo(1);
+        assertThat(run.getVisibility()).isEqualTo("room");
+    }
+
+    @Test
+    @DisplayName("Concurrency: Simultaneous share calls and analysis registrations never duplicate room delivery")
+    void storedRun_concurrentShareAndAnalysisRegistration_noDuplicateRoomBroadcasts() throws Exception {
+        String reqId = "11111111-1111-4111-8111-111111111111";
+        StoredRun run = new StoredRun(reqId, "room-1", "sess-1", "private", new RunResponse(), Instant.now());
+        store.save(run);
+
+        int msgCount = 50;
+        java.util.concurrent.ExecutorService executor = java.util.concurrent.Executors.newFixedThreadPool(msgCount + 1);
+        java.util.concurrent.CountDownLatch readyLatch = new java.util.concurrent.CountDownLatch(msgCount + 1);
+        java.util.concurrent.CountDownLatch startLatch = new java.util.concurrent.CountDownLatch(1);
+
+        java.util.List<String> roomBroadcastIds = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+        java.util.List<java.util.concurrent.Future<?>> futures = new java.util.ArrayList<>();
+
+        // Analysis registration threads
+        for (int i = 0; i < msgCount; i++) {
+            final String msgId = "ana-" + i;
+            futures.add(executor.submit(() -> {
+                readyLatch.countDown();
+                try {
+                    startLatch.await();
+                    AnalysisResultMessage msg = new AnalysisResultMessage(
+                            reqId, msgId, "room-1", "complexity", "ok",
+                            new AnalysisResultMessage.AIStep("ok", null),
+                            Collections.emptyMap(), "Analysis " + msgId
+                    );
+                    StoredRun.AnalysisBroadcastAction action = run.registerAnalysisMessage(msg);
+                    if (action == StoredRun.AnalysisBroadcastAction.BROADCAST_ROOM) {
+                        roomBroadcastIds.add(msgId);
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }));
+        }
+
+        // Share thread
+        futures.add(executor.submit(() -> {
+            readyLatch.countDown();
+            try {
+                startLatch.await();
+                StoredRun.ShareResult shareResult = run.share();
+                if (shareResult.isNewlyShared()) {
+                    for (AnalysisResultMessage m : shareResult.getAnalysisMessagesToBroadcast()) {
+                        roomBroadcastIds.add(m.getAnalysis_id());
+                    }
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }));
+
+        readyLatch.await();
+        startLatch.countDown();
+        for (java.util.concurrent.Future<?> f : futures) {
+            f.get(5, java.util.concurrent.TimeUnit.SECONDS);
+        }
+        executor.shutdown();
+
+        // Every message that reached the room must be present in roomBroadcastIds exactly once (no duplicates)
+        java.util.Set<String> uniqueIds = new java.util.HashSet<>(roomBroadcastIds);
+        assertThat(roomBroadcastIds).hasSameSizeAs(uniqueIds);
     }
 }

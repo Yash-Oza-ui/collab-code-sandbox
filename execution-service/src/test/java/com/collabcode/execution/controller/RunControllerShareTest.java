@@ -31,6 +31,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.ArgumentMatchers.nullable;
 import static org.mockito.Mockito.*;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
@@ -248,5 +249,137 @@ class RunControllerShareTest {
 
         // No additional broadcast
         verify(broadcastService, never()).broadcast(any(), any(), any());
+    }
+
+    @Test
+    @DisplayName("Concurrency: Simultaneous share requests (e.g. from multiple tabs) broadcast run to room exactly once")
+    void share_concurrentShareCallsFromMultipleTabs_broadcastsRunOnlyOnce() throws Exception {
+        RunResponse runResp = new RunResponse();
+        runResp.setRequest_id(REQUEST_ID);
+        runResp.setRoom_id(ROOM_ID);
+        runResp.setVisibility("private");
+        runResp.setStdout("parallel run output\n");
+
+        StoredRun stored = new StoredRun(REQUEST_ID, ROOM_ID, RUNNER_SESSION_ID, "private", runResp, Instant.now());
+        runResultStore.save(stored);
+
+        int threads = 10;
+        java.util.concurrent.ExecutorService executor = java.util.concurrent.Executors.newFixedThreadPool(threads);
+        java.util.concurrent.CountDownLatch readyLatch = new java.util.concurrent.CountDownLatch(threads);
+        java.util.concurrent.CountDownLatch startLatch = new java.util.concurrent.CountDownLatch(1);
+
+        java.util.List<java.util.concurrent.Future<Integer>> futures = new java.util.ArrayList<>();
+        for (int i = 0; i < threads; i++) {
+            futures.add(executor.submit(() -> {
+                readyLatch.countDown();
+                try {
+                    startLatch.await();
+                    var result = mockMvc.perform(post("/v1/runs/" + REQUEST_ID + "/share")
+                                    .contentType(MediaType.APPLICATION_JSON)
+                                    .content("{\"session_id\":\"" + RUNNER_SESSION_ID + "\"}"))
+                            .andReturn();
+                    return result.getResponse().getStatus();
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
+                }
+            }));
+        }
+
+        readyLatch.await();
+        startLatch.countDown();
+
+        for (var f : futures) {
+            int status = f.get(5, java.util.concurrent.TimeUnit.SECONDS);
+            assertThat(status).isEqualTo(200);
+        }
+        executor.shutdown();
+
+        // Exactly one broadcast of the run result to the room despite concurrent requests
+        verify(broadcastService, times(1)).broadcast(eq(ROOM_ID), isNull(), any());
+        assertThat(runResultStore.getVisibility(REQUEST_ID)).isEqualTo("room");
+    }
+
+    @Test
+    @DisplayName("Concurrency: Concurrent analysis completion during share never produces duplicate room broadcasts")
+    void share_concurrentAnalysisCompletionDuringShare_noDuplicateRoomBroadcasts() throws Exception {
+        RunResponse runResp = new RunResponse();
+        runResp.setRequest_id(REQUEST_ID);
+        runResp.setRoom_id(ROOM_ID);
+        runResp.setVisibility("private");
+
+        StoredRun stored = new StoredRun(REQUEST_ID, ROOM_ID, RUNNER_SESSION_ID, "private", runResp, Instant.now());
+        runResultStore.save(stored);
+
+        int msgCount = 20;
+        java.util.concurrent.ExecutorService executor = java.util.concurrent.Executors.newFixedThreadPool(msgCount + 1);
+        java.util.concurrent.CountDownLatch readyLatch = new java.util.concurrent.CountDownLatch(msgCount + 1);
+        java.util.concurrent.CountDownLatch startLatch = new java.util.concurrent.CountDownLatch(1);
+
+        java.util.List<java.util.concurrent.Future<?>> futures = new java.util.ArrayList<>();
+
+        // Multiple analysis messages completing concurrently
+        for (int i = 0; i < msgCount; i++) {
+            final String aid = "analysis-conc-" + i;
+            futures.add(executor.submit(() -> {
+                readyLatch.countDown();
+                try {
+                    startLatch.await();
+                    AnalysisResultMessage msg = new AnalysisResultMessage(
+                            REQUEST_ID, aid, ROOM_ID, "complexity", "ok",
+                            new AnalysisResultMessage.AIStep("ok", null),
+                            Collections.emptyMap(), "Analysis result " + aid
+                    );
+                    StoredRun.AnalysisBroadcastAction action = stored.registerAnalysisMessage(msg);
+                    if (action == StoredRun.AnalysisBroadcastAction.BROADCAST_ROOM) {
+                        broadcastService.broadcastAnalysisResult(ROOM_ID, null, "room", msg);
+                    } else if (action == StoredRun.AnalysisBroadcastAction.BROADCAST_PRIVATE) {
+                        broadcastService.broadcastAnalysisResult(ROOM_ID, RUNNER_SESSION_ID, "private", msg);
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }));
+        }
+
+        // Concurrent share request
+        futures.add(executor.submit(() -> {
+            readyLatch.countDown();
+            try {
+                startLatch.await();
+                mockMvc.perform(post("/v1/runs/" + REQUEST_ID + "/share")
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content("{\"session_id\":\"" + RUNNER_SESSION_ID + "\"}"))
+                        .andExpect(status().isOk());
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        }));
+
+        readyLatch.await();
+        startLatch.countDown();
+
+        for (var f : futures) {
+            f.get(5, java.util.concurrent.TimeUnit.SECONDS);
+        }
+        executor.shutdown();
+
+        // Check argument captor for all broadcastAnalysisResult calls
+        ArgumentCaptor<AnalysisResultMessage> captor = ArgumentCaptor.forClass(AnalysisResultMessage.class);
+        ArgumentCaptor<String> visCaptor = ArgumentCaptor.forClass(String.class);
+        verify(broadcastService, atLeastOnce()).broadcastAnalysisResult(
+                eq(ROOM_ID), nullable(String.class), visCaptor.capture(), captor.capture());
+
+        // For every message that was broadcast to room, it must appear in room broadcasts at most once
+        java.util.List<String> roomBroadcastIds = new java.util.ArrayList<>();
+        var messages = captor.getAllValues();
+        var visibilities = visCaptor.getAllValues();
+        for (int i = 0; i < messages.size(); i++) {
+            if ("room".equals(visibilities.get(i))) {
+                roomBroadcastIds.add(messages.get(i).getAnalysis_id());
+            }
+        }
+
+        java.util.Set<String> uniqueRoomIds = new java.util.HashSet<>(roomBroadcastIds);
+        assertThat(roomBroadcastIds).hasSameSizeAs(uniqueRoomIds);
     }
 }
