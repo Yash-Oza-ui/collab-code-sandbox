@@ -1390,3 +1390,472 @@ def test_input_hash_validation_strict_sha256_hex():
         SlowdownAnalysisRequest(**make_payload("short-hash"))
     assert "64-character hexadecimal SHA-256 digest" in str(exc_info.value)
 
+
+# ============================================================================
+# US-69: Highlight Changed Lines in a Slowdown Run (FR37.3, Sprint 5)
+# Tests 1 through 12
+# ============================================================================
+
+
+def test_us69_test1_flagged_run_after_changed_line():
+    """Test 1: Seed normal runs with the same input hash. Submit flagged run with 1 modified line.
+
+    Verify:
+    - is_slowdown == True
+    - Exactly the expected current line is highlighted (1-based)
+    - No source line text returned
+    - Removed-line count is correct (0)
+    """
+    store = SlowdownStore()
+    room_id = "test-room-us69-t1"
+    input_hash = "a" * 64
+    code_v1 = "a = 10\nb = 20\nprint(a + b)"
+
+    # Seed 3 normal runs around 100ms
+    for _ in range(3):
+        res = detect_slowdown(
+            room_id=room_id,
+            input_hash=input_hash,
+            execution_time_ms=100.0,
+            peak_memory_mb=10.0,
+            code=code_v1,
+            store=store,
+        )
+        assert res["is_slowdown"] is False
+
+    # Current run: 10x slower (1000ms), line 2 modified (b = 50)
+    code_v2 = "a = 10\nb = 50\nprint(a + b)"
+    res_slow = detect_slowdown(
+        room_id=room_id,
+        input_hash=input_hash,
+        execution_time_ms=1000.0,
+        peak_memory_mb=12.0,
+        code=code_v2,
+        store=store,
+    )
+
+    assert res_slow["is_slowdown"] is True
+    assert res_slow["slowdown_factor"] == pytest.approx(10.0, rel=1e-2)
+    assert res_slow["comparison_available"] is True
+    assert res_slow["removed_lines_count"] == 0
+
+    # Line 2 highlighted
+    changed = res_slow["changed_lines"]
+    assert len(changed) == 1
+    assert changed[0].line == 2
+
+    # Verify no source text attribute or content field
+    assert not hasattr(changed[0], "content")
+
+
+def test_us69_test2_no_earlier_normal_run():
+    """Test 2: Submit a flagged run for an input hash with no earlier normal run.
+
+    Verify:
+    - is_slowdown == True
+    - Highlight list is empty
+    - Response clearly states no earlier normal run to compare
+    - Entire file is not highlighted
+    """
+    store = SlowdownStore()
+    room_id = "test-room-us69-t2"
+    input_hash = "b" * 64
+
+    # Seed measurements with NO code (or line hashes)
+    for _ in range(3):
+        store.record_measurement(room_id, input_hash, 100.0, 10.0)
+
+    # Flagged run with code
+    code_curr = "def slow():\n    import time\n    time.sleep(2)"
+    res = detect_slowdown(
+        room_id=room_id,
+        input_hash=input_hash,
+        execution_time_ms=1200.0,
+        peak_memory_mb=15.0,
+        code=code_curr,
+        store=store,
+    )
+
+    assert res["is_slowdown"] is True
+    assert res["changed_lines"] == []
+    assert res["comparison_available"] is False
+    assert "No earlier normal run to compare." in res["comparison_note"]
+    assert "No earlier normal run to compare." in res["message"]
+
+
+def test_us69_test3_unflagged_run():
+    """Test 3: Unflagged run returns no highlights."""
+    store = SlowdownStore()
+    room_id = "test-room-us69-t3"
+    input_hash = "c" * 64
+    code_v1 = "a = 10\nb = 20\nprint(a + b)"
+
+    for _ in range(3):
+        detect_slowdown(
+            room_id=room_id,
+            input_hash=input_hash,
+            execution_time_ms=100.0,
+            peak_memory_mb=10.0,
+            code=code_v1,
+            store=store,
+        )
+
+    # Normal run (102ms), changed code
+    code_v2 = "a = 10\nb = 30\nprint(a + b)"
+    res_normal = detect_slowdown(
+        room_id=room_id,
+        input_hash=input_hash,
+        execution_time_ms=102.0,
+        peak_memory_mb=10.1,
+        code=code_v2,
+        store=store,
+    )
+
+    assert res_normal["is_slowdown"] is False
+    assert res_normal["changed_lines"] == []
+    assert res_normal["comparison_available"] is False
+    assert res_normal["message"] == "Execution runtime is within normal parameters."
+
+
+def test_us69_test4_flagged_run_does_not_poison_baseline():
+    """Test 4: After a flagged run, verify the flagged run did not become the normal baseline.
+
+    The next flagged run must compare against the last NORMAL run, not the earlier flagged run.
+    """
+    store = SlowdownStore()
+    room_id = "test-room-us69-t4"
+    input_hash = "d" * 64
+
+    # Baseline: line 1 = 'x = 1', line 2 = 'y = 2'
+    code_normal = "x = 1\ny = 2\nprint(x + y)"
+    for _ in range(3):
+        detect_slowdown(
+            room_id=room_id,
+            input_hash=input_hash,
+            execution_time_ms=100.0,
+            peak_memory_mb=10.0,
+            code=code_normal,
+            store=store,
+        )
+
+    # Flagged run 1: line 2 = 'y = 999' (runtime 1000ms)
+    code_flagged_1 = "x = 1\ny = 999\nprint(x + y)"
+    res_slow_1 = detect_slowdown(
+        room_id=room_id,
+        input_hash=input_hash,
+        execution_time_ms=1000.0,
+        peak_memory_mb=10.0,
+        code=code_flagged_1,
+        store=store,
+    )
+    assert res_slow_1["is_slowdown"] is True
+    assert [c.line for c in res_slow_1["changed_lines"]] == [2]
+
+    # Flagged run 2: line 1 changed to 'x = 50', line 2 = 'y = 2' (matches normal code!)
+    # If compared against flagged run 1: both line 1 and 2 would be different.
+    # Because it compares against the last NORMAL run: only line 1 is different!
+    code_flagged_2 = "x = 50\ny = 2\nprint(x + y)"
+    res_slow_2 = detect_slowdown(
+        room_id=room_id,
+        input_hash=input_hash,
+        execution_time_ms=1200.0,
+        peak_memory_mb=10.0,
+        code=code_flagged_2,
+        store=store,
+    )
+    assert res_slow_2["is_slowdown"] is True
+    assert [c.line for c in res_slow_2["changed_lines"]] == [1]
+
+
+def test_us69_test5_consent_disabled():
+    """Test 5: Changed-line comparison works when consent=False (no AI dependency)."""
+    store = SlowdownStore()
+    room_id = "test-room-us69-t5"
+    input_hash = "e" * 64
+    code_v1 = "def f():\n    return 1"
+
+    for _ in range(3):
+        detect_slowdown(
+            room_id=room_id,
+            input_hash=input_hash,
+            execution_time_ms=100.0,
+            peak_memory_mb=10.0,
+            code=code_v1,
+            consent=False,
+            ai_enabled=True,
+            store=store,
+        )
+
+    code_v2 = "def f():\n    return 999"
+    res = detect_slowdown(
+        room_id=room_id,
+        input_hash=input_hash,
+        execution_time_ms=1000.0,
+        peak_memory_mb=10.0,
+        code=code_v2,
+        consent=False,
+        ai_enabled=True,
+        store=store,
+    )
+
+    assert res["is_slowdown"] is True
+    assert [c.line for c in res["changed_lines"]] == [2]
+    assert res["ai_step"].status == "skipped"
+    assert res["ai_step"].error_code == "CONSENT_MISSING"
+
+
+def test_us69_test6_host_ai_switch_disabled():
+    """Test 6: Changed-line comparison works when ai_enabled=False."""
+    store = SlowdownStore()
+    room_id = "test-room-us69-t6"
+    input_hash = "f" * 64
+    code_v1 = "def f():\n    return 1"
+
+    for _ in range(3):
+        detect_slowdown(
+            room_id=room_id,
+            input_hash=input_hash,
+            execution_time_ms=100.0,
+            peak_memory_mb=10.0,
+            code=code_v1,
+            consent=True,
+            ai_enabled=False,
+            store=store,
+        )
+
+    code_v2 = "def f():\n    return 999"
+    res = detect_slowdown(
+        room_id=room_id,
+        input_hash=input_hash,
+        execution_time_ms=1000.0,
+        peak_memory_mb=10.0,
+        code=code_v2,
+        consent=True,
+        ai_enabled=False,
+        store=store,
+    )
+
+    assert res["is_slowdown"] is True
+    assert [c.line for c in res["changed_lines"]] == [2]
+    assert res["ai_step"].status == "skipped"
+    assert res["ai_step"].error_code == "AI_DISABLED"
+
+
+def test_us69_test7_room_isolation():
+    """Test 7: Room isolation - Room A cannot access or compare against Room B's line hashes."""
+    store = SlowdownStore()
+    input_hash = "1" * 64
+    code_a = "x = 100\nprint(x)"
+    code_b = "y = 200\nprint(y)"
+
+    # Seed Room A
+    for _ in range(3):
+        detect_slowdown(
+            room_id="room-A",
+            input_hash=input_hash,
+            execution_time_ms=100.0,
+            peak_memory_mb=10.0,
+            code=code_a,
+            store=store,
+        )
+
+    # Seed Room B
+    for _ in range(3):
+        detect_slowdown(
+            room_id="room-B",
+            input_hash=input_hash,
+            execution_time_ms=100.0,
+            peak_memory_mb=10.0,
+            code=code_b,
+            store=store,
+        )
+
+    # Slowdown in Room A with line 1 modified
+    res_a = detect_slowdown(
+        room_id="room-A",
+        input_hash=input_hash,
+        execution_time_ms=1000.0,
+        peak_memory_mb=10.0,
+        code="x = 999\nprint(x)",
+        store=store,
+    )
+    assert res_a["is_slowdown"] is True
+    assert [c.line for c in res_a["changed_lines"]] == [1]
+
+    # Verify Room A did not compare against Room B's code
+    room_a_hashes = store.get_last_normal_line_hashes("room-A", input_hash)
+    room_b_hashes = store.get_last_normal_line_hashes("room-B", input_hash)
+    assert room_a_hashes != room_b_hashes
+
+
+def test_us69_test8_room_cleanup():
+    """Test 8: Room cleanup clears room's line hashes and leaves other rooms intact."""
+    store = SlowdownStore()
+    input_hash = "2" * 64
+
+    for _ in range(3):
+        detect_slowdown(
+            room_id="room-cleanup-1",
+            input_hash=input_hash,
+            execution_time_ms=100.0,
+            peak_memory_mb=10.0,
+            code="a = 1",
+            store=store,
+        )
+        detect_slowdown(
+            room_id="room-cleanup-2",
+            input_hash=input_hash,
+            execution_time_ms=100.0,
+            peak_memory_mb=10.0,
+            code="b = 2",
+            store=store,
+        )
+
+    assert store.get_last_normal_line_hashes("room-cleanup-1", input_hash) is not None
+    assert store.get_last_normal_line_hashes("room-cleanup-2", input_hash) is not None
+
+    # Clear room 1
+    store.clear_room("room-cleanup-1")
+
+    assert store.get_last_normal_line_hashes("room-cleanup-1", input_hash) is None
+    assert store.get_history("room-cleanup-1", input_hash) == []
+
+    # Room 2 remains intact
+    assert store.get_last_normal_line_hashes("room-cleanup-2", input_hash) is not None
+    assert len(store.get_history("room-cleanup-2", input_hash)) == 3
+
+
+def test_us69_test9_no_raw_code_storage():
+    """Test 9: Verify unique source marker is NEVER stored in SlowdownStore in-memory structures."""
+    store = SlowdownStore()
+    room_id = "test-room-us69-privacy"
+    input_hash = "3" * 64
+    marker = "US69_SECRET_MARKER_MUST_NEVER_APPEAR"
+    code = f"x = '{marker}'\nprint(x)"
+
+    for _ in range(3):
+        detect_slowdown(
+            room_id=room_id,
+            input_hash=input_hash,
+            execution_time_ms=100.0,
+            peak_memory_mb=10.0,
+            code=code,
+            store=store,
+        )
+
+    # Stringify the entire store internal dicts
+    store_repr = str(store._rooms) + str(store._normal_line_hashes)
+    assert marker not in store_repr, "Raw code marker was found inside SlowdownStore!"
+
+
+def test_us69_test10_metadata_only_logs_and_counters(caplog):
+    """Test 10: Verify unique source marker never appears in captured logs or usage counters."""
+    import logging
+    client = TestClient(app)
+    room_id = "Zq8-Lw2Ef6Th0Yx4Rn7JbA"
+    input_hash = "4" * 64
+    marker = "US69_CANARY_MARKER_MUST_NEVER_APPEAR"
+    code = f"def run():\n    val = '{marker}'\n    return val"
+
+    with caplog.at_level(logging.DEBUG):
+        resp = client.post(
+            "/v1/analyses/slowdown",
+            json={
+                "request_id": "req-priv-01",
+                "room_id": room_id,
+                "analysis_id": "ana-priv-01",
+                "request_type": "slowdown",
+                "language": "python",
+                "consent": False,
+                "ai_enabled": False,
+                "input_hash": input_hash,
+                "current_run": {
+                    "execution_time_ms": 100.0,
+                    "peak_memory_mb": 10.0,
+                    "code": code,
+                },
+            },
+        )
+        assert resp.status_code == 200
+
+        # Check logs
+        assert marker not in caplog.text, "Secret marker appeared in service logs!"
+
+        # Check returned response body
+        resp_text = resp.text
+        assert marker not in resp_text, "Secret marker appeared in HTTP response body!"
+
+        # Check usage endpoint
+        usage_resp = client.get("/v1/usage")
+        assert marker not in usage_resp.text, "Secret marker appeared in usage telemetry!"
+
+
+def test_us69_test11_open_mode_module_support():
+    """Test 11: Verify module_id is properly populated when supplied."""
+    store = SlowdownStore()
+    room_id = "test-room-us69-t11"
+    input_hash = "5" * 64
+    code_v1 = "import util\nprint(util.foo())"
+
+    for _ in range(3):
+        detect_slowdown(
+            room_id=room_id,
+            input_hash=input_hash,
+            execution_time_ms=100.0,
+            peak_memory_mb=10.0,
+            code=code_v1,
+            module_id="mod_entry",
+            store=store,
+        )
+
+    code_v2 = "import util\nprint(util.foo())\nprint('done')"
+    res = detect_slowdown(
+        room_id=room_id,
+        input_hash=input_hash,
+        execution_time_ms=1000.0,
+        peak_memory_mb=10.0,
+        code=code_v2,
+        module_id="mod_entry",
+        store=store,
+    )
+
+    assert res["is_slowdown"] is True
+    assert len(res["changed_lines"]) == 1
+    assert res["changed_lines"][0].line == 3
+    assert res["changed_lines"][0].module_id == "mod_entry"
+
+
+def test_us69_test12_regression_and_removed_lines():
+    """Test 12: Verify removed lines count is accurate and reported in comparison_note."""
+    store = SlowdownStore()
+    room_id = "test-room-us69-t12"
+    input_hash = "6" * 64
+    code_v1 = "a = 1\nb = 2\nc = 3\nd = 4\nprint('done')"
+
+    for _ in range(3):
+        detect_slowdown(
+            room_id=room_id,
+            input_hash=input_hash,
+            execution_time_ms=100.0,
+            peak_memory_mb=10.0,
+            code=code_v1,
+            store=store,
+        )
+
+    # Code removes line 2 and modifies line 4 (which becomes line 3 in current code)
+    code_v2 = "a = 1\nc = 3\nd = 999\nprint('done')"
+    res = detect_slowdown(
+        room_id=room_id,
+        input_hash=input_hash,
+        execution_time_ms=1000.0,
+        peak_memory_mb=10.0,
+        code=code_v2,
+        store=store,
+    )
+
+    assert res["is_slowdown"] is True
+    assert res["removed_lines_count"] == 1
+    assert "1 line removed" in res["comparison_note"]
+    assert [c.line for c in res["changed_lines"]] == [3]
+
+

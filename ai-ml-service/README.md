@@ -405,10 +405,54 @@ A run is flagged as a performance slowdown (`is_slowdown: true`) if and only if 
 - **Fallback on Error / Missing Consent:** If consent is missing (`CONSENT_MISSING`), AI is disabled (`AI_DISABLED`), or provider limits/errors occur (`COST_CAP_REACHED`, `ROOM_RATE_LIMITED`, `PROVIDER_TIMEOUT`, `PROVIDER_ERROR`), the statistical detection results (`is_slowdown`, `slowdown_factor`, `baseline`, and `message`) **are returned in full** with `ai_step: { "status": "skipped", "error_code": "..." }`.
 - **Normal Runs:** When runtime is within normal parameters (`is_slowdown: false`), no AI call is made and `ai_step` returns `{ "status": "ok", "error_code": null, "explanation": null }` per §16.2.
 
-### Clarification on Deferred Scope: `changed_lines` (FR37.3, US-69)
-In US-68 responses, `changed_lines` is returned as an empty list (`[]`).
-- **Reason for Deferral:** Under US-68 / NFR8.2 data minimization, `ai-ml-service` maintains short-lived, metadata-only storage in `SlowdownStore` (storing only numeric runtime and memory metrics, never raw source code).
-- **Scheduled Delivery:** Line-by-line diffing of source code against the last normal run is assigned to **US-69 (FR37.3)** in Sprint 5. Returning `[]` strictly conforms to the JSON schema (`docs/schemas/slowdown-response.json`).
+### Highlight Changed Lines in a Slowdown Run (FR37.3, US-69, Sprint 5)
+
+#### User Story & Purpose (US-69)
+As a student, I want the changed lines highlighted on a flagged run so that I can see what might have caused it.
+
+When US-68 flags a run as significantly slower than normal (`is_slowdown: true`), the system identifies the lines that have been added or modified since the last normal run for the exact same input (`input_hash`).
+
+#### Definition of a Normal Run
+A **normal run** is defined strictly as:
+- A previous run in the **same room**;
+- Executing against the **same `input_hash`** (SHA-256 digest of program input / stdin);
+- That was **not flagged** as a slowdown (`is_slowdown: false`).
+
+The comparison always targets the **most recent** earlier normal run matching these criteria. Flagged (abnormal) runs are never recorded into the normal baseline or normal line-hash store, preventing baseline poisoning.
+
+#### Architectural Design: Option B (Per-Line Cryptographic Hashes)
+- **Why Option B was selected over Option A (Saved Versions):**
+  - Investigation of `sync-service` (`RunRecord.java`, `SavedVersionSummary.java`) and `execution-service` (`SavedVersionReader.java`) revealed that `sync-service` stores only metadata in `saved_versions` and file names in `files`—it contains **zero source code text** (NFR8.2, AC2). `SavedVersionReader` in `execution-service` is an in-memory stub.
+  - Furthermore, `execution-service` forwards only `current_run.code` to `POST /v1/analyses/slowdown`, without historical version retrieval endpoints or parameters.
+- **Privacy & Storage Invariants (NFR8.2, AC2):**
+  - For each qualifying normal run, `ai-ml-service` splits the source code into lines and computes a standard-library SHA-256 cryptographic digest for each line.
+  - Only the ordered list of SHA-256 hexadecimal strings is retained in room-scoped memory (`SlowdownStore`).
+  - **Raw source code, line strings, diff text, tokens, or markers are NEVER persisted in memory, logged, or returned.**
+- **Room Lifecycle & Cleanup (FR32, US-56):**
+  - All stored line hashes are scoped by `(room_id, input_hash)`.
+  - When a room is closed or deleted, `DELETE /v1/rooms/{room_id}/state` completely purges all stored measurements and line hashes for that room.
+  - Deleting one room has zero effect on any other room.
+
+#### Pure Deterministic Diff Algorithm (Hirschberg Linear-Space LCS)
+Line comparison is implemented in `app/diff.py` as an independently testable, pure function:
+1. **Memory-Bounded Hirschberg LCS:** Employs Hirschberg's divide-and-conquer LCS algorithm to compute the edit script in $O(\min(m, n))$ linear memory rather than allocating an $O(m \times n)$ full dynamic programming table.
+2. **Prefix and Suffix Trimming:** Unchanged leading and trailing lines are trimmed in $O(N)$ time with zero extra memory before running LCS on the modified core hunk.
+3. **Safe Comparison Limits & Graceful Fallback:** Input lines are bounded by `MAX_INPUT_LINES = 10,000` and trimmed search space is capped at `MAX_DIFF_MATRIX_CELLS = 1,000,000`. If a comparison exceeds these safe limits, it gracefully returns `comparison_available: false` with an explanatory note and empty highlights, ensuring the service never exhausts memory or crashes.
+4. **Current Source Line Numbering:** Line numbers returned in `changed_lines` are **1-based** and refer strictly to the **current source version** visible in the user's editor.
+5. **Deterministic Edit Script:** Uses cryptographic line hashes (SHA-256) over UTF-8 encoded text. It handles repeated identical lines, insertions, deletions, replacements, and Unicode characters deterministically without heuristic autojunk quirks.
+6. **Representation of Removed Lines:** Lines that were deleted since the last normal run no longer exist in the current editor and therefore cannot be highlighted. Instead, their count is returned via `removed_lines_count` and noted in `comparison_note` (e.g., `"1 line removed."`).
+7. **No-Earlier-Normal-Run Handling:** If a run is flagged but no earlier normal run with line hashes exists for that `input_hash`, `changed_lines` is returned as empty `[]`, `comparison_available` is `false`, and `comparison_note` explains `"No earlier normal run to compare."`. The entire file is never highlighted.
+8. **Unflagged Runs:** For normal, unflagged runs (`is_slowdown: false`), no highlight is calculated or exposed (`changed_lines: []`, `comparison_available: false`). The run's line hashes are stored as the latest normal version.
+9. **Zero AI Dependency:** The changed-line calculation is a purely deterministic statistical diff. It requires **no external LLM calls** and functions identically when `consent: false` or `ai_enabled: false`. Optional AI explanations (US-68) remain gated separately.
+
+#### Open Mode & Per-Module Support
+- Each item in `changed_lines` supports an optional `module_id` string (`{ "line": 2, "module_id": "mod_entry" }`).
+- `diff_modules_changed_lines()` in `app/diff.py` separates highlights by module and aggregates removed-line counts across modules.
+- **Upstream Dependency:** Currently, `execution-service` dispatches only the primary entry file content in `current_run.code`. Supporting multi-module Open mode highlights end-to-end requires `execution-service` to pass an array of module files or `module_id`.
+
+#### Asynchronous Delivery & Audience (NFR9, CR08)
+- Slowdown analysis and changed-line highlights are delivered asynchronously after sandbox execution completes.
+- The result is pushed via WebSocket `analysis-result` with `task: "slowdown"`, preserving the original run's visibility (room audience in Pair mode; private runner in Open mode). Execution is never delayed.
 
 ### Configurable Limits & Request-Level Override Validation (DR3 / US-16 / US-68)
 Each threshold is read from environment configuration without hard-coding:
